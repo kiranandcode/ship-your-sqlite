@@ -41,7 +41,7 @@ siblings for TinyCC and libtommath.
   - prepare-time name resolution, and the core, math, printf, date/time and JSON/JSONB function libraries.
 - **Differential results** against `sqlite3`:
   - `tests/sem` + `tests/sql`: all 64 scripts agree;
-  - sqllogictest: `select1`–`select3` and `evidence/` agree on all 5,653 queries;
+  - sqllogictest: `select1`–`select5` and `evidence/` agree on all 9,219 queries;
   - REAL rendering: 0 mismatches on 1.6M doubles;
   - printf/round/quote: 0 in 1.8M random calls;
   - date/time: 0 in 181k;
