@@ -873,7 +873,7 @@ def callFnST (fuel : Nat) (q : QEnv) (n : Name) (args : List Expr) (_distinct : 
       match Printf.scalar? n.toLower vs with
       | some r => lift r
       | none =>
-      match DateTime.scalar? {} n.toLower vs with
+      match DateTime.scalar? { unixMs := (← get).choices.clockMs } n.toLower vs with
       | some r => lift r
       | none =>
         let v ← (try scalarFn fuel n vs (args.map fun a => exprColl q.env a) catch e => throw (fixName e))

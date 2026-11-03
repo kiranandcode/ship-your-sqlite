@@ -75,6 +75,9 @@ structure Choices where
   /-- the `n`-th candidate of the random rowid SQLite picks after rowid
       2^63−1 (taken modulo 2^63) -/
   rowid : Nat → Nat := fun k => (k * 2862933555777941757 + 3037000493) % 2 ^ 63
+  /-- the time 'now' reads, in milliseconds since the Unix epoch (the
+      external model's clock, `Run.World.clock`, is a parameter likewise) -/
+  clockMs : Int := 0
   deriving Inhabited
 
 structure Ctx where

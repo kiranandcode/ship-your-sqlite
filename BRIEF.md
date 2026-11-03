@@ -47,10 +47,19 @@ The pilot slice exists only to stand the pipeline up.
 ## The theorem we are after
 
 ```
-theorem sqlite_refines :
-    ∀ script, Admissible script →
-      ∀ out, ClightRuns sqliteProg (input script) out ↔ Sql.Derives script out
+structure Refines (p : CC.Program) : Prop where
+  terminates : ∀ script, Admissible script → ∃ out, ClightRuns p script out
+  sound : ∀ script, Admissible script → ∀ out, ClightRuns p script out → Sql.Derives script out
+
+theorem sqlite_refines : Refines Sqlprog.prog
 ```
+
+(`Spec/Refines.lean`.) Not an `↔`: `Sql.Derives` is nondeterministic where SQL
+leaves the choice to the implementation (row order without ORDER BY, ties,
+group representatives, `random()`, the clock; `Sql.Choices`), while the
+program is deterministic, so the program's output is one of the derived
+outputs. `terminates` with `sound` says the program has an output and every
+output it has is derived.
 
 - `sqliteProg` is the Lean Clight program `clightgen -lean` produces from the
   pinned `sqlite3.c` linked with our fixed driver `c/driver.c` (reads a script,
@@ -61,9 +70,10 @@ theorem sqlite_refines :
   an axiom), and `out` the bytes the driver writes.
 - `Sql.Derives` is our SQL semantics (`Sql/`), executable as `Sql.run` so that
   it can be differentially tested against `sqlite3`.
-- `Admissible` collects the honest premises: enough memory, limits
-  (`SQLITE_MAX_*`) not hit, no I/O failure. Each is a named field of a
-  structure, documented with what discharges it.
+- `Admissible` collects the honest premises, each a named field of a
+  structure documented with what removes it: no EXPLAIN (pending decision),
+  in-memory databases only (no file system model yet), no VACUUM, statements of
+  at most 500 tokens (SQLite's parser limits are not modelled).
 
 Until it is proved it is `def SqliteRefines_Statement : Prop` in PHASES.md.
 

@@ -142,7 +142,7 @@ SQL to VDBE bytecode and runs it over a B-tree. Three layers, one theorem:
 
 | step | exit criterion | status |
 |---|---|---|
-| 3.1 statement | `SqliteRefines_Statement` stated in Lean, with `Admissible` as a named-field structure; external model as a parameter (D6) | |
+| 3.1 statement | `SqliteRefines_Statement` stated in Lean, with `Admissible` as a named-field structure; external model as a parameter (D6) | stated (`Spec/Refines.lean`): `Refines p` has fields `terminates` and `sound` (not an ↔: `Derives` is nondeterministic, the program deterministic); `Admissible` has fields `noExplain` (decision 2 pending), `memoryDatabasesOnly`, `noVacuum`, `statementSize` (≤ 500 tokens, for the unmodelled parser limits). **False as stated** on the scripts of BUGS.md #3 until decision 1 (a fourth extension for x86's float→int conversion, or a premise). The clock is a choice (`Choices.clockMs`), as is the external model's `World.clock` |
 | 3.2 pilot proof | one end-to-end instance on a fixed small script, to measure the per-function cost | |
 | 3.3 coverage | the proof column of the coverage table reaches all functions | |
 
@@ -150,7 +150,7 @@ SQL to VDBE bytecode and runs it over a B-tree. Three layers, one theorem:
 
 | name | file | statement | status |
 |---|---|---|---|
-| `SqliteRefines_Statement` | (3.1) | BRIEF.md | not stated |
+| `SqliteRefines_Statement` | `Spec/Refines.lean` | `Refines Sqlprog.prog` (BRIEF.md) | stated; open; false on BUGS.md #3 until decision 1 |
 
 ## Gaps (reductions to close)
 
