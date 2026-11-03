@@ -1,0 +1,28 @@
+-- table-valued pragma_<name>() forms and module_list
+pragma module_list;
+select * from pragma_module_list;
+select * from json_each('[1]'); pragma module_list;
+select * from json_tree('[1]'); select * from jsonb_each('[1]'); pragma module_list;
+select * from pragma_table_info('x'); pragma module_list; select * from pragma_nosuch;
+select * from pragma_cache_size; select * from pragma_user_version; pragma module_list;
+pragma pragma_list;
+select * from pragma_foreign_key_check; select * from pragma_foreign_key_check('x'); pragma module_list;
+select * from pragma_page_size; select * from pragma_page_count; select * from pragma_freelist_count; select * from pragma_encoding;
+select * from pragma_journal_mode; select * from pragma_locking_mode; select * from pragma_synchronous;
+select * from pragma_optimize; select * from pragma_integrity_check('t'); select * from pragma_quick_check(3);
+select * from pragma_collation_list;
+create table t(a); select *, arg, schema from pragma_index_list('t'); select arg from pragma_cache_size;
+select * from pragma_table_info('t', 'nosuch');
+create table t(a); select * from pragma_table_info('t', 'temp'); select * from pragma_table_info('t', 'main'); select * from pragma_table_info(null);
+create table t(a); select * from main.pragma_table_info('t'); select * from temp.pragma_table_info('t');
+select * from pragma_application_id; select * from pragma_application_id(3); select * from pragma_busy_timeout(5); pragma busy_timeout;
+select * from pragma_foreign_keys(1); pragma foreign_keys;
+select * from pragma_case_sensitive_like;
+select * from pragma_schema_version; select * from pragma_data_version;
+select * from pragma_function_list where name = 'abs';
+select * from pragma_function_list limit 5;
+select count(*) from pragma_compile_options where compile_options not like 'ATOMIC%' and compile_options not like 'COMPILER%';
+select * from pragma_compile_options where compile_options like 'MAX%' order by 1;
+select sqlite_compileoption_used('THREADSAFE'), sqlite_compileoption_used('sqlite_threadsafe=1'), sqlite_compileoption_used('THREAD'), sqlite_compileoption_used('ENABLE_MATH_FUNCTIONS'), sqlite_compileoption_used(null), sqlite_compileoption_get(-1), sqlite_compileoption_get(1000), sqlite_compileoption_used(5), sqlite_compileoption_used('max_attached'), sqlite_compileoption_used('MAX_ATTACHED=10'), sqlite_compileoption_used('MAX_ATTACHED=1');
+select * from pragma_function_list where name in ('like', 'match', 'abs') order by 1, 5; pragma case_sensitive_like=1; select * from pragma_function_list where name in ('like', 'match') order by 1, 5; select count(*) from pragma_function_list;
+select * from pragma_module_list order by 1;

@@ -219,7 +219,7 @@ select 'fullfsync'; pragma fullfsync;
 select 'fullfsync=0'; pragma fullfsync=0;
 select 'fullfsync'; pragma fullfsync;
 select 'hard_heap_limit'; pragma hard_heap_limit;
-select 'hard_heap_limit=3'; pragma hard_heap_limit=3;
+select 'hard_heap_limit=300000000'; pragma hard_heap_limit=300000000;
 select 'hard_heap_limit'; pragma hard_heap_limit;
 select 'hard_heap_limit=on'; pragma hard_heap_limit='on';
 select 'hard_heap_limit'; pragma hard_heap_limit;

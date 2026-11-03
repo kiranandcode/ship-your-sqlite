@@ -108,7 +108,22 @@ structure Schema where
   objs : Array SchemaObj := #[]
   /-- `sqlite_sequence`: largest rowid used by each AUTOINCREMENT table -/
   seq : List (Name × Int) := []
-  userVersion : Int := 0
+  /-- The database headers and pager sizes of every database (`Sql.Pragma`),
+      keyed `<db>.<name>` with `<db>` the lower-case database name:
+      `schema_version`, `user_version`, `application_id`, `default_cache_size`
+      (header cookies) and `$pages`, `$free` (page and freelist counts).
+      Absent means 0. Part of the schema so that ROLLBACK restores them, as it
+      restores SQLite's database header. -/
+  cookies : List (String × Int) := []
+  deriving Inhabited
+
+/-- The iteration order of a schema's table hash (`Schema.tblHash` of
+    SQLite's hash.c: tables and views by name), which `PRAGMA table_list`,
+    `foreign_key_check` and `integrity_check` expose: the keys in list order
+    and the number of buckets. Maintained by `Sql.Pragma`. -/
+structure TblHash where
+  keys : List String := []
+  htsize : Nat := 0
   deriving Inhabited
 
 structure Pragmas where
@@ -134,9 +149,17 @@ structure Db where
   attached : List Name := []
   /-- state of the executable's stand-in for SQLite's PRNG (`random()`) -/
   prng : Nat := 0
-  /-- the schema cookie (`PRAGMA schema_version`) -/
-  schemaVersion : Int := 0
+  /-- the table hash of each loaded schema, by lower-case database name;
+      absent: the schema is (re)loaded from `sqlite_schema` when next needed -/
+  tblHash : List (String × TblHash) := []
   deriving Inhabited
+
+/-- A header cookie of a database (see `Schema.cookies`). -/
+def Db.cookie (db : Db) (dbName key : String) : Int :=
+  ((db.main.cookies.find? (·.1 == dbName.toLower ++ "." ++ key)).map (·.2)).getD 0
+
+/-- The schema cookie of `main` (`PRAGMA schema_version`). -/
+def Db.schemaVersion (db : Db) : Int := db.cookie "main" "schema_version"
 
 namespace Schema
 

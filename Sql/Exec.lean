@@ -31,6 +31,15 @@ def isIntegerType (t : String) : Bool := t.trimAscii.toString.toUpper == "INTEGE
 
 def strictTypes : List String := ["INT", "INTEGER", "REAL", "TEXT", "BLOB", "ANY"]
 
+/-- `sqlite3AddColumn`: a type ending in `ALWAYS` (or `GENERATED ALWAYS`) is
+    the start of a generated-column clause, not part of the type. -/
+def stripGeneratedAlways (ty : String) : String :=
+  let low := ty.toLower
+  if ty.length ≥ 16 && low.endsWith "always" then
+    let t := ((ty.dropEnd 6).trimAsciiEnd).toString
+    if t.length ≥ 9 && t.toLower.endsWith "generated" then ((t.dropEnd 9).trimAsciiEnd).toString else t
+  else ty
+
 def mkTable (name : Name) (cols : List ColumnDef) (cons : List (Option Name × TableConstraint))
     (withoutRowid strict : Bool) (sql : String) : M Table := do
   let mut cs : Array Column := #[]
@@ -39,7 +48,7 @@ def mkTable (name : Name) (cols : List ColumnDef) (cons : List (Option Name × T
     if strict && !(strictTypes.contains cd.type.trimAscii.toString.toUpper) then
       if cd.type.trimAscii.toString.isEmpty then err s!"missing datatype for {name}.{cd.name}"
       err s!"unknown datatype for {name}.{cd.name}: \"{cd.type}\""
-    let ty := cd.type.trimAscii.toString
+    let ty := stripGeneratedAlways cd.type.trimAscii.toString
     let ty := if strictTypes.contains ty.toUpper then ty.toUpper else P.unquote ty
     let mut c : Column := { name := cd.name, type := ty, aff := affinityOfType ty }
     for (_, k) in cd.constraints do
@@ -182,7 +191,7 @@ def checkRow (t : Table) (r : Row) : M Unit := do
     let c := t.cols[i]
     if c.notNull && (r.vals[i]?.getD .null).isNull then
       err s!"NOT NULL constraint failed: {t.name}.{c.name}" SQLITE_CONSTRAINT_NOTNULL
-  for (nm, e) in t.checks do
+  for (nm, e) in (if Pragma.flag (← getDb) "ignore_check_constraints" then [] else t.checks) do
     let v ← evalExpr (qOfRow t r) e
     if truth v == some false then
       err s!"CHECK constraint failed: {nm.getD ""}" SQLITE_CONSTRAINT_CHECK
@@ -825,14 +834,14 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
         setDb { db with savepoints := [], inTxn := false }
       else setDb { db with savepoints := rest }
       return #[]
-  | .pragma sch name arg call =>
+  | .pragma sch name arg _ =>
     let argV ← match arg with
-      | some e => some <$> evalExpr q (match e with | .col none none n => .lit (.ofString n) | x => x)
+      | some (.lit v) => pure (some v)
+      | some e => some <$> evalExpr q e
       | none => pure none
-    match Pragma.run (← getDb) sch name.toLower argV call with
-    | some (.ok (db', rows)) => setDb db'; return rows
-    | some (.error e) => throw e
-    | none => execPragma q name arg
+    match Pragma.runWith (← viewCols) (← getDb) sch name argV with
+    | .ok (db', rows) => setDb db'; return rows
+    | .error e => throw e
   | .alterAddColumn _ tname cd txt =>
     let t ← currentTable tname
     if t.cols.any (nameEq ·.name cd.name) then err s!"duplicate column name: {cd.name}"
@@ -1040,44 +1049,6 @@ partial def runViewTriggers (q : QEnv) (vname : Name) (ev : TriggerEvent) (old n
       let r ← try (some <$> execStmt qt st) catch e => if e.code == 0 then pure none else throw e
       if r.isNone then break
 
-partial def execPragma (q : QEnv) (name : Name) (arg : Option Expr) : M (Array (Array Value)) := do
-  let db ← getDb
-  let argV ← match arg with
-    | some e => some <$> evalExpr q (match e with | .col none none n => .lit (.ofString n) | x => x)
-    | none => pure none
-  let boolArg (v : Value) : Bool :=
-    match v with
-    | .text s => let u := (String.fromUTF8! s).toLower; u == "on" || u == "yes" || u == "true" || u == "1"
-    | w => truth w == some true
-  match name.toLower with
-  | "user_version" =>
-    match argV with
-    | some v => modifyMain (fun s => { s with userVersion := v.numeric.toInt }); return #[]
-    | none => return #[#[.int db.main.userVersion]]
-  | "foreign_keys" =>
-    match argV with
-    | some v => setDb { db with pragmas := { db.pragmas with foreignKeys := boolArg v } }; return #[]
-    | none => return #[#[.int (if db.pragmas.foreignKeys then 1 else 0)]]
-  | "case_sensitive_like" =>
-    if let some v := argV then setDb { db with pragmas := { db.pragmas with caseSensitiveLike := boolArg v } }
-    return #[]
-  | "recursive_triggers" =>
-    match argV with
-    | some v => setDb { db with pragmas := { db.pragmas with recursiveTriggers := boolArg v } }; return #[]
-    | none => return #[#[.int (if db.pragmas.recursiveTriggers then 1 else 0)]]
-  | "integrity_check" | "quick_check" => return #[#[.ofString "ok"]]
-  | "table_info" | "table_xinfo" =>
-    let some v := argV | return #[]
-    let tn := String.fromUTF8! (textOf v)
-    match db.main.findTable tn with
-    | none => return #[]
-    | some t =>
-      return t.cols.mapIdx fun i c =>
-        #[.int i, .ofString c.name, .ofString c.type, .int (if c.notNull then 1 else 0),
-          (match c.dflt with | some _ => .ofString "?" | none => .null),
-          .int (match t.pk.findIdx? (· == i) with | some k => k + 1 | none => 0)]
-  | _ => return #[]
-
 /-- Run the triggers of `table` for an event at a time. -/
 partial def runTriggers (q : QEnv) (time : TriggerTime) (ev : TriggerEvent) (table : Name)
     (old new : Option Row) : M Unit := do
@@ -1113,6 +1084,10 @@ def runStmt (s : Stmt) : M (Except Err (Array (Array Value))) := do
     staticStmt s
     let rows ← execStmt {} s
     let db ← getDb
+    -- PRAGMA query_only: a statement that opens a write transaction fails
+    -- (after the errors of prepare, which the executor finds while running)
+    if Pragma.flag saved.db "query_only" && Pragma.writes saved.db db s then
+      throw { code := Pragma.SQLITE_READONLY, msg := "attempt to write a readonly database" }
     -- immediate foreign keys: the violation counter at the end of the statement
     if db.pragmas.foreignKeys then
       let isDml := match s with | .insert .. | .update .. | .delete .. => true | _ => false
@@ -1121,11 +1096,17 @@ def runStmt (s : Stmt) : M (Except Err (Array (Array Value))) := do
         let counted := match s with | .delete .. => db.changes | _ => 0
         set { saved with db := { saved.db with changes := 0, totalChanges := saved.db.totalChanges + counted } }
         return .error { code := SQLITE_CONSTRAINT_FOREIGNKEY, msg := "FOREIGN KEY constraint failed" }
+    -- schema cookie, pages, table hash order (Sql.Pragma)
+    setDb (Pragma.afterStmt saved.db (← getDb) s)
+    -- PRAGMA count_changes: DML without RETURNING returns the number of changes
+    if Pragma.flag db "count_changes" && Pragma.countsChanges s then return .ok #[#[.int db.changes]]
     return .ok rows
   catch e =>
     if !e.keep then
       -- a failed statement changes nothing, and changes() becomes 0
-      set { saved with db := { saved.db with changes := 0 } }
+      -- (the eponymous virtual tables it named stay registered)
+      let failed ← getDb
+      set { saved with db := Pragma.keepModules failed { saved.db with changes := 0 } }
     return .error e
 
 /-- Run a script as the driver does: statement by statement, printing rows and errors. -/

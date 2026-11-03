@@ -7,6 +7,7 @@ import Sql.Query
 import Sql.Printf
 import Sql.DateTime
 import Sql.Json
+import Sql.Pragma
 
 namespace Sql
 
@@ -888,6 +889,17 @@ partial def scalarFn (n : Name) (vs : List Value) (colls : List (Option (Coll ×
     return .blob ⟨Array.replicate n.toNat 0⟩
   | "likelihood" | "likely" | "unlikely" => return a0
   | "sqlite_version" => return .ofString "3.54.1"
+  -- the options of the ccomp build, which the Clight export is (Sql.PragmaData)
+  | "sqlite_compileoption_used" =>
+    if nargs != 1 then wrong
+    match a0.toText? with
+    | some b => return .int (if Pragma.compileOptionUsed b.toList then 1 else 0)
+    | none => return .null
+  | "sqlite_compileoption_get" =>
+    if nargs != 1 then wrong
+    match Pragma.compileOptionGet a0.toInt with
+    | some o => return .ofString o
+    | none => return .null
   | "sqlite_source_id" => return .ofString "2026-10-16 14:45:20 555e07ef33f69a0957d24d8e555b702464a131d6f1607f4c3c1e4551e8e6ca76"
   -- random(), randomblob(N): SQLite's PRNG; the semantics allows any value
   -- (Phase 2.5 states this as a choice); this executable draws from a counter
@@ -1239,6 +1251,8 @@ partial def namedSource (q : QEnv) (sch : Option Name) (n : Name) (alias : Name)
     let rows := schemaRows db which
     let cols : Array ColMeta := #["type", "name", "tbl_name", "rootpage", "sql"].map fun c => ⟨c, none, .binary⟩
     return (metaSrc alias cols, rows.mapIdx fun i r => ({ rowid := i + 1, vals := r } : Row))
+  if n.toLower.startsWith "pragma_" then
+    return (← tableFnSrc n (some alias), ← tableFunction n [])
   err s!"no such table: {n}"
 
 /-- Rows of `sqlite_schema` (or `sqlite_temp_schema`): tables and indexes take
@@ -1417,18 +1431,39 @@ partial def evalFrom (q : QEnv) : FromItem → M (Array Src × Array (Array Cur)
     let srcs'' := if kind == .right || kind == .full then srcs else srcs'
     return (srcs'', out)
 
+/-- The columns of views for `Sql.Pragma`: their SELECT run on the current state. -/
+partial def viewCols : M Pragma.ViewCols := do
+  let ctx ← get
+  return fun v => match ((runSelect {} v.q).run).run ctx with
+    | (.ok (cols, _), _) => .ok (cols.map fun c => (c.name, c.aff))
+    | (.error e, _) => .error e
+
 /-- The source of a table-valued function (its columns; `json` and `root` of
-    json_each/json_tree are hidden). -/
+    json_each/json_tree are hidden, as are `arg` and `schema` of the
+    pragma_<name> tables). -/
 partial def tableFnSrc (n : Name) (alias : Option Name) : M Src := do
   if Json.tableFns.contains n.toLower then
+    modify fun c => { c with db := Pragma.registerModule c.db n }
     let cols : Array ColMeta := Json.eachColumns.toArray.map fun c => ⟨c, none, .binary⟩
     return { metaSrc (alias.getD n) cols with hiddenStar := [8, 9] }
+  if let some (cols, nVisible) := Pragma.vtabColumns n then
+    modify fun c => { c with db := Pragma.registerModule c.db n }
+    let cols : Array ColMeta := cols.toArray.map fun c => ⟨c, none, .binary⟩
+    return { metaSrc (alias.getD n) cols with hiddenStar := (List.range cols.size).drop nVisible }
   err s!"no such table: {n}"
 
 /-- The rows of a table-valued function. -/
 partial def tableFunction (n : Name) (argsJ : List (Value × Bool)) : M (Array Row) := do
+  -- pragma_<name>(arg, schema): the eponymous virtual tables of pragma.c
+  match Pragma.tableValued (← viewCols) (← getDb) n (argsJ.map (·.1)) with
+  | some (.ok (db', rows)) =>
+    modify fun c => { c with db := db' }
+    return rows.mapIdx fun i vs => { rowid := i + 1, vals := vs }
+  | some (.error e) => throw e
+  | none =>
   match Json.tableFnST? n.toLower argsJ with
   | some (.ok (_, rows)) =>
+    modify fun c => { c with db := Pragma.registerModule c.db n }
     return rows.toArray.mapIdx fun i (vs, j) => { rowid := i + 1, vals := vs.toArray, jsonCols := if j then [1] else [] }
   | some (.error e) => throw e
   | none => err s!"no such table: {n}"
