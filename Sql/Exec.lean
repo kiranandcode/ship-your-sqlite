@@ -1118,9 +1118,18 @@ partial def runScript (src : ByteArray) : ByteArray := Id.run do
   let mut ctx : Ctx := { db := {} }
   let mut pos := 0
   let mut fuel := src.size + 1
+  -- the script is tokenized once; a statement starts at the first token at or
+  -- after its byte offset, unless the offset falls inside a token (after the
+  -- driver's skip to the next ';'), when the rest is tokenized again from there
+  let mut toks := tokenize src 0
+  let mut ti := 0
   while fuel > 0 do
     fuel := fuel - 1
-    match parseNext src pos with
+    while ti < toks.size && toks[ti]!.start < pos do ti := ti + 1
+    if ti > 0 && toks[ti - 1]!.stop > pos then
+      toks := toks.extract 0 (ti - 1) ++ tokenize src pos
+      ti := ti - 1
+    match parseNextTok src toks ti with
     | .empty => break
     | .error msg tail =>
       out := out ++ renderErr { code := SQLITE_ERROR, msg }

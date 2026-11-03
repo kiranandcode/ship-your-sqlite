@@ -477,14 +477,14 @@ inductive Prepared where
   | ok (s : Stmt) (tail : Nat)
   | error (msg : String) (tail : Nat)
 
-/-- Prepare the statement starting at byte `start` of `src`. -/
-def parseNext (src : ByteArray) (start : Nat) : Prepared :=
-  let toks := tokenize src start
+/-- Prepare the statement starting at token `i0` of `toks`, the tokens of `src`
+    (as `tokenize` gives them from the statement's start). -/
+def parseNextTok (src : ByteArray) (toks : Array Token) (i0 : Nat) : Prepared :=
   -- leading semicolons are empty statements
   let rec skipSemis (i : Nat) : Nat :=
     if h : i < toks.size then (if toks[i].tk == .op "SEMI" then skipSemis (i + 1) else i) else i
   termination_by toks.size - i
-  let i := skipSemis 0
+  let i := skipSemis i0
   if i ≥ toks.size then .empty else
   let st : PState := { src, toks, pos := i }
   match (do
@@ -495,5 +495,9 @@ def parseNext (src : ByteArray) (start : Nat) : Prepared :=
       | some t => if t.tk == .op "SEMI" then advance; pure (s, t.stop) else failHere : P (Stmt × Nat)).run st with
   | .ok ((s, tail), _) => .ok s tail
   | .error e => .error e.msg e.tail
+
+/-- Prepare the statement starting at byte `start` of `src`. -/
+def parseNext (src : ByteArray) (start : Nat) : Prepared :=
+  parseNextTok src (tokenize src start) 0
 
 end Sql
