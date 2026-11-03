@@ -838,6 +838,8 @@ partial def scalarFn (n : Name) (vs : List Value) (colls : List (Option (Coll ×
     let y := a1.toInt
     match a0 with
     | .blob b =>
+      -- sqlite3_value_blob of an empty blob is a null pointer: no result
+      if b.size == 0 then return .null
       let units := b.toList.map ([·])
       return .blob ⟨((substrOf units y z).flatten).toArray⟩
     | _ =>

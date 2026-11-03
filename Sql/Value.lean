@@ -399,8 +399,10 @@ def arith (op : ArithOp) (a b : Value) : Value :=
     | .mul => realResult (ra * rb)
     | .div => if rb == 0.0 then .null else realResult (ra / rb)
     | .rem =>
-      let ia := realToInt ra
-      let ib := realToInt rb
+      -- fp_math's remainder re-reads the operands with sqlite3VdbeIntValue
+      -- (a text gives its integer prefix)
+      let ia := a.toInt
+      let ib := b.toInt
       if ib == 0 then .null else
       let ib := if ib == -1 then 1 else ib
       realResult (intToReal (ia.tmod ib))
