@@ -610,7 +610,7 @@ def format (fmt0 : ByteArray) (args : Array Value) : Option ByteArray := Id.run 
 
 /-! ## The SQL functions -/
 
-def tooBig : Err := ⟨SQLITE_TOOBIG, "string or blob too big"⟩
+def tooBig : Err := { code := SQLITE_TOOBIG, msg := "string or blob too big" }
 
 /-- `printf(fmt, args…)` / `format(…)`: `none` if this module does not implement `name`. -/
 def scalar? (name : String) (args : List Value) : Option (Except Err Value) :=
