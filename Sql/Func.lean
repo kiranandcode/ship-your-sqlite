@@ -27,28 +27,25 @@ def quoteValue : Value → String
     "'" ++ String.intercalate "''" (t.splitOn "'") ++ "'"
   | .blob b => "X'" ++ hexOf b ++ "'"
 
-/-- substr(X, Y, Z) on characters (text) or bytes (blob), with SQLite's rules
-    for zero and negative positions and lengths. -/
+/-- substr(X, Y, Z) on characters (text) or bytes (blob): substrFunc's
+    arithmetic, with Z absent being LARGEST_INT64. -/
 def substrOf (units : List (List UInt8)) (y : Int) (z : Option Int) : List (List UInt8) :=
-  let n : Int := units.length
-  let (start, len) : Int × Int := Id.run do
+  let len : Int := units.length
+  let (p1, p2) : Int × Int := Id.run do
     let mut p1 := y
-    let mut p2 : Int := z.getD 1000000000   -- no length: SQLITE_LIMIT_LENGTH
-    let neg := p2 < 0
-    if neg then p2 := -p2
+    let mut p2 : Int := z.getD (2 ^ 63 - 1)
     if p1 < 0 then
-      p1 := p1 + n
+      p1 := p1 + len
       if p1 < 0 then
-        p2 := p2 + p1
-        if p2 < 0 then p2 := 0
+        if p2 < 0 then p2 := 0 else p2 := p2 + p1
         p1 := 0
     else if p1 > 0 then p1 := p1 - 1
     else if p2 > 0 then p2 := p2 - 1
-    if neg then
+    if p2 < 0 then
+      if p2 < -p1 then p2 := p1 else p2 := -p2
       p1 := p1 - p2
-      if p1 < 0 then p2 := p2 + p1; p1 := 0
     return (p1, p2)
-  (units.drop start.toNat).take len.toNat
+  (units.drop p1.toNat).take p2.toNat
 
 def trimBy (s : List (List UInt8)) (set : List (List UInt8)) (left right : Bool) : List (List UInt8) :=
   let s := if left then s.dropWhile (set.contains ·) else s

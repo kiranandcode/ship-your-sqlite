@@ -1,0 +1,1 @@
+select substr('9.2233720368547758e+18', '-9223372036854775808'), substr('abcdef', -2, -3), substr('abcdef', 3, -2), substr('abcdef', 0, 3), substr('abcdef', -10, 4), substr('abc', 2, -5), substr(x'010203', -1), substr('abcdef', 2, 9223372036854775807), substr('abc', -9223372036854775808, 5), substr('abc', 0), substr('abc', null), substr('abc', 1, null);
