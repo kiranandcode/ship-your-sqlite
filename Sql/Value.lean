@@ -54,7 +54,9 @@ structure AtoF where
 
 def bound : Nat := (2 ^ 64 - 1 - 9) / 10
 
-def atof (z : ByteArray) : AtoF := Id.run do
+def atof (z0 : ByteArray) : AtoF := Id.run do
+  -- the text is read as a C string, up to its first NUL
+  let z : ByteArray := ⟨(z0.data.toList.takeWhile (· != 0)).toArray⟩
   let n := z.size
   let at_ (k : Nat) : UInt8 := if k < n then z[k]! else 0
   let mut i := 0
@@ -108,7 +110,8 @@ def atof (z : ByteArray) : AtoF := Id.run do
 
 /-- `sqlite3Atoi64`: the integer of the text when it is an integer literal
     (optional whitespace and sign) that fits in 64 bits; `none` otherwise. -/
-def atoi64 (z : ByteArray) : Option Int := Id.run do
+def atoi64 (z0 : ByteArray) : Option Int := Id.run do
+  let z : ByteArray := ⟨(z0.data.toList.takeWhile (· != 0)).toArray⟩
   let n := z.size
   let at_ (k : Nat) : UInt8 := if k < n then z[k]! else 0
   let mut i := 0
@@ -125,9 +128,46 @@ def atoi64 (z : ByteArray) : Option Int := Id.run do
   let x : Int := if neg then -(v : Int) else v
   return if inI64 x then some x else none
 
+/-- `sqlite3Atoi64` over all the bytes of the text: the result code (-1 no
+    digits, 0 an exact integer, 1 trailing non-space text, 2 overflow, 3
+    exactly 2^63 without a minus sign) and the value (clamped on overflow). -/
+def atoi64Code (z : ByteArray) : Int × Int := Id.run do
+  let n := z.size
+  let at_ (k : Nat) : UInt8 := if k < n then z[k]! else 0
+  let mut i := 0
+  while i < n && isSpaceV (at_ i) do i := i + 1
+  let mut neg := false
+  if i < n && at_ i == 45 then neg := true; i := i + 1
+  else if i < n && at_ i == 43 then i := i + 1
+  let start := i
+  while i < n && at_ i == 48 do i := i + 1
+  let digitsStart := i
+  let mut u : Nat := 0
+  while i < n && (digitB (at_ i)).isSome do u := u * 10 + (digitB (at_ i)).get!; i := i + 1
+  let nd := i - digitsStart
+  let mut rc : Int := 0
+  if nd == 0 && start == digitsStart then rc := -1
+  else if i < n then
+    let mut jj := i
+    while jj < n do
+      if !isSpaceV (at_ jj) then rc := 1; break
+      jj := jj + 1
+  let v : Int := if neg then -(u : Int) else u
+  if nd < 19 then return (rc, v)
+  if u < 2 ^ 63 then return (rc, v)
+  let clamp : Int := if neg then minI64 else maxI64
+  if u > 2 ^ 63 then return (2, clamp)
+  return (if neg then rc else 3, if neg then minI64 else maxI64)
+
+/-- `sqlite3RealSameAsInt` -/
+def realSameAsInt (r : Float) (i : Int) : Bool :=
+  r == 0.0 || (Real.bits r == Real.bits (Real.roundScaled i.natAbs false 0 |> fun x => if i < 0 then -x else x)
+               && i ≥ -2251799813685248 && i < 2251799813685248)
+
 /-- The integer prefix of a text, as `CAST(x AS INTEGER)` reads it
     (`sqlite3Atoi64` with trailing text allowed; out of range clamps). -/
-def atoiPrefix (z : ByteArray) : Int := Id.run do
+def atoiPrefix (z0 : ByteArray) : Int := Id.run do
+  let z : ByteArray := ⟨(z0.data.toList.takeWhile (· != 0)).toArray⟩
   let n := z.size
   let at_ (k : Nat) : UInt8 := if k < n then z[k]! else 0
   let mut i := 0
@@ -187,17 +227,24 @@ def Value.toText? : Value → Option ByteArray
     fits, else a REAL if it is a number, else unchanged. `tryInt`: a REAL
     that is exactly an integer becomes the integer (NUMERIC, INTEGER). -/
 def numericOfText (s : ByteArray) (tryInt : Bool) : Option Value :=
+  -- applyNumericAffinity: sqlite3AtoF on the text read as a C string must
+  -- accept all of it; then alsoAnInt
   let a := atof s
-  if !a.whole then none
+  if !(a.whole && a.digit) then none
   else if !a.frac then
-    match atoi64 s with
-    | some i => some (.int i)
-    | none => some (.real a.value)
-  else if tryInt then
-    match realAsInt a.value with
-    | some i => some (.int i)
-    | none => some (.real a.value)
-  else some (.real a.value)
+    let iv := realToInt a.value
+    if realSameAsInt a.value iv then some (.int iv)
+    else match atoi64Code s with
+      | (0, i) => some (.int i)
+      | _ => real a.value
+  else real a.value
+where
+  real (r : Float) : Option Value :=
+    if tryInt then
+      match realAsInt r with
+      | some i => some (.int i)
+      | none => some (.real r)
+    else some (.real r)
 
 /-- Apply a column affinity to a value being stored or compared. -/
 def applyAffinity (aff : Aff) (v : Value) : Value :=
@@ -220,22 +267,15 @@ def applyAffinity (aff : Aff) (v : Value) : Value :=
     a text or blob is read as its longest numeric prefix; NULL stays NULL. -/
 def Value.numeric : Value → Value
   | .text s | .blob s =>
+    -- computeNumericType: sqlite3AtoF reads a C string; the integer test is
+    -- sqlite3Atoi64 over all the bytes
     let a := atof s
-    if !a.digit then .int 0
-    else if !a.frac then
-      -- an integer prefix: the integer if it fits, else the double
-      match atoi64 (s.extract 0 (prefixLen s)) with
-      | some i => .int i
-      | none => .real a.value
+    let (code, ix) := atoi64Code s
+    if !(a.whole && a.digit) then
+      if !a.frac && code ≤ 1 then .int ix else .real a.value
+    else if !a.frac && code == 0 then .int ix
     else .real a.value
   | v => v
-where
-  prefixLen (s : ByteArray) : Nat := Id.run do
-    let mut i := 0
-    while i < s.size && isSpaceV s[i]! do i := i + 1
-    if i < s.size && (s[i]! == 45 || s[i]! == 43) then i := i + 1
-    while i < s.size && (digitB s[i]!).isSome do i := i + 1
-    return i
 
 def Value.toReal (v : Value) : Float :=
   match v.numeric with

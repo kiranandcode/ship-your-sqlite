@@ -230,7 +230,7 @@ def castValue (v : Value) (ty : String) : Value :=
         | some i => if a.frac then .int i else .real r
         | none => .real r
       | w => w
-  | .numeric, .real r => match realAsInt r with | some i => .int i | none => .real r
+  | .numeric, .real r => .real r   -- sqlite3VdbeMemNumerify keeps a REAL
   | .numeric, w => w
 
 /-! ## Bit operations -/

@@ -863,7 +863,14 @@ partial def scalarFn (n : Name) (vs : List Value) (colls : List (Option (Coll ×
     return .real ((Printf.round? a0.toReal digits).getD (roundTo a0.toReal digits))
   | "sign" =>
     if nargs != 1 then wrong
-    match mathArg a0 with
+    -- sqlite3_value_numeric_type: only an INTEGER or REAL (a TEXT after numeric affinity)
+    let nv := match a0 with
+      | .text t => (numericOfText t false).getD a0
+      | v => v
+    match nv with
+    | .int _ | .real _ => pure ()
+    | _ => return .null
+    match mathArg nv with
     | none => return .null
     | some r => return .int (if r > 0 then 1 else if r < 0 then -1 else 0)
   | "min" | "max" =>
@@ -1646,8 +1653,13 @@ partial def runSelect (q : QEnv) (sel : Select) : M (Array ColMeta × Array (Arr
             if !idx.contains k then
               idx := idx.insert k out.size
               out := out.push r
+          -- within this SELECT the first of equal rows wins; it replaces an
+          -- equal row from an earlier SELECT of the compound
+          let mut mine : Std.HashSet String := {}
           for r in rs do
             let k := canonKey colls r
+            if mine.contains k then continue
+            mine := mine.insert k
             match idx.get? k with
             | some i => out := out.set! i r
             | none =>

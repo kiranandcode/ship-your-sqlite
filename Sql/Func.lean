@@ -33,7 +33,7 @@ def substrOf (units : List (List UInt8)) (y : Int) (z : Option Int) : List (List
   let n : Int := units.length
   let (start, len) : Int × Int := Id.run do
     let mut p1 := y
-    let mut p2 : Int := z.getD (n + 1)   -- "to the end"
+    let mut p2 : Int := z.getD 1000000000   -- no length: SQLITE_LIMIT_LENGTH
     let neg := p2 < 0
     if neg then p2 := -p2
     if p1 < 0 then
