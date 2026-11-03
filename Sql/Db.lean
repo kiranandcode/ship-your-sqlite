@@ -150,6 +150,12 @@ end Schema
 structure Err where
   code : Nat
   msg : String
+  /-- where `sqlite3_prepare` stops for an error found while parsing (the end
+      of the lookahead token of the failing reduction); `none`: the end of the
+      statement -/
+  tail : Option Nat := none
+  /-- the statement's changes so far stay (ON CONFLICT FAIL) -/
+  keep : Bool := false
   deriving Inhabited
 
 def SQLITE_ERROR : Nat := 1

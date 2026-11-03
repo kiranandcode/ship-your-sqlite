@@ -41,7 +41,9 @@ def mkTable (name : Name) (cols : List ColumnDef) (cons : List (Option Name × T
     if strict && !(strictTypes.contains cd.type.trimAscii.toString.toUpper) then
       if cd.type.trimAscii.toString.isEmpty then err s!"missing datatype for {name}.{cd.name}"
       err s!"unknown datatype for {name}.{cd.name}: \"{cd.type}\""
-    let mut c : Column := { name := cd.name, type := cd.type, aff := affinityOfType cd.type }
+    let ty := cd.type.trimAscii.toString
+    let ty := if strictTypes.contains ty.toUpper then ty.toUpper else P.unquote ty
+    let mut c : Column := { name := cd.name, type := ty, aff := affinityOfType ty }
     for (_, k) in cd.constraints do
       match k with
       | .notNull oc => c := { c with notNull := true, notNullConflict := oc }
@@ -230,9 +232,13 @@ def insertRow (tname : Name) (vals : Array Value) (rowidV : Option Value) (oc : 
       | .null => pure (maxRowid + 1)
       | _ => err "datatype mismatch" SQLITE_MISMATCH
     | none => pure (maxRowid + 1)
-  let rid := if t.autoinc && rowidV.all (·.isNull) then
-      max (maxRowid + 1) (((db.main.seq.find? (nameEq ·.1 t.name)).map (·.2)).getD 0 + 1)
-    else rid
+  let seqOf (s : Schema) : Int :=
+    match s.findTable "sqlite_sequence" with
+    | some st => (st.rows.findSome? fun r => match r.vals[0]?, r.vals[1]? with
+        | some (Value.text n), some v => if nameEq (String.fromUTF8! n) t.name then some v.numeric.toInt else none
+        | _, _ => none).getD 0
+    | none => 0
+  let rid := if t.autoinc && rowidV.all (·.isNull) then max (maxRowid + 1) (seqOf db.main + 1) else rid
   if let some ci := t.rowidCol then vals := vals.set! ci (.int rid)
   let mut row ← withGenerated t ⟨rid, vals⟩
   -- NOT NULL with conflict resolution
@@ -268,8 +274,16 @@ def insertRow (tname : Name) (vals : Array Value) (rowidV : Option Value) (oc : 
   modifyMain fun s => s.setTable t'
   if t.autoinc then
     modifyMain fun s =>
-      let cur := ((s.seq.find? (nameEq ·.1 t.name)).map (·.2)).getD 0
-      { s with seq := (t.name, max cur rid) :: s.seq.filter (!nameEq ·.1 t.name) }
+      match s.findTable "sqlite_sequence" with
+      | none => s
+      | some st =>
+        let cur := seqOf s
+        let mine (r : Row) : Bool := match r.vals[0]? with
+          | some (Value.text n) => nameEq (String.fromUTF8! n) t.name | _ => false
+        let rows := if st.rows.any mine then
+            st.rows.map fun r => if mine r then { r with vals := r.vals.set! 1 (.int (max cur rid)) } else r
+          else st.rows.push ⟨(st.rows.foldl (fun m r => max m r.rowid) 0) + 1, #[.ofString t.name, .int (max cur rid)]⟩
+        s.setTable { st with rows }
   return some row
 
 def resultRows (q : QEnv) (t : Table) (alias : Name) (rows : Array Row) (ret : List ResultCol) :
@@ -283,6 +297,63 @@ def resultRows (q : QEnv) (t : Table) (alias : Name) (rows : Array Row) (ret : L
       | .expr e _ _ => some <$> evalExpr q' e
       | _ => pure none
 
+/-! ## Foreign keys -/
+
+/-- The parent columns of a foreign key: as named, or the parent's PRIMARY KEY. -/
+def fkParentCols (parent : Table) (fk : ForeignKey) : List (Option Nat) :=
+  if fk.parentCols.isEmpty then
+    match parent.rowidCol with
+    | some ci => [some ci]
+    | none => if parent.pk.isEmpty then [none] else parent.pk.map some
+  else fk.parentCols.map fun n =>
+    match parent.cols.toList.findIdx? (nameEq ·.name n) with
+    | some i => some i
+    | none => if isRowidName n then none else some 1000000
+
+/-- The parent key value at a column position (`none` = rowid). -/
+def parentVal (parent : Table) (r : Row) : Option Nat → Value
+  | some i => r.vals[i]?.getD .null
+  | none => .int r.rowid
+
+/-- Does a child key have a parent row? -/
+def hasParent (parent : Table) (fk : ForeignKey) (key : List Value) : Bool :=
+  let pcols := fkParentCols parent fk
+  parent.rows.any fun r =>
+    (key.zip pcols).all fun (v, pc) =>
+      let pv := parentVal parent r pc
+      let aff := match pc with | some i => (parent.cols[i]?.map (·.aff)) | none => some Aff.integer
+      let coll := match pc with | some i => ((parent.cols[i]?.map (·.coll)).getD .binary) | none => .binary
+      compareValues coll (cmpConvert aff v) pv == .eq
+
+/-- The number of child rows whose foreign key has no parent. -/
+def fkOrphans (db : Db) : Nat := Id.run do
+  let mut n := 0
+  for t in db.main.tables do
+    for fk in t.fks do
+      match db.main.findTable fk.parent with
+      | none => pure ()
+      | some parent =>
+        for r in t.rows do
+          let key := fk.cols.map fun i => r.vals[i]?.getD .null
+          if key.any (·.isNull) then continue
+          if !hasParent parent fk key then n := n + 1
+  return n
+
+/-- The child rows (table, row) referring to a parent row through a foreign key. -/
+def fkChildren (db : Db) (parentName : Name) (pr : Row) : List (Table × ForeignKey × Row) :=
+  match db.main.findTable parentName with
+  | none => []
+  | some parent =>
+    db.main.tables.flatMap fun t => t.fks.flatMap fun fk =>
+      if !nameEq fk.parent parentName then [] else
+      let pcols := fkParentCols parent fk
+      (t.rows.filter fun r =>
+        let key := fk.cols.map fun i => r.vals[i]?.getD .null
+        !(key.any (·.isNull)) &&
+        (key.zip pcols).all fun (v, pc) => compareValues .binary (cmpConvert (match pc with
+          | some i => parent.cols[i]?.map (·.aff) | none => some .integer) v) (parentVal parent pr pc) == .eq).toList.map
+        fun r => (t, fk, r)
+
 mutual
 
 /-- Execute a statement; returns its output rows. -/
@@ -292,14 +363,20 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
     let (_, rows) ← runSelect q sel
     return rows
   | .explain _ _ => err "EXPLAIN is not modelled"
-  | .createTable temp ine sch name cols cons wr strict asSel sql =>
+  | .createTable temp ine sch name cols cons wr strict asSel sql tailStart =>
     let _ := sch
     if temp then err "TEMP tables are not modelled yet"
     let db ← getDb
+    let errAt {α} (m : String) (t : Nat) : M α := throw { code := SQLITE_ERROR, msg := m, tail := some t }
     if objExists db name then
       if ine then return #[]
-      if (db.main.findTable name).isSome then err s!"table {name} already exists"
-      err s!"there is already an index named {name}"
+      if (db.main.findTable name).isSome || (db.main.findView name).isSome then errAt s!"table {name} already exists" tailStart
+      errAt s!"there is already an index named {name}" tailStart
+    -- errors in a column definition stop prepare after that definition
+    let mut seen : List Name := []
+    for cd in cols do
+      if seen.any (nameEq · cd.name) then errAt s!"duplicate column name: {cd.name}" cd.tailAt
+      seen := cd.name :: seen
     if name.toLower.startsWith "sqlite_" then err s!"object name reserved for internal use: {name}"
     let t ← match asSel with
       | some sel =>
@@ -316,6 +393,10 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
       ((List.range nAuto).toArray.map fun i => .index
         { name := s!"sqlite_autoindex_{name}_{i + 1}", table := name, cols := [], unique := false,
           where_ := none, sql := none }) }
+    if t.autoinc && ((← getDb).main.findTable "sqlite_sequence").isNone then
+      let st ← mkTable "sqlite_sequence" [{ name := "name", type := "", constraints := [] },
+        { name := "seq", type := "", constraints := [] }] [] false false "CREATE TABLE sqlite_sequence(name,seq)"
+      modifyMain fun s => { s with objs := s.objs.push (.table st) }
     return #[]
   | .createIndex unique ine _ name tname cols w sql =>
     let db ← getDb
@@ -344,13 +425,14 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
     let _ ← runSelect q sel
     modifyMain fun s => { s with objs := s.objs.push (.view { name, cols, q := sel, sql }) }
     return #[]
-  | .createTrigger _ ine _ name time ev tname _ w body sql =>
+  | .createTrigger _ ine _ name time ev tname _ w body sql tailBegin =>
     let db ← getDb
+    let errAt {α} (m : String) : M α := throw { code := SQLITE_ERROR, msg := m, tail := some tailBegin }
     if objExists db name then
       if ine then return #[]
-      err s!"trigger {name} already exists"
+      errAt s!"trigger {name} already exists"
     if (db.main.findTable tname).isNone && (db.main.findView tname).isNone then
-      err s!"no such table: main.{tname}"
+      errAt s!"no such table: main.{tname}"
     modifyMain fun s => { s with objs := s.objs.push (.trigger { name, table := tname, time, event := ev, when_ := w, body, sql }) }
     return #[]
   | .drop kind ie _ name =>
@@ -411,6 +493,9 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
       -- UPSERT: a conflict on the target runs the DO clause instead
       let r? : Option Row ← try (insertRow tname vals rowidV (if upserts.isEmpty then oc else .abort))
         catch e => do
+          if oc == .fail && upserts.isEmpty then
+            modify fun c => { c with db := { c.db with changes := n, totalChanges := c.db.totalChanges + n } }
+            throw { e with keep := true }
           if upserts.isEmpty || !(e.code == SQLITE_CONSTRAINT_UNIQUE || e.code == SQLITE_CONSTRAINT_PRIMARYKEY) then throw e
           let some up := upserts.head? | throw e
           match up.action with
@@ -429,7 +514,7 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
             match conflict with
             | none => throw e
             | some old =>
-              let exSrc := { tableSrc "excluded" t with hasRowid := false }
+              let exSrc := { tableSrc "excluded" t with hasRowid := false, qualOnly := true }
               let qx := { q with env := { q.env with frames := { srcs := #[tableSrc t.name t, exSrc], cur := #[some old, some probe] } :: q.env.frames } }
               let pass ← match wh with
                 | some wexp => do pure (truth (← evalExpr qx wexp) == some true)
@@ -503,6 +588,7 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
         if others.any (fun r => keyEq k (keyOf r k) (keyOf newRow k)) then
           err (uniqueMsg t k) (if k.isPk then SQLITE_CONSTRAINT_PRIMARYKEY else SQLITE_CONSTRAINT_UNIQUE)
       modifyMain fun s => s.setTable { t with rows := sortRows t (others.push newRow) }
+      fkOnParentUpdate tname old newRow
       updated := updated.push newRow
       let changedCols := sets.flatMap (·.1)
       runTriggers q .after (.update changedCols) tname (some old) (some newRow)
@@ -523,6 +609,7 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
       runTriggers q .before .delete tname (some r) none
       let t ← currentTable tname
       modifyMain fun s => s.setTable { t with rows := t.rows.filter (·.rowid != r.rowid) }
+      fkOnParentDelete tname r
       runTriggers q .after .delete tname (some r) none
     modify fun c => { c with db := { c.db with changes := gone.size, totalChanges := c.db.totalChanges + gone.size } }
     return out
@@ -568,6 +655,54 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
       return #[]
   | .pragma _ name arg _ => execPragma q name arg
   | _ => err "statement not modelled yet"
+
+/-- ON DELETE actions for the children of a deleted parent row. -/
+partial def fkOnParentDelete (pname : Name) (pr : Row) : M Unit := do
+  let db ← getDb
+  if !db.pragmas.foreignKeys then return
+  for (t, fk, cr) in fkChildren db pname pr do
+    match fk.onDelete with
+    | "CASCADE" =>
+      let t ← currentTable t.name
+      modifyMain fun s => s.setTable { t with rows := t.rows.filter (·.rowid != cr.rowid) }
+      fkOnParentDelete t.name cr
+    | "SET NULL" | "SET DEFAULT" =>
+      let t ← currentTable t.name
+      let mut nv := cr.vals
+      for i in fk.cols do
+        let v ← if fk.onDelete == "SET NULL" then pure Value.null else
+          match t.cols[i]!.dflt with
+          | some d => evalExpr {} d
+          | none => pure .null
+        nv := nv.set! i v
+      modifyMain fun s => s.setTable { t with rows := t.rows.map fun r => if r.rowid == cr.rowid then { r with vals := nv } else r }
+    | "RESTRICT" => err "FOREIGN KEY constraint failed" SQLITE_CONSTRAINT_FOREIGNKEY
+    | _ => pure ()
+
+/-- ON UPDATE actions for the children of a parent row whose key changed. -/
+partial def fkOnParentUpdate (pname : Name) (old new : Row) : M Unit := do
+  let db ← getDb
+  if !db.pragmas.foreignKeys then return
+  let some parent := db.main.findTable pname | return
+  for (t, fk, cr) in fkChildren db pname old do
+    let pcols := fkParentCols parent fk
+    let changed := pcols.any fun pc => compareValues .binary (parentVal parent old pc) (parentVal parent new pc) != .eq
+    if !changed then continue
+    match fk.onUpdate with
+    | "CASCADE" | "SET NULL" | "SET DEFAULT" =>
+      let t ← currentTable t.name
+      let mut nv := cr.vals
+      for (i, pc) in fk.cols.zip pcols do
+        let v ← match fk.onUpdate with
+          | "CASCADE" => pure (parentVal parent new pc)
+          | "SET NULL" => pure Value.null
+          | _ => match t.cols[i]!.dflt with
+            | some d => evalExpr {} d
+            | none => pure .null
+        nv := nv.set! i v
+      modifyMain fun s => s.setTable { t with rows := t.rows.map fun r => if r.rowid == cr.rowid then { r with vals := nv } else r }
+    | "RESTRICT" => err "FOREIGN KEY constraint failed" SQLITE_CONSTRAINT_FOREIGNKEY
+    | _ => pure ()
 
 partial def execPragma (q : QEnv) (name : Name) (arg : Option Expr) : M (Array (Array Value)) := do
   let db ← getDb
@@ -629,16 +764,29 @@ partial def runTriggers (q : QEnv) (time : TriggerTime) (ev : TriggerEvent) (tab
       if r.isNone then break
 end
 
-/-- Execute a statement atomically: on error the database is as before. -/
-def runStmt (s : Stmt) : M (Array (Array Value)) := do
+/-- Execute a statement atomically: on error the database is as before
+    (except for what SQLite keeps: `OR FAIL` rows, and the counters). The
+    error is returned, not thrown, so that the state after it is kept. -/
+def runStmt (s : Stmt) : M (Except Err (Array (Array Value))) := do
   let saved ← get
   try
+    let before := fkOrphans saved.db
     let rows ← execStmt {} s
-    return rows
+    let db ← getDb
+    -- immediate foreign keys: the violation counter at the end of the statement
+    if db.pragmas.foreignKeys then
+      let isDml := match s with | .insert .. | .update .. | .delete .. => true | _ => false
+      if isDml && fkOrphans db > before then
+        -- a DELETE's rows were deleted (and counted) before the check failed
+        let counted := match s with | .delete .. => db.changes | _ => 0
+        set { saved with db := { saved.db with changes := 0, totalChanges := saved.db.totalChanges + counted } }
+        return .error { code := SQLITE_CONSTRAINT_FOREIGNKEY, msg := "FOREIGN KEY constraint failed" }
+    return .ok rows
   catch e =>
-    -- keep the counters, restore the data
-    set { saved with db := { saved.db with changes := saved.db.changes } }
-    throw e
+    if !e.keep then
+      -- a failed statement changes nothing, and changes() becomes 0
+      set { saved with db := { saved.db with changes := 0 } }
+    return .error e
 
 /-- Run a script as the driver does: statement by statement, printing rows and errors. -/
 partial def runScript (src : ByteArray) : ByteArray := Id.run do
@@ -651,7 +799,7 @@ partial def runScript (src : ByteArray) : ByteArray := Id.run do
     match parseNext src pos with
     | .empty => break
     | .error msg tail =>
-      out := out ++ renderErr ⟨SQLITE_ERROR, msg⟩
+      out := out ++ renderErr { code := SQLITE_ERROR, msg }
       if tail ≤ pos then
         -- no progress: skip to after the next ';'
         let mut i := pos
@@ -660,11 +808,14 @@ partial def runScript (src : ByteArray) : ByteArray := Id.run do
       else pos := tail
     | .ok stmt tail =>
       pos := tail
-      match (runStmt stmt).run ctx with
-      | .ok (rows, ctx') =>
+      match (runStmt stmt).run.run ctx with
+      | (.ok (.ok rows), ctx') =>
         ctx := ctx'
         for r in rows do out := out ++ renderRow r
-      | .error e => out := out ++ renderErr e
+      | (.ok (.error e), ctx') | (.error e, ctx') =>
+        ctx := ctx'
+        out := out ++ renderErr e
+        if let some t := e.tail then pos := t
   return out
 
 end Sql

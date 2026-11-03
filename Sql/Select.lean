@@ -282,8 +282,8 @@ partial def evalExpr (q : QEnv) (e : Expr) : M Value := do
       | some x => pure (String.fromUTF8! (textOf (← evalExpr q x)))
       | none => pure ""
     match kind with
-    | .ignore => throw ⟨0, "RAISE(IGNORE)"⟩
-    | _ => throw ⟨SQLITE_CONSTRAINT_TRIGGER, m⟩
+    | .ignore => throw { code := 0, msg := "RAISE(IGNORE)" }
+    | _ => throw { code := SQLITE_CONSTRAINT_TRIGGER, msg := m }
 
 partial def compareRows (q : QEnv) (op : BinOp) (xs ys : List Expr) : M Value := do
   if xs.length != ys.length then err "row value misused"

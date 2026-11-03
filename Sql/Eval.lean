@@ -27,6 +27,8 @@ structure Src where
   rowidCol : Option Nat := none
   /-- columns hidden from `*` (USING/NATURAL duplicates) -/
   hidden : List Nat := []
+  /-- only reachable by qualified names (`excluded.` of an UPSERT) -/
+  qualOnly : Bool := false
   deriving Inhabited
 
 /-- A source's current row: rowid and values; `none` is the NULL row of an outer join. -/
@@ -58,9 +60,9 @@ structure Ctx where
   db : Db
   deriving Inhabited
 
-abbrev M := StateT Ctx (Except Err)
+abbrev M := ExceptT Err (StateM Ctx)
 
-def err {α} (msg : String) (code : Nat := SQLITE_ERROR) : M α := throw ⟨code, msg⟩
+def err {α} (msg : String) (code : Nat := SQLITE_ERROR) : M α := throw { code, msg }
 
 /-! ## Values as SQL booleans -/
 

@@ -159,6 +159,8 @@ structure ColumnDef where
   name : Name
   type : String
   constraints : List (Option Name × ColConstraint)
+  /-- prepare's tail for an error in this definition (end of the next token) -/
+  tailAt : Nat := 0
 
 inductive TableConstraint where
   | primaryKey (cols : List (Name × Option Name × SortDir)) (onConflict : Option ConflictRes) (autoinc : Bool)
@@ -191,6 +193,8 @@ inductive Stmt where
   | createTable (temp : Bool) (ifNotExists : Bool) (schema : Option Name) (name : Name)
       (cols : List ColumnDef) (constraints : List (Option Name × TableConstraint))
       (withoutRowid strict : Bool) (asSelect : Option Select) (text : String)
+      -- tailAtStart: prepare's tail for "already exists" (the end of `(` or `AS`)
+      (tailAtStart : Nat)
   | insert (with_ : List Cte) (orConflict : Option ConflictRes) (schema : Option Name) (table : Name)
       (alias : Option Name) (cols : List Name) (source : InsertSource) (upserts : List Upsert)
       (returning : List ResultCol)
@@ -208,6 +212,8 @@ inductive Stmt where
   | createTrigger (temp ifNotExists : Bool) (schema : Option Name) (name : Name) (time : TriggerTime)
       (event : TriggerEvent) (table : Name) (forEachRow : Bool) (when_ : Option Expr)
       (body : List Stmt) (text : String)
+      -- tailAtBegin: prepare's tail for an error in the header (the end of `BEGIN`)
+      (tailAtBegin : Nat)
   | drop (kind : String) (ifExists : Bool) (schema : Option Name) (name : Name)
   | begin_ (mode : String)
   | commit

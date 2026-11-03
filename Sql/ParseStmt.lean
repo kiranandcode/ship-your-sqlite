@@ -98,7 +98,11 @@ def columnDef : P ColumnDef := do
     else if (← isKw "GENERATED") || (← isKw "AS") then
       if ← eatKw "GENERATED" then kw "ALWAYS"
       kw "AS"; op "LP"; let e ← parseExpr; op "RP"
-      let stored ← if ← eatKw "STORED" then pure true else do let _ ← eatKw "VIRTUAL"; pure false
+      let word ← match ← peek with
+        | some t => pure (← text t).toLower
+        | none => pure ""
+      let stored := word == "stored"
+      if word == "stored" || word == "virtual" then advance
       cs := cs.push (cname, .generated e stored)
     else
       if cname.isSome then failHere
@@ -335,11 +339,19 @@ partial def parseCreate (_s0 : Nat) : P Stmt := do
     let ine ← if ← eatKw "IF" then do kw "NOT"; kw "EXISTS"; pure true else pure false
     let s0 := (← get).pos
     let (sch, n) ← qualifiedName
+    let curStop : P Nat := do
+      match ← peek with
+      | some t => return t.stop
+      | none => return (← get).src.size
+    let tailStart ← curStop
     if ← eatKw "AS" then
       let q ← parseSelect
-      return .createTable temp ine sch n [] [] false false (some q) ("CREATE TABLE " ++ (← spanText s0 (← get).pos))
+      return .createTable temp ine sch n [] [] false false (some q) ("CREATE TABLE " ++ (← spanText s0 (← get).pos)) tailStart
     op "LP"
-    let mut cols := #[← columnDef]
+    let colDefT : P ColumnDef := do
+      let c ← columnDef
+      return { c with tailAt := ← curStop }
+    let mut cols := #[← colDefT]
     let mut cons := #[]
     while ← eatOp "COMMA" do
       match ← tableConstraint with
@@ -352,7 +364,7 @@ partial def parseCreate (_s0 : Nat) : P Stmt := do
           | some c => cons := cons.push c
           | none => break
         break
-      | none => cols := cols.push (← columnDef)
+      | none => cols := cols.push (← colDefT)
     op "RP"
     let mut wr := false
     let mut strict := false
@@ -367,7 +379,7 @@ partial def parseCreate (_s0 : Nat) : P Stmt := do
         advance; strict := true
       else break
       if !(← eatOp "COMMA") then break
-    return .createTable temp ine sch n cols.toList cons.toList wr strict none ("CREATE TABLE " ++ (← spanText s0 (← get).pos))
+    return .createTable temp ine sch n cols.toList cons.toList wr strict none ("CREATE TABLE " ++ (← spanText s0 (← get).pos)) tailStart
   if ← eatKw "INDEX" then
     let ine ← if ← eatKw "IF" then do kw "NOT"; kw "EXISTS"; pure true else pure false
     let s0 := (← get).pos
@@ -409,13 +421,16 @@ partial def parseCreate (_s0 : Nat) : P Stmt := do
     let t ← name
     let fer ← if ← eatKw "FOR" then do kw "EACH"; kw "ROW"; pure true else pure false
     let w ← if ← eatKw "WHEN" then some <$> parseExpr else pure none
+    let tailBegin ← match ← peek with
+      | some t => pure t.stop
+      | none => pure (← get).src.size
     kw "BEGIN"
     let mut body := #[]
     repeat
       body := body.push (← parseStmt)
       op "SEMI"
       if ← eatKw "END" then break
-    return .createTrigger temp ine sch n time ev t fer w body.toList ("CREATE TRIGGER " ++ (← spanText s0 (← get).pos))
+    return .createTrigger temp ine sch n time ev t fer w body.toList ("CREATE TRIGGER " ++ (← spanText s0 (← get).pos)) tailBegin
   if ← eatKw "VIRTUAL" then
     kw "TABLE"
     let ine ← if ← eatKw "IF" then do kw "NOT"; kw "EXISTS"; pure true else pure false
