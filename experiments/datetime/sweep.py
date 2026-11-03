@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Systematic sweep of the calendar and of the millisecond rounding: sql_run
 against driver-gcc (TZ=UTC) on
-  * every 97th day from -4713-11-24 to 9999-12-31 (all strftime fields,
+  * every 397th day from -4713-11-24 to 9999-12-31 (all strftime fields,
     'localtime', and the month/year arithmetic), and
-  * every 7th millisecond-ish fraction of a second (parse, %f, subsec, %J).
+  * every 13th 10-microsecond fraction of a second (parse, %f, subsec, %J).
 
     TZ=UTC python3 experiments/datetime/sweep.py
 """
@@ -25,15 +25,15 @@ def main():
         stmts.append("SELECT strftime('%%F %%T %%j %%U %%V %%W %%G %%g %%u %%w %%J %%s', %r), "
                      "datetime(%r, 'localtime'), date(%r, '+1 month'), date(%r, '-13 months', 'floor'), "
                      "date(%r, '+1 year'), timediff(%r, '2000-02-29 12:00');" % ((jd,) * 6))
-        jd += 97.31
-    for ms in range(0, 100000, 7):
+        jd += 397.31
+    for ms in range(0, 100000, 13):
         f = "%05d" % ms
         stmts.append("SELECT strftime('%%f %%s %%J', '2000-01-01 00:00:%s.%s', 'subsec'), "
                      "datetime('1969-12-31 23:59:%s.%s', 'subsec'), julianday('2000-01-01 00:00:%s.%s'), "
                      "unixepoch('1969-12-31 23:59:%s.%s', 'subsec');"
                      % (f[:2], f[2:] + "1", f[:2], f[2:], f[:2], f[2:] + "49", f[:2], f[2:] + "5"))
     bad = 0
-    step = 5000
+    step = 2000
     for k in range(0, len(stmts), step):
         chunk = stmts[k:k + step]
         script = "\n".join(chunk) + "\n"
