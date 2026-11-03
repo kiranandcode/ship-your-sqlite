@@ -33,7 +33,9 @@ def mxAlloc : Nat := 1000000000
 /-- A text as C sees it through `sqlite3_value_text`: up to the first NUL. -/
 def cstr (b : ByteArray) : ByteArray := Id.run do
   let mut i := 0
-  while i < b.size && b[i]! != 0 do i := i + 1
+  for _ in [0:b.size] do
+    if !(i < b.size && b[i]! != 0) then break
+    i := i + 1
   return if i == b.size then b else b.extract 0 i
 
 def isCont (c : UInt8) : Bool := c &&& 0xc0 == 0x80
@@ -110,12 +112,16 @@ def fpDecode (r : Float) (iRound0 : Int) (mxRound : Nat) : Dec := Id.run do
       let ar := Real.ofBits mag
       if z[15]! == 9 && z[14]! == 9 then
         let mut jj := 14
-        while jj > 0 && z[jj - 1]! == 9 do jj := jj - 1
+        for _ in [0:14] do  -- `jj` counts down from 14
+          if !(jj > 0 && z[jj - 1]! == 9) then break
+          jj := jj - 1
         let v2 := if jj == 0 then 1 else Real.ofDigits (z.toList.take jj) + 1
         if ar == Real.ofDecimal v2 (exp + n - jj) then iRound := jj + 1
       else if iDP ≥ n || (z[15]! == 0 && z[14]! == 0 && z[13]! == 0) then
         let mut jj := 13
-        while jj > 0 && z[jj - 1]! == 0 do jj := jj - 1
+        for _ in [0:13] do  -- `jj` counts down from 13
+          if !(jj > 0 && z[jj - 1]! == 0) then break
+          jj := jj - 1
         let v2 := Real.ofDigits (z.toList.take jj)
         if ar == Real.ofDecimal v2 (exp + n - jj) then iRound := jj + 1
     let k := iRound.toNat
@@ -127,7 +133,9 @@ def fpDecode (r : Float) (iRound0 : Int) (mxRound : Nat) : Dec := Id.run do
     else
       z := z.extract 0 k
       n := k
-  while n > 0 && z[n - 1]! == 0 do n := n - 1
+  for _ in [0:n] do  -- `n` counts down
+    if !(n > 0 && z[n - 1]! == 0) then break
+    n := n - 1
   return ⟨neg, 0, z.extract 0 n, iDP⟩
 
 /-! ## The conversion table (`fmtinfo[]`) -/
@@ -275,7 +283,8 @@ def floatField (inf : Info) (r : Float) (sp : Spec) (nChar : Nat) : Option (Byte
   let mut j := 0
   if e2 < 0 then out := out.push 48
   else if sp.thou then
-    while e2 ≥ 0 do
+    for _ in [0:(e2 + 1).toNat] do  -- `e2` counts down to -1
+      if !(e2 ≥ 0) then break
       if j < n then
         out := out.push (48 + z[j]!).toUInt8; j := j + 1
       else out := out.push 48
@@ -301,7 +310,9 @@ def floatField (inf : Info) (r : Float) (sp : Spec) (nChar : Nat) : Option (Byte
     if precision > 0 && !flagRtz then
       out := out ++ Array.replicate precision.toNat 48
   if flagRtz && flagDp then
-    while out.back? == some 48 do out := out.pop
+    for _ in [0:out.size] do  -- each iteration pops a byte
+      if !(out.back? == some 48) then break
+      out := out.pop
     if out.back? == some 46 then
       out := if sp.alt2 then out.push 48 else out.pop
   if xt == .exp then
@@ -340,11 +351,15 @@ def escField (kind : Kind) (arg : Option ByteArray) (sp : Spec) : Option ByteArr
   let mut k := sp.precision
   let mut i := 0
   let mut n : Nat := 0
-  while k != 0 && bat esc i != 0 do
+  -- `i` grows and `bat esc i` is 0 from `esc.size` on: `esc.size + 1` iterations
+  for _ in [0:esc.size + 1] do
+    if !(k != 0 && bat esc i != 0) then break
     let ch := bat esc i
     if ch == q then n := n + 1
     if sp.alt2 && ch &&& 0xc0 == 0xc0 then
-      while isCont (bat esc (i + 1)) do i := i + 1
+      for _ in [0:esc.size + 1] do
+        if !isCont (bat esc (i + 1)) then break
+        i := i + 1
     i := i + 1
     k := k - 1
   let mut needQuote := needQ
@@ -387,16 +402,22 @@ def jsonField (kind : Kind) (arg : Option ByteArray) (sp : Spec) : ByteArray := 
     if px < 0 then px := 0x7fffffff
     else if sp.alt2 then
       let mut i : Nat := 0
-      while (i : Int) < px && bat esc i != 0 do
+      -- these scans stop at the end of `esc` (`bat` is 0): `esc.size + 1` iterations
+      for _ in [0:esc.size + 1] do
+        if !((i : Int) < px && bat esc i != 0) then break
         if isCont (bat esc i) then px := px + 1
         i := i + 1
       if (i : Int) == px then
-        while isCont (bat esc px.toNat) do px := px + 1
+        for _ in [0:esc.size + 1] do
+          if !isCont (bat esc px.toNat) then break
+          px := px + 1
     let hex := "0123456789abcdef".toUTF8
     let mut i : Nat := 0
     let mut j : Nat := 0
     let mut stop := false
-    while !stop && (i : Int) < px do
+    -- `i` grows until the NUL at `esc.size` at the latest
+    for _ in [0:esc.size + 1] do
+      if !(!stop && (i : Int) < px) then break
       let ch := bat esc i
       if ch ≤ 0x1f || ch == 34 || ch == 92 then
         if j < i then out := out ++ (esc.extract j i).data
@@ -454,10 +475,16 @@ def format (fmt0 : ByteArray) (args : Array Value) : Option ByteArray := Id.run 
   let mut out : ByteArray := .empty
   let mut used : Nat := 0
   let mut i : Nat := 0
-  while i < fmt.size do
+  -- Every loop below advances `i` through `fmt` (each conversion consumes its
+  -- `%` and at least one byte; a 0 byte, as at `fmt.size`, ends it), so
+  -- `fmt.size + 1` iterations suffice.
+  for _ in [0:fmt.size + 1] do
+    if !(i < fmt.size) then break
     if at_ i != 37 then
       let st := i
-      while i < fmt.size && at_ i != 37 do i := i + 1
+      for _ in [0:fmt.size + 1] do
+        if !(i < fmt.size && at_ i != 37) then break
+        i := i + 1
       out := out ++ fmt.extract st i
       if !fits out 0 then return none
       if i ≥ fmt.size then break
@@ -470,7 +497,7 @@ def format (fmt0 : ByteArray) (args : Array Value) : Option ByteArray := Id.run 
       break
     let mut sp : Spec := {}
     let mut done := false
-    repeat
+    for _ in [0:fmt.size + 1] do
       if c == 45 then sp := { sp with left := true }
       else if c == 43 then sp := { sp with fprefix := 43 }
       else if c == 32 then sp := { sp with fprefix := 32 }
@@ -486,7 +513,8 @@ def format (fmt0 : ByteArray) (args : Array Value) : Option ByteArray := Id.run 
       else if 49 ≤ c && c ≤ 57 then
         let mut wx : Nat := (c - 48).toNat
         i := i + 1; c := at_ i
-        while 48 ≤ c && c ≤ 57 do
+        for _ in [0:fmt.size + 1] do
+          if !(48 ≤ c && c ≤ 57) then break
           wx := (wx * 10 + (c - 48).toNat) % 2 ^ 32
           i := i + 1; c := at_ i
         sp := { sp with width := wx % 2 ^ 31 }
@@ -513,7 +541,8 @@ def format (fmt0 : ByteArray) (args : Array Value) : Option ByteArray := Id.run 
           i := i + 1; c := at_ i
         else
           let mut px : Nat := 0
-          while 48 ≤ c && c ≤ 57 do
+          for _ in [0:fmt.size + 1] do
+            if !(48 ≤ c && c ≤ 57) then break
             px := (px * 10 + (c - 48).toNat) % 2 ^ 32
             i := i + 1; c := at_ i
           sp := { sp with precision := px % 2 ^ 31 }
@@ -555,12 +584,16 @@ def format (fmt0 : ByteArray) (args : Array Value) : Option ByteArray := Id.run 
           if sp.alt2 then Id.run do
             let mut k := 0
             let mut p := sp.precision
-            while p > 0 && bat s k != 0 do
+            -- `k` grows; `bat s k` is 0 from `s.size` on
+            for _ in [0:s.size + 1] do
+              if !(p > 0 && bat s k != 0) then break
               p := p - 1
               let ch := bat s k
               k := k + 1
               if ch ≥ 0xc0 then
-                while isCont (bat s k) do k := k + 1
+                for _ in [0:s.size + 1] do
+                  if !isCont (bat s k) then break
+                  k := k + 1
             return k
           else min sp.precision.toNat s.size
         else s.size
@@ -576,7 +609,9 @@ def format (fmt0 : ByteArray) (args : Array Value) : Option ByteArray := Id.run 
           if s.size == 0 then ⟨#[0]⟩ else Id.run do
             let mut b : Array UInt8 := #[s[0]!]
             if s[0]! &&& 0xc0 == 0xc0 then
-              while b.size < 4 && isCont (bat s b.size) do b := b.push s[b.size]!
+              for _ in [0:4] do  -- `b` grows to at most 4 bytes
+                if !(b.size < 4 && isCont (bat s b.size)) then break
+                b := b.push s[b.size]!
             return ⟨b⟩
       let mut w := sp.width
       let mut copies : Nat := 1

@@ -139,17 +139,23 @@ def lexLt : List UInt8 → List UInt8 → Bool
 def atoi64C (z : ByteArray) : Int × Int := Id.run do
   let n := z.size
   let mut k := 0
-  while k < n && isSpaceS (bat z k) do k := k + 1
+  -- each loop below scans `z` forward and stops at `n = z.size`: `n` iterations
+  for _ in [0:n] do
+    if !(k < n && isSpaceS (bat z k)) then break
+    k := k + 1
   let mut neg := false
   if k < n then
     if bat z k == 45 then neg := true; k := k + 1
     else if bat z k == 43 then k := k + 1
   let zStart := k
-  while k < n && bat z k == 48 do k := k + 1
+  for _ in [0:n] do
+    if !(k < n && bat z k == 48) then break
+    k := k + 1
   let zNum := k
   let mut u : Nat := 0
   let mut i := 0
-  while zNum + i < n && isDigit (bat z (zNum+i)) do
+  for _ in [0:n] do
+    if !(zNum + i < n && isDigit (bat z (zNum+i))) then break
     u := (u * 10 + (bat z (zNum+i) - 48).toNat) % two64
     i := i + 1
   let mut v : Int := if u > two63 - 1 then (if neg then -(two63 : Int) else two63 - 1)
@@ -158,7 +164,8 @@ def atoi64C (z : ByteArray) : Int × Int := Id.run do
   if i == 0 && zStart == zNum then rc := -1
   else if zNum + i < n then
     let mut jj := zNum + i
-    while jj < n do
+    for _ in [0:n] do
+      if !(jj < n) then break
       if !isSpaceS (bat z jj) then rc := 1; break
       jj := jj + 1
   if i < 19 then return (rc, v)
@@ -175,10 +182,14 @@ def atoi64C (z : ByteArray) : Int × Int := Id.run do
 def decOrHexToI64 (z : ByteArray) : Int × Int := Id.run do
   if bat z 0 == 48 && (bat z 1 == 120 || bat z 1 == 88) then
     let mut i := 2
-    while bat z i == 48 do i := i + 1
+    -- these scans stop at the end of `z` (`bat` is 0 there): `z.size + 1` iterations
+    for _ in [0:z.size + 1] do
+      if !(bat z i == 48) then break
+      i := i + 1
     let mut k := i
     let mut u : Nat := 0
-    while isXdigit (bat z k) do
+    for _ in [0:z.size + 1] do
+      if !isXdigit (bat z k) then break
       u := (u * 16 + hexToInt (bat z k)) % two64
       k := k + 1
     let v : Int := if u ≥ two63 then (u : Int) - two64 else u
@@ -187,7 +198,8 @@ def decOrHexToI64 (z : ByteArray) : Int × Int := Id.run do
     return (0, v)
   else
     let mut n := 0
-    while n < z.size && (let c := bat z n; c == 43 || c == 45 || c == 32 || c == 10 || c == 9 || isDigit c) do
+    for _ in [0:z.size] do
+      if !(n < z.size && (let c := bat z n; c == 43 || c == 45 || c == 32 || c == 10 || c == 9 || isDigit c)) then break
       n := n + 1
     if n < z.size then n := n + 1
     return atoi64C (z.extract 0 n)
@@ -212,7 +224,9 @@ def unescapeText (z : ByteArray) : ByteArray := Id.run do
   let sz := z.size
   let mut out := ByteArray.empty
   let mut i := 0
-  while i < sz do
+  -- `i` grows by at least 1 (`unescapeOne` consumes at least one byte)
+  for _ in [0:sz] do
+    if !(i < sz) then break
     let c := bat z i
     if c == 92 then
       let (v, k) := unescapeOne z i (sz - i)
@@ -308,7 +322,9 @@ def insertIntoBlob (args : Args) (eEdit : Nat) (asBlob : Bool) : FM (Option (Val
   let some p0 ← parseArg (argAt args 0).1 | return none
   let mut p := p0
   let mut i := 1
-  while i + 1 < argc do
+  -- `i` grows by 2
+  for _ in [0:argc] do
+    if !(i + 1 < argc) then break
     let (pv, _) := argAt args i
     if pv.isNull then i := i + 2; continue
     let zPath := (pathOf pv).getD .empty
@@ -423,7 +439,9 @@ def errorPosFunc (v : Value) : FM (Option (Value × Bool)) := do
   | .error st =>
     let mut pos : Nat := 0
     let mut k := 0
-    while k < st.iErr && bat z k != 0 do
+    -- `bat z k != 0` needs `k < z.size`
+    for _ in [0:z.size] do
+      if !(k < st.iErr && bat z k != 0) then break
       if (bat z k) &&& 0xc0 != 0x80 then pos := pos + 1
       k := k + 1
     return some (.int (pos + 1), false)
@@ -479,7 +497,9 @@ def scalarF (name : String) (args : Args) : Option (FM (Option (Value × Bool)))
     if argc % 2 == 1 then fail "json_object() requires an even number of arguments"
     let mut s : JStr := ({} : JStr).addc 123
     let mut k := 0
-    while k < argc do
+    -- `k` grows by 2
+    for _ in [0:argc] do
+      if !(k < argc) then break
       let (lab, _) := argAt args k
       let .text z := lab | fail "json_object() labels must be TEXT"
       s := (appendSep s).add (quoteString z) |>.addc 58
@@ -588,7 +608,9 @@ def aggregateF (name : String) (rows : List Args) : Option (FM (Value × Bool)) 
       let mut out := ByteArray.empty.push 123
       let mut inStr := false
       let mut i := 1
-      while i < z.size do
+      -- `i` grows by at least 1
+      for _ in [0:z.size] do
+        if !(i < z.size) then break
         let c := bat z i
         if c == 34 then inStr := !inStr; out := out.push 34
         else if c == 92 then
@@ -660,7 +682,9 @@ def Cur.next (c : Cur) : Except Err Cur := do
       c := { c with parents := c.parents.push par, i := i + n }
       levelChange := true
     else c := { c with i := i + n + sz }
-    while c.parents.size > 0 && c.i ≥ c.top.iEnd do
+    -- each iteration pops a parent
+    for _ in [0:c.parents.size] do
+      if !(c.parents.size > 0 && c.i ≥ c.top.iEnd) then break
       let t := c.top
       c := { c with parents := c.parents.pop, path := c.path.extract 0 t.nPath }
       levelChange := true
@@ -680,7 +704,9 @@ def Cur.pathLength (c : Cur) : Nat := Id.run do
   let z := c.path
   let mut n := z.size
   if c.rowid == 0 && c.recursive && n ≥ 2 then
-    while n > 1 do
+    -- `n` counts down from `z.size`
+    for _ in [0:z.size] do
+      if !(n > 1) then break
       n := n - 1
       if bat z n == 91 || bat z n == 46 then
         let (x, _) := lookupStep { c.p with eEdit := 0 } 0 (z.extract 0 n) 1 0
@@ -759,11 +785,11 @@ def eachRows (name : String) (args : Args) : Except Err (List (List Value × Boo
     c := { c with i := i + n, eType := c.p.typ i,
                   parents := #[{ iKey := 0, iEnd := c.iEnd, iHead := i + n, iValue := i, nPath := 0 }] }
   let mut out := #[]
-  let mut fuel := c.p.b.size + 2
-  while c.i < c.iEnd && fuel > 0 do
+  -- at most `c.p.b.size + 2` rows (every row is a node of the blob)
+  for _ in [0:c.p.b.size + 2] do
+    if !(c.i < c.iEnd) then break
     out := out.push (← c.row)
     c ← c.next
-    fuel := fuel - 1
   return out.toList
 where
   parseText (z : ByteArray) : Except Err (JP × Option ByteArray) :=

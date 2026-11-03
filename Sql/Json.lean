@@ -54,28 +54,59 @@ def jsonProducers : List String :=
    "json_patch", "json_quote", "json_remove", "json_replace", "json_set",
    "json_group_array", "json_group_object"]
 
+mutual
 /-- Is the value of this expression a JSON-subtyped value when passed directly
-    as an argument (a call to a JSON function, or `->`)? See the file comment. -/
-partial def exprIsJson : Expr → Bool
+    as an argument (a call to a JSON function, or `->`)? See the file comment.
+    Structural recursion on the syntax. -/
+def exprIsJson : Expr → Bool
   | .call name _ args _ _ _ over =>
     let n := name.toLower
     if over.isSome then false
     else if jsonProducers.contains n then true
     else match n with
-      | "nullif" | "likely" | "unlikely" | "likelihood" => (args.head?.map exprIsJson).getD false
+      | "nullif" | "likely" | "unlikely" | "likelihood" => headIsJson args
       | "iif" | "if" =>
         -- iif(c1, v1, c2, v2, …, else): the values are at odd positions and the last
-        let idx := List.range args.length
-        (idx.zip args).any fun (i, a) => (i % 2 == 1 || (args.length % 2 == 1 && i + 1 == args.length)) && exprIsJson a
-      | "coalesce" | "ifnull" => args.any exprIsJson
-      | "min" | "max" => args.length ≥ 2 && args.any exprIsJson
+        iifIsJson args.length 0 args
+      | "coalesce" | "ifnull" => anyIsJson args
+      | "min" | "max" => args.length ≥ 2 && anyIsJson args
       | _ => false
   | .binop .ptr _ _ => true
-  | .case_ _ whens else_ => whens.any (fun (_, v) => exprIsJson v) || (else_.map exprIsJson).getD false
+  | .case_ _ whens else_ => whensIsJson whens || optIsJson else_
   | .unop .pos e => exprIsJson e
   | .collate e _ => exprIsJson e
   | .cast e _ => exprIsJson e
   | _ => false
+
+/-- `(args.head?.map exprIsJson).getD false` -/
+def headIsJson : List Expr → Bool
+  | [] => false
+  | a :: _ => exprIsJson a
+
+/-- `args.any exprIsJson` -/
+def anyIsJson : List Expr → Bool
+  | [] => false
+  | a :: as => exprIsJson a || anyIsJson as
+
+/-- `(else_.map exprIsJson).getD false` -/
+def optIsJson : Option Expr → Bool
+  | none => false
+  | some e => exprIsJson e
+
+/-- `whens.any fun (_, v) => exprIsJson v` -/
+def whensIsJson : List (Expr × Expr) → Bool
+  | [] => false
+  | w :: ws => pairIsJson w || whensIsJson ws
+
+def pairIsJson : Expr × Expr → Bool
+  | (_, v) => exprIsJson v
+
+/-- The arguments of `iif` from position `i` (of `len`) that are values (odd
+    positions and the last of an odd count), one of them JSON. -/
+def iifIsJson (len : Nat) (i : Nat) : List Expr → Bool
+  | [] => false
+  | a :: as => ((i % 2 == 1 || (len % 2 == 1 && i + 1 == len)) && exprIsJson a) || iifIsJson len (i + 1) as
+end
 
 /-- A scalar call with an explicit parse cache: the result (NULL as `.null`)
     with its subtype, and the cache after the call. -/
