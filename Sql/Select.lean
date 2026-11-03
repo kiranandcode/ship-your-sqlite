@@ -384,6 +384,70 @@ end
 def coreRefers (n : Name) (c : SelectCore) : Bool := coreRefersF syntaxFuel n c
 def fromRefers (n : Name) (f : FromItem) : Bool := fromRefersF syntaxFuel n f
 
+mutual
+/-- The sources of a FROM clause, as far as affinities go: tables, views,
+    subqueries and joins of them (none if it has a CTE reference or a
+    table-valued function). -/
+def plainFromSrcs (db : Db) (k : Nat) (env : Env) (f : FromItem) : Option (Array Src) :=
+  match k with
+  | 0 => none
+  | k + 1 =>
+  match f with
+  | .table sch n alias _ =>
+    let t := match sch with
+      | some d => db.main.findTableDb d n
+      | none => db.main.findTable n db.attached
+    match t with
+    | some t => some #[tableSrc (alias.getD n) t]
+    | none => match sch, db.main.findView n with
+      | none, some v => do
+        let m ← selectMetaK db k env v.q
+        let m := if v.cols.isEmpty then m else (m.zip v.cols.toArray).map fun (c, nm) => { c with name := nm }
+        return #[metaSrc (alias.getD n) m]
+      | _, _ => none
+  | .subquery q alias => do
+    let m ← selectMetaK db k env q
+    return #[metaSrc (alias.getD "") m]
+  | .join l _ _ r _ _ => do
+    let a ← plainFromSrcs db k env l
+    let b ← plainFromSrcs db k env r
+    return a ++ b
+  | _ => none
+
+/-- The result columns of a query's first SELECT: names and affinities
+    (none when its FROM is beyond `plainFromSrcs`). -/
+def selectMetaK (db : Db) (k : Nat) (env : Env) (q : Select) : Option (Array ColMeta) :=
+  match k with
+  | 0 => none
+  | k + 1 =>
+  match q with
+  | .mk _ _ (.select _ rcols from_ ..) _ _ _ _ => do
+    let srcs ← match from_ with
+      | some f => plainFromSrcs db k env f
+      | none => some #[]
+    let env' := { env with frames := { srcs, cur := srcs.map fun _ => none } :: env.frames }
+    let colsOf (s : Src) : List ColMeta := s.cols.toList.map fun (n, a, c) => ⟨n, a, c⟩
+    return (rcols.flatMap fun rc => match rc with
+      | .star => srcs.toList.flatMap colsOf
+      | .tableStar t => (srcs.toList.filter (nameEq ·.alias t)).flatMap colsOf
+      | .expr e al txt =>
+        let name := al.getD (match e with | .col _ _ c => c | _ => txt)
+        [⟨name, exprAff env' e (fun env q => (selectMetaK db k env q).bind fun m => m[0]?.bind (·.aff)), .binary⟩]).toArray
+  | .mk _ _ (.values (row :: _)) _ _ _ _ =>
+    some ((List.range row.length).map fun i => (⟨s!"column{i + 1}", none, .binary⟩ : ColMeta)).toArray
+  | _ => none
+end
+
+/-- A scalar subquery's affinity (`sqlite3ExprAffinity`, TK_SELECT): that of
+    the first result column of its first SELECT (none when its FROM is
+    beyond `plainFromSrcs`: an approximation). -/
+def subqueryAffK (db : Db) (k : Nat) (env : Env) (q : Select) : Option Aff :=
+  (selectMetaK db k env q).bind fun m => m[0]?.bind (·.aff)
+
+/-- Expression affinity, with scalar subqueries resolved against the schema. -/
+def affOf (env : Env) (e : Expr) : M (Option Aff) := do
+  return exprAff env e (subqueryAffK (← getDb) syntaxFuel)
+
 def QEnv.noGroup (q : QEnv) : QEnv := { q with env := { q.env with group := none } }
 
 mutual
@@ -448,7 +512,7 @@ def evalExpr (fuel : Nat) (q : QEnv) (e : Expr) : M Value :=
           | _, _ =>
             let x ← evalExpr fuel q a
             let y ← evalExpr fuel q b
-            return compareOp op (cmpAff (exprAff env a) (exprAff env b)) (cmpColl env a b) x y
+            return compareOp op (cmpAff ((← affOf env a)) ((← affOf env b))) (cmpColl env a b) x y
         | .is | .isNot =>
           -- `x IS [NOT] TRUE/FALSE` (true/false not a column) is a truth test (TK_TRUTH)
           let truthConst : Option Bool := match b with
@@ -462,11 +526,11 @@ def evalExpr (fuel : Nat) (q : QEnv) (e : Expr) : M Value :=
             return .int (if holds == (op == .is) then 1 else 0)
           let x ← evalExpr fuel q a
           let y ← evalExpr fuel q b
+          let aff := cmpAff (← affOf env a) (← affOf env b)
           let same := match x.isNull, y.isNull with
             | true, true => true
             | true, false | false, true => false
             | false, false =>
-              let aff := cmpAff (exprAff env a) (exprAff env b)
               compareValues (cmpColl env a b) (cmpConvert aff x) (cmpConvert aff y) == .eq
           return .int (if same == (op == .is) then 1 else 0)
         | .add | .sub | .mul | .div | .rem =>
@@ -494,8 +558,8 @@ def evalExpr (fuel : Nat) (q : QEnv) (e : Expr) : M Value :=
         let v ← evalExpr fuel q x
         let l ← evalExpr fuel q lo
         let h ← evalExpr fuel q hi
-        let c1 := compareOp .ge (cmpAff (exprAff env x) (exprAff env lo)) (cmpColl env x lo) v l
-        let c2 := compareOp .le (cmpAff (exprAff env x) (exprAff env hi)) (cmpColl env x hi) v h
+        let c1 := compareOp .ge (cmpAff ((← affOf env x)) ((← affOf env lo))) (cmpColl env x lo) v l
+        let c2 := compareOp .le (cmpAff ((← affOf env x)) ((← affOf env hi))) (cmpColl env x hi) v h
         let r := match truth c1, truth c2 with
           | some false, _ | _, some false => some false
           | some true, some true => some true
@@ -509,7 +573,7 @@ def evalExpr (fuel : Nat) (q : QEnv) (e : Expr) : M Value :=
         for it in items do
           let w ← evalExpr fuel q it
           -- comparisonAffinity: an IN list compares with the left side's affinity only
-          let c := compareOp .eq (exprAff env x) (cmpColl env x it) v w
+          let c := compareOp .eq ((← affOf env x)) (cmpColl env x it) v w
           if truth c == some true then found := true; break
           if c.isNull then sawNull := true
         if v.isNull then return .null
@@ -521,7 +585,7 @@ def evalExpr (fuel : Nat) (q : QEnv) (e : Expr) : M Value :=
         if cols.size != 1 then err s!"sub-select returns {cols.size} columns - expected 1"
         if rows.isEmpty then return .int (if neg then 1 else 0)
         if v.isNull then return .null
-        let aff := cmpAff (exprAff env x) (cols[0]!.aff)
+        let aff := cmpAff ((← affOf env x)) (cols[0]!.aff)
         let coll := match exprColl env x with
           | some (c, _) => c
           | none => cols[0]!.coll
@@ -606,8 +670,8 @@ def compareRows (fuel : Nat) (q : QEnv) (op : BinOp) (xs ys : List Expr) : M Val
           unknown := true
           if op == .eq || op == .ne then continue
           break
-        let o := compareValues (cmpColl q.env a b) (cmpConvert (cmpAff (exprAff q.env a) (exprAff q.env b)) x)
-          (cmpConvert (cmpAff (exprAff q.env a) (exprAff q.env b)) y)
+        let o := compareValues (cmpColl q.env a b) (cmpConvert (cmpAff ((← affOf q.env a)) ((← affOf q.env b))) x)
+          (cmpConvert (cmpAff ((← affOf q.env a)) ((← affOf q.env b))) y)
         if o != .eq then
           result := some (match op with
             | .eq => false | .ne => true | .lt | .le => o == .lt | _ => o == .gt)
@@ -844,7 +908,7 @@ def evalExprST (fuel : Nat) (q : QEnv) (e : Expr) : M (Value × Bool) :=
           let bv ← evalExpr fuel q b
           for (w, t) in whens do
             let wv ← evalExpr fuel q w
-            let c := compareOp .eq (cmpAff (exprAff q.env b) (exprAff q.env w)) (cmpColl q.env b w) bv wv
+            let c := compareOp .eq (cmpAff ((← affOf q.env b)) ((← affOf q.env w))) (cmpColl q.env b w) bv wv
             if truth c == some true then return ← evalExprST fuel q t
           match els with
           | some x => evalExprST fuel q x

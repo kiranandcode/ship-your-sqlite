@@ -1,0 +1,13 @@
+create table t(a integer, b text, c varchar(10));
+insert into t values(1, '1', '0.0025');
+create table u(x real);
+insert into u values(2);
+select (select a from t) = '1', (select b from t) = 1, (select +a from t) = '1';
+select '1' in (select a from t), (select a from t) in ('1'), (a, b) = ('1', 1) from t;
+select (select a from t) between '0' and '2', (select x from u) = '2', (select x from u) = '2.0';
+select (select t.a from t join u on 1) = '1', (select (select a from t)) = '1', (select a from (select a from t)) = '1';
+select (select a from t) is '1', (select a from t where a = '1') = '1', (select max(a) from t) = '1';
+create view v as select a, b as bb from t;
+select (select a from v) = '1', (select bb from v) = 1, (select * from (select x from u)) = '2', (select column1 from (values(1))) = '1';
+select (select y from (select x as y from u)) = '2', (select a from t, u) = '1';
+select +c <= 2.5e-3, c <= 2.5e-3, +a = '1', a = '1', +a BETWEEN '0' AND '2' from t;

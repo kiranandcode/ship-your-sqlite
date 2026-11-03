@@ -153,7 +153,7 @@ def colMetaOf (env : Env) : Resolved → Option (Option Aff × Coll)
   | .alias _ => none
 
 /-- Expression affinity (`sqlite3ExprAffinity`): `none` is "no affinity". -/
-def exprAff.go (k : Nat) (env : Env) (x : Expr) : Option Aff :=
+def exprAff.go (k : Nat) (env : Env) (x : Expr) (sub : Env → Select → Option Aff) : Option Aff :=
   match k with
   | 0 => none
   | k + 1 =>
@@ -161,15 +161,19 @@ def exprAff.go (k : Nat) (env : Env) (x : Expr) : Option Aff :=
   | .col _ t c => match resolveCol env t c with
     | .ok r => match colMetaOf env r with
       | some (a, _) => a
-      | none => match r with | .alias e => (exprAff.go k) env e | _ => none
+      | none => match r with | .alias e => exprAff.go k env e sub | _ => none
     | .error _ => none
-  | .dqcol c => (exprAff.go k) env (.col none none c)
+  | .dqcol c => exprAff.go k env (.col none none c) sub
   | .cast _ ty => some (affinityOfType ty)
-  | .collate e _ => (exprAff.go k) env e
-  | .unop .pos e => (exprAff.go k) env e
+  | .collate e _ => exprAff.go k env e sub
+  | .subquery q => sub env q
+  | .row (e :: _) => exprAff.go k env e sub
   | _ => none
 
-def exprAff (env : Env) (x : Expr) : Option Aff := exprAff.go syntaxFuel env x
+/-- `sub` gives a scalar subquery's affinity (that of its first result
+    column, which needs the schema: `Sql.subqueryAff`); by default none. -/
+def exprAff (env : Env) (x : Expr) (sub : Env → Select → Option Aff := fun _ _ => none) : Option Aff :=
+  exprAff.go syntaxFuel env x sub
 
 /-- Collation of an expression: explicit (`COLLATE`) or from a column. -/
 def exprColl.go (k : Nat) (env : Env) (x : Expr) : Option (Coll × Bool) :=
