@@ -745,6 +745,24 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
       let newRow ← withGenerated t { rowid := newRowid, vals := nv }
       runTriggers q .before (.update (sets.flatMap (·.1))) tname (some old) (some newRow)
       let t ← currentTable tname
+      -- NOT NULL, resolved by UPDATE OR <oc> (or the column's ON CONFLICT)
+      let ocU := orC.getD .abort
+      let mut newRow := newRow
+      let mut skipNN := false
+      for h : i in [0:t.cols.size] do
+        let c := t.cols[i]
+        if c.notNull && (newRow.vals[i]?.getD .null).isNull then
+          match c.notNullConflict.getD ocU with
+          | .ignore => skipNN := true
+          | .replace =>
+            match c.dflt with
+            | some d => newRow := { newRow with vals := newRow.vals.set! i (← storeValue t i (← evalExpr {} d)) }
+            | none => err s!"NOT NULL constraint failed: {t.name}.{c.name}" SQLITE_CONSTRAINT_NOTNULL
+          | .fail =>
+            countChanges q updated.size
+            throw { code := SQLITE_CONSTRAINT_NOTNULL, msg := s!"NOT NULL constraint failed: {t.name}.{c.name}", keep := true }
+          | _ => err s!"NOT NULL constraint failed: {t.name}.{c.name}" SQLITE_CONSTRAINT_NOTNULL
+      if skipNN then continue
       checkRow t newRow
       -- conflicts, resolved by UPDATE OR <oc> (or the constraint's own ON CONFLICT)
       let oc := orC.getD .abort
