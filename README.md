@@ -40,12 +40,22 @@ siblings for TinyCC and libtommath.
   - ALTER TABLE with SQLite's rewriting of the stored SQL, transactions and savepoints, TEMP and attached in-memory databases;
   - prepare-time name resolution, and the core, math, printf, date/time and JSON/JSONB function libraries.
 - **Differential results** against `sqlite3`:
-  - `tests/sem` + `tests/sql`: 35 of 36 scripts agree (the other is the PRAGMA probe; that lane is in progress);
+  - `tests/sem` + `tests/sql`: all 64 scripts agree;
   - sqllogictest: `select1`–`select3` and `evidence/` agree on all 5,653 queries;
   - REAL rendering: 0 mismatches on 1.6M doubles;
   - printf/round/quote: 0 in 1.8M random calls;
   - date/time: 0 in 181k;
-  - JSON: 1 in 50k (the remaining cases are listed in PHASES.md).
+  - JSON: 0 in 13k random statements;
+  - random scripts (`experiments/fuzz/`): the remaining differences are
+    choices SQL leaves to the plan (scan order through an index, the random
+    rowid after 2^63−1).
+- **Totality and the relational semantics.** `Sql/` has no `partial def` and
+  no `while` loop (`scripts/check_total.py`). `Sql.Derives` (`Sql/Derives.lean`)
+  is the set of outputs a script may produce: the executable semantics with
+  the implementation's choices (`Sql.Choices`: row orders, `random()`, the
+  clock) as a parameter; the executable is sound for it.
+- **The theorem**, stated in `Spec/Refines.lean` and not yet proved: on an
+  admissible script, the Clight program terminates and its output is derived.
 - **Coverage:** `python3 scripts/coverage.py`.
 - **SQLite behaviour found:** places where SQLite relies on behaviour that is
   undefined in CompCert's memory model, one of them undefined in ISO C too
