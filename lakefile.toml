@@ -39,3 +39,7 @@ root = "tools.RealCheck"
 [[lean_exe]]
 name = "sql_run"
 root = "tools.SqlRun"
+
+[[lean_exe]]
+name = "printf_check"
+root = "tools.PrintfCheck"

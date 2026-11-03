@@ -3,6 +3,7 @@
 -/
 import Sql.Select
 import Sql.ParseStmt
+import Sql.Pragma
 
 namespace Sql
 
@@ -41,7 +42,9 @@ def mkTable (name : Name) (cols : List ColumnDef) (cons : List (Option Name × T
     if strict && !(strictTypes.contains cd.type.trimAscii.toString.toUpper) then
       if cd.type.trimAscii.toString.isEmpty then err s!"missing datatype for {name}.{cd.name}"
       err s!"unknown datatype for {name}.{cd.name}: \"{cd.type}\""
-    let mut c : Column := { name := cd.name, type := cd.type, aff := affinityOfType cd.type }
+    let ty := cd.type.trimAscii.toString
+    let ty := if strictTypes.contains ty.toUpper then ty.toUpper else P.unquote ty
+    let mut c : Column := { name := cd.name, type := ty, aff := affinityOfType ty }
     for (_, k) in cd.constraints do
       match k with
       | .notNull oc => c := { c with notNull := true, notNullConflict := oc }
@@ -116,11 +119,24 @@ structure StmtOut where
 
 def setDb (db : Db) : M Unit := modify fun c => { c with db := db }
 
+/-- Count `n` changed rows: always in total_changes(); in changes() only for a
+    top-level statement (not inside a trigger program). -/
+def countChanges (q : QEnv) (n : Int) : M Unit :=
+  let inTrigger := q.env.newRow.isSome || q.env.oldRow.isSome
+  modify fun c => { c with db := { c.db with
+    changes := if inTrigger then c.db.changes else n,
+    totalChanges := c.db.totalChanges + n } }
+
 def modifyMain (f : Schema → Schema) : M Unit :=
   modify fun c => { c with db := { c.db with main := f c.db.main } }
 
-def objExists (db : Db) (n : Name) : Bool :=
-  db.main.objs.any fun o => nameEq (Schema.objName o) n
+/-- Is the name taken in the database (`temp` or `main`) an object would go to? -/
+def objExists (db : Db) (n : Name) (temp : Bool := false) : Bool :=
+  db.main.objs.any fun o => nameEq (Schema.objName o) n && (match o with
+    | .table t => t.temp == temp
+    | .view v => v.temp == temp
+    | .index ix => (((db.main.findTable ix.table).map (·.temp)).getD false) == temp
+    | .trigger tr => (((db.main.findTable tr.table).map (·.temp)).getD false) == temp)
 
 /-- The sources of a single table, for evaluating its constraints and defaults. -/
 def rowScope (t : Table) (alias : Name) (r : Row) : Scope :=
@@ -230,9 +246,13 @@ def insertRow (tname : Name) (vals : Array Value) (rowidV : Option Value) (oc : 
       | .null => pure (maxRowid + 1)
       | _ => err "datatype mismatch" SQLITE_MISMATCH
     | none => pure (maxRowid + 1)
-  let rid := if t.autoinc && rowidV.all (·.isNull) then
-      max (maxRowid + 1) (((db.main.seq.find? (nameEq ·.1 t.name)).map (·.2)).getD 0 + 1)
-    else rid
+  let seqOf (s : Schema) : Int :=
+    match s.findTable "sqlite_sequence" with
+    | some st => (st.rows.findSome? fun r => match r.vals[0]?, r.vals[1]? with
+        | some (Value.text n), some v => if nameEq (String.fromUTF8! n) t.name then some v.numeric.toInt else none
+        | _, _ => none).getD 0
+    | none => 0
+  let rid := if t.autoinc && rowidV.all (·.isNull) then max (maxRowid + 1) (seqOf db.main + 1) else rid
   if let some ci := t.rowidCol then vals := vals.set! ci (.int rid)
   let mut row ← withGenerated t ⟨rid, vals⟩
   -- NOT NULL with conflict resolution
@@ -268,8 +288,16 @@ def insertRow (tname : Name) (vals : Array Value) (rowidV : Option Value) (oc : 
   modifyMain fun s => s.setTable t'
   if t.autoinc then
     modifyMain fun s =>
-      let cur := ((s.seq.find? (nameEq ·.1 t.name)).map (·.2)).getD 0
-      { s with seq := (t.name, max cur rid) :: s.seq.filter (!nameEq ·.1 t.name) }
+      match s.findTable "sqlite_sequence" with
+      | none => s
+      | some st =>
+        let cur := seqOf s
+        let mine (r : Row) : Bool := match r.vals[0]? with
+          | some (Value.text n) => nameEq (String.fromUTF8! n) t.name | _ => false
+        let rows := if st.rows.any mine then
+            st.rows.map fun r => if mine r then { r with vals := r.vals.set! 1 (.int (max cur rid)) } else r
+          else st.rows.push ⟨(st.rows.foldl (fun m r => max m r.rowid) 0) + 1, #[.ofString t.name, .int (max cur rid)]⟩
+        s.setTable { st with rows }
   return some row
 
 def resultRows (q : QEnv) (t : Table) (alias : Name) (rows : Array Row) (ret : List ResultCol) :
@@ -283,6 +311,166 @@ def resultRows (q : QEnv) (t : Table) (alias : Name) (rows : Array Row) (ret : L
       | .expr e _ _ => some <$> evalExpr q' e
       | _ => pure none
 
+/-! ## ALTER TABLE: rewriting the stored SQL text -/
+
+/-- Replace each identifier token of `sql` naming `old` (case-insensitive,
+    unquoted) by `new`. -/
+def renameIdent (sql : String) (old new : String) : String := Id.run do
+  let b := sql.toUTF8
+  let toks := tokenize b
+  let mut out := ByteArray.empty
+  let mut pos := 0
+  for t in toks do
+    let txt := String.fromUTF8! (b.extract t.start t.stop)
+    let isName := t.tk == .id || (match t.tk with | .kw c => fallbackToId.contains c | _ => false)
+    if isName && nameEq (P.unquote txt) old then
+      out := out ++ b.extract pos t.start ++ new.toUTF8
+      pos := t.stop
+  return String.fromUTF8! (out ++ b.extract pos b.size)
+
+/-- Insert `, coldef` before the last `)` of a CREATE TABLE text. -/
+def addColumnText (sql coldef : String) : String :=
+  let cs := sql.toList
+  match (List.range cs.length).reverse.find? (fun i => cs[i]! == ')') with
+  | some i => String.ofList (cs.take i) ++ ", " ++ coldef ++ String.ofList (cs.drop i)
+  | none => sql
+
+/-- Remove the definition of column `col` (with its preceding comma) from a
+    CREATE TABLE text: from the comma before the column's name token to just
+    before the next top-level comma or the closing `)`. -/
+def dropColumnText (sql col : String) : String := Id.run do
+  let b := sql.toUTF8
+  let toks := tokenize b
+  -- the column list: tokens inside the outermost ( )
+  let mut depth := 0
+  let mut startTok : Option Nat := none     -- index of the comma before the column
+  let mut i := 0
+  let mut prevComma : Option Nat := none
+  while i < toks.size do
+    let t := toks[i]!
+    if t.tk == .op "LP" then
+      depth := depth + 1
+      if depth == 1 then prevComma := some i
+    else if t.tk == .op "RP" then depth := depth - 1
+    else if t.tk == .op "COMMA" && depth == 1 then prevComma := some i
+    else if depth == 1 && prevComma == some (i - 1) &&
+        nameEq (P.unquote (String.fromUTF8! (b.extract t.start t.stop))) col then
+      startTok := prevComma
+      break
+    i := i + 1
+  let some st := startTok | return sql
+  -- the end: the next top-level comma or the closing paren
+  let mut j := i
+  let mut d := 1
+  while j < toks.size do
+    let t := toks[j]!
+    if t.tk == .op "LP" then d := d + 1
+    else if t.tk == .op "RP" then
+      d := d - 1
+      if d == 0 then break
+    else if t.tk == .op "COMMA" && d == 1 then break
+    j := j + 1
+  let stTok := toks[st]!
+  if stTok.tk == .op "LP" then
+    -- the first column: drop it and the comma after it
+    let endPos := if j < toks.size && toks[j]!.tk == .op "COMMA" then
+        (toks[j + 1]?.map (·.start)).getD toks[j]!.stop
+      else (toks[j]?.map (·.start)).getD b.size
+    return String.fromUTF8! (b.extract 0 stTok.stop ++ b.extract endPos b.size)
+  let endPos := (toks[j]?.map (·.start)).getD b.size
+  return String.fromUTF8! (b.extract 0 stTok.start ++ b.extract endPos b.size)
+
+def renameColTerm (old new : Name) : OrderTerm → OrderTerm
+  | .mk (.col sc tb c) d n => .mk (if nameEq c old then .col sc tb new else .col sc tb c) d n
+  | t => t
+
+def renameColInIndex (tname old new : Name) : SchemaObj → SchemaObj
+  | .index ix =>
+    if nameEq ix.table tname then
+      .index { ix with sql := ix.sql.map (fun x => renameIdent x old new), cols := ix.cols.map (renameColTerm old new) }
+    else .index ix
+  | o => o
+
+def renameAutoIndex (tname new : Name) (n : Name) : Name :=
+  let pre := s!"sqlite_autoindex_{tname}_"
+  if n.startsWith pre then s!"sqlite_autoindex_{new}_" ++ (n.drop pre.length).toString else n
+
+/-- One schema object after `ALTER TABLE tname RENAME TO new` (`q` is `"new"`). -/
+def renameTableObj (tname new q : Name) (t' : Table) : SchemaObj → SchemaObj
+  | .table u =>
+    if nameEq u.name tname then .table t'
+    else
+      let refers := u.fks.any (fun fk => nameEq fk.parent tname)
+      .table { u with
+        sql := if refers then renameIdent u.sql tname q else u.sql,
+        fks := u.fks.map (fun fk => if nameEq fk.parent tname then { fk with parent := new } else fk) }
+  | .index ix =>
+    if nameEq ix.table tname then
+      .index { ix with table := new, sql := ix.sql.map (fun x => renameIdent x tname q),
+                       name := renameAutoIndex tname new ix.name }
+    else .index ix
+  | .view v => .view { v with sql := renameIdent v.sql tname q }
+  | .trigger tr =>
+    if nameEq tr.table tname then .trigger { tr with table := new, sql := renameIdent tr.sql tname q }
+    else .trigger tr
+
+/-! ## Foreign keys -/
+
+/-- The parent columns of a foreign key: as named, or the parent's PRIMARY KEY. -/
+def fkParentCols (parent : Table) (fk : ForeignKey) : List (Option Nat) :=
+  if fk.parentCols.isEmpty then
+    match parent.rowidCol with
+    | some ci => [some ci]
+    | none => if parent.pk.isEmpty then [none] else parent.pk.map some
+  else fk.parentCols.map fun n =>
+    match parent.cols.toList.findIdx? (nameEq ·.name n) with
+    | some i => some i
+    | none => if isRowidName n then none else some 1000000
+
+/-- The parent key value at a column position (`none` = rowid). -/
+def parentVal (parent : Table) (r : Row) : Option Nat → Value
+  | some i => r.vals[i]?.getD .null
+  | none => .int r.rowid
+
+/-- Does a child key have a parent row? -/
+def hasParent (parent : Table) (fk : ForeignKey) (key : List Value) : Bool :=
+  let pcols := fkParentCols parent fk
+  parent.rows.any fun r =>
+    (key.zip pcols).all fun (v, pc) =>
+      let pv := parentVal parent r pc
+      let aff := match pc with | some i => (parent.cols[i]?.map (·.aff)) | none => some Aff.integer
+      let coll := match pc with | some i => ((parent.cols[i]?.map (·.coll)).getD .binary) | none => .binary
+      compareValues coll (cmpConvert aff v) pv == .eq
+
+/-- The number of child rows whose foreign key has no parent. -/
+def fkOrphans (db : Db) : Nat := Id.run do
+  let mut n := 0
+  for t in db.main.tables do
+    for fk in t.fks do
+      match db.main.findTable fk.parent with
+      | none => pure ()
+      | some parent =>
+        for r in t.rows do
+          let key := fk.cols.map fun i => r.vals[i]?.getD .null
+          if key.any (·.isNull) then continue
+          if !hasParent parent fk key then n := n + 1
+  return n
+
+/-- The child rows (table, row) referring to a parent row through a foreign key. -/
+def fkChildren (db : Db) (parentName : Name) (pr : Row) : List (Table × ForeignKey × Row) :=
+  match db.main.findTable parentName with
+  | none => []
+  | some parent =>
+    db.main.tables.flatMap fun t => t.fks.flatMap fun fk =>
+      if !nameEq fk.parent parentName then [] else
+      let pcols := fkParentCols parent fk
+      (t.rows.filter fun r =>
+        let key := fk.cols.map fun i => r.vals[i]?.getD .null
+        !(key.any (·.isNull)) &&
+        (key.zip pcols).all fun (v, pc) => compareValues .binary (cmpConvert (match pc with
+          | some i => parent.cols[i]?.map (·.aff) | none => some .integer) v) (parentVal parent pr pc) == .eq).toList.map
+        fun r => (t, fk, r)
+
 mutual
 
 /-- Execute a statement; returns its output rows. -/
@@ -292,14 +480,19 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
     let (_, rows) ← runSelect q sel
     return rows
   | .explain _ _ => err "EXPLAIN is not modelled"
-  | .createTable temp ine sch name cols cons wr strict asSel sql =>
-    let _ := sch
-    if temp then err "TEMP tables are not modelled yet"
+  | .createTable temp ine sch name cols cons wr strict asSel sql tailStart =>
+    let temp := temp || sch.any (nameEq · "temp")
     let db ← getDb
-    if objExists db name then
+    let errAt {α} (m : String) (t : Nat) : M α := throw { code := SQLITE_ERROR, msg := m, tail := some t }
+    if objExists db name temp then
       if ine then return #[]
-      if (db.main.findTable name).isSome then err s!"table {name} already exists"
-      err s!"there is already an index named {name}"
+      if (db.main.findTable name).isSome || (db.main.findView name).isSome then errAt s!"table {name} already exists" tailStart
+      errAt s!"there is already an index named {name}" tailStart
+    -- errors in a column definition stop prepare after that definition
+    let mut seen : List Name := []
+    for cd in cols do
+      if seen.any (nameEq · cd.name) then errAt s!"duplicate column name: {cd.name}" cd.tailAt
+      seen := cd.name :: seen
     if name.toLower.startsWith "sqlite_" then err s!"object name reserved for internal use: {name}"
     let t ← match asSel with
       | some sel =>
@@ -310,12 +503,17 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
         let sqlText := "CREATE TABLE " ++ name ++ "(" ++ ",".intercalate (cds.map fun c => c.name ++ (if c.type.isEmpty then "" else " " ++ c.type)) ++ ")"
         pure { t with sql := sqlText, rows := rows.mapIdx fun i r => ⟨i + 1, r⟩ }
       | none => mkTable name cols cons wr strict sql
+    let t := { t with temp }
     -- automatic indexes for UNIQUE and non-rowid PRIMARY KEY constraints
     let nAuto := t.uniques.length
     modifyMain fun s => { s with objs := s.objs.push (.table t) ++
       ((List.range nAuto).toArray.map fun i => .index
         { name := s!"sqlite_autoindex_{name}_{i + 1}", table := name, cols := [], unique := false,
           where_ := none, sql := none }) }
+    if t.autoinc && ((← getDb).main.findTable "sqlite_sequence").isNone then
+      let st ← mkTable "sqlite_sequence" [{ name := "name", type := "", constraints := [] },
+        { name := "seq", type := "", constraints := [] }] [] false false "CREATE TABLE sqlite_sequence(name,seq)"
+      modifyMain fun s => { s with objs := s.objs.push (.table st) }
     return #[]
   | .createIndex unique ine _ name tname cols w sql =>
     let db ← getDb
@@ -336,21 +534,21 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
             if keyEq k keys[i] keys[j]! then err (uniqueMsg t k) SQLITE_CONSTRAINT_UNIQUE
     return #[]
   | .createView temp ine _ name cols sel sql =>
-    if temp then err "TEMP views are not modelled yet"
     let db ← getDb
-    if objExists db name then
+    if objExists db name temp then
       if ine then return #[]
       err s!"view {name} already exists"
     let _ ← runSelect q sel
-    modifyMain fun s => { s with objs := s.objs.push (.view { name, cols, q := sel, sql }) }
+    modifyMain fun s => { s with objs := s.objs.push (.view { name, cols, q := sel, sql, temp }) }
     return #[]
-  | .createTrigger _ ine _ name time ev tname _ w body sql =>
+  | .createTrigger _ ine _ name time ev tname _ w body sql tailBegin =>
     let db ← getDb
+    let errAt {α} (m : String) : M α := throw { code := SQLITE_ERROR, msg := m, tail := some tailBegin }
     if objExists db name then
       if ine then return #[]
-      err s!"trigger {name} already exists"
+      errAt s!"trigger {name} already exists"
     if (db.main.findTable tname).isNone && (db.main.findView tname).isNone then
-      err s!"no such table: main.{tname}"
+      errAt s!"no such table: main.{tname}"
     modifyMain fun s => { s with objs := s.objs.push (.trigger { name, table := tname, time, event := ev, when_ := w, body, sql }) }
     return #[]
   | .drop kind ie _ name =>
@@ -371,6 +569,8 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
           | _ => false) }
       return #[]
   | .insert _ orC _ tname _ cols src upserts ret =>
+    if ← viewWithTriggers tname then
+      return ← insertView q tname cols src
     let t ← currentTable tname
     let oc := orC.getD .abort
     let colIdx ← if cols.isEmpty then pure (List.range t.cols.size)
@@ -392,7 +592,9 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
             err s!"{cm.size} values for {ncols} columns"
           pure rows
       | .defaults => pure #[#[]]
-    let colIdx := if cols.isEmpty then (List.range t.cols.size).filter fun i => t.cols[i]!.generated.isNone else colIdx
+    let colIdx := match src with
+      | .defaults => []
+      | _ => if cols.isEmpty then (List.range t.cols.size).filter fun (i : Nat) => (t.cols[i]!).generated.isNone else colIdx
     let mut inserted := #[]
     let mut n : Int := 0
     for r in srcRows do
@@ -408,9 +610,20 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
           if let some d := t.cols[i].dflt then vals := vals.set! i (← evalExpr {} d)
       if let some ci := t.rowidCol then
         if given[ci]! then rowidV := some vals[ci]!
+      -- BEFORE INSERT triggers see NEW with the defaults (rowid -1 when it is not given)
+      let hasBefore := (← getDb).main.triggers.any fun tr => nameEq tr.table tname && tr.time == .before &&
+        match tr.event with | .insert => true | _ => false
+      if hasBefore then
+        let mut nvals := vals
+        for h : i in [0:t.cols.size] do nvals := nvals.set! i (← storeValue t i (vals[i]?.getD .null))
+        let rid := match rowidV.map (applyAffinity .integer) with | some (.int i) => i | _ => -1
+        runTriggers q .before .insert tname none (some ⟨rid, nvals⟩)
       -- UPSERT: a conflict on the target runs the DO clause instead
       let r? : Option Row ← try (insertRow tname vals rowidV (if upserts.isEmpty then oc else .abort))
         catch e => do
+          if oc == .fail && upserts.isEmpty then
+            modify fun c => { c with db := { c.db with changes := n, totalChanges := c.db.totalChanges + n } }
+            throw { e with keep := true }
           if upserts.isEmpty || !(e.code == SQLITE_CONSTRAINT_UNIQUE || e.code == SQLITE_CONSTRAINT_PRIMARYKEY) then throw e
           let some up := upserts.head? | throw e
           match up.action with
@@ -429,7 +642,7 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
             match conflict with
             | none => throw e
             | some old =>
-              let exSrc := { tableSrc "excluded" t with hasRowid := false }
+              let exSrc := { tableSrc "excluded" t with hasRowid := false, qualOnly := true }
               let qx := { q with env := { q.env with frames := { srcs := #[tableSrc t.name t, exSrc], cur := #[some old, some probe] } :: q.env.frames } }
               let pass ← match wh with
                 | some wexp => do pure (truth (← evalExpr qx wexp) == some true)
@@ -457,24 +670,33 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
         modify fun c => { c with db := { c.db with lastRowid := row.rowid } }
         runTriggers q .after (.insert) tname none (some row)
       | _ => pure ()
-    modify fun c => { c with db := { c.db with changes := n, totalChanges := c.db.totalChanges + n } }
+    countChanges q n
     resultRows q (← currentTable tname) tname inserted ret
   | .update _ orC _ tname alias sets from_ wh ret _ _ _ =>
-    let _ := from_
     let _ := orC
+    if ← viewWithTriggers tname then
+      return ← updateView q tname sets wh
     let t ← currentTable tname
     let alias := alias.getD tname
     let src := tableSrc alias t
-    let mut targets : Array Row := #[]
+    -- with FROM: each target row is joined with the FROM rows; the first match is used
+    let (fsrcs, frows) ← match from_ with
+      | some f => evalFrom q f
+      | none => pure (#[], #[#[]])
+    let mut targets : Array (Row × Array Cur) := #[]
     for r in t.rows do
-      let qr := { q with env := { q.env with frames := { srcs := #[src], cur := #[some r] } :: q.env.frames } }
-      match wh with
-      | some w => if truth (← evalExpr qr w) == some true then targets := targets.push r
-      | none => targets := targets.push r
+      for fr in frows do
+        let qr := { q with env := { q.env with frames := { srcs := #[src] ++ fsrcs, cur := #[some r] ++ fr } :: q.env.frames } }
+        let ok ← match wh with
+          | some w => do pure (truth (← evalExpr qr w) == some true)
+          | none => pure true
+        if ok then targets := targets.push (r, fr); break
     let mut updated := #[]
-    for old in targets do
+    for (old, fr) in targets do
       let t ← currentTable tname
-      let qr := { q with env := { q.env with frames := { srcs := #[src], cur := #[some old] } :: q.env.frames } }
+      -- the row as it is now (an earlier trigger may have changed it)
+      let some old := t.rows.find? (·.rowid == old.rowid) | continue
+      let qr := { q with env := { q.env with frames := { srcs := #[src] ++ fsrcs, cur := #[some old] ++ fr } :: q.env.frames } }
       let mut nv := old.vals
       let mut newRowid := old.rowid
       for (names, ex) in sets do
@@ -494,6 +716,8 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
               | _ => err "datatype mismatch" SQLITE_MISMATCH
             else err s!"no such column: {nm}"
       let newRow ← withGenerated t ⟨newRowid, nv⟩
+      runTriggers q .before (.update (sets.flatMap (·.1))) tname (some old) (some newRow)
+      let t ← currentTable tname
       checkRow t newRow
       let others := t.rows.filter (·.rowid != old.rowid)
       if others.any (·.rowid == newRowid) && !t.withoutRowid then
@@ -503,12 +727,15 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
         if others.any (fun r => keyEq k (keyOf r k) (keyOf newRow k)) then
           err (uniqueMsg t k) (if k.isPk then SQLITE_CONSTRAINT_PRIMARYKEY else SQLITE_CONSTRAINT_UNIQUE)
       modifyMain fun s => s.setTable { t with rows := sortRows t (others.push newRow) }
+      fkOnParentUpdate tname old newRow
       updated := updated.push newRow
       let changedCols := sets.flatMap (·.1)
       runTriggers q .after (.update changedCols) tname (some old) (some newRow)
-    modify fun c => { c with db := { c.db with changes := updated.size, totalChanges := c.db.totalChanges + updated.size } }
+    countChanges q updated.size
     resultRows q (← currentTable tname) alias updated ret
   | .delete _ _ tname alias wh ret _ _ _ =>
+    if ← viewWithTriggers tname then
+      return ← deleteView q tname wh
     let t ← currentTable tname
     let alias := alias.getD tname
     let src := tableSrc alias t
@@ -523,8 +750,9 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
       runTriggers q .before .delete tname (some r) none
       let t ← currentTable tname
       modifyMain fun s => s.setTable { t with rows := t.rows.filter (·.rowid != r.rowid) }
+      fkOnParentDelete tname r
       runTriggers q .after .delete tname (some r) none
-    modify fun c => { c with db := { c.db with changes := gone.size, totalChanges := c.db.totalChanges + gone.size } }
+    countChanges q gone.size
     return out
   | .begin_ _ =>
     let db ← getDb
@@ -566,8 +794,195 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
         setDb { db with savepoints := [], inTxn := false }
       else setDb { db with savepoints := rest }
       return #[]
-  | .pragma _ name arg _ => execPragma q name arg
+  | .pragma sch name arg call =>
+    let argV ← match arg with
+      | some e => some <$> evalExpr q (match e with | .col none none n => .lit (.ofString n) | x => x)
+      | none => pure none
+    match Pragma.run (← getDb) sch name.toLower argV call with
+    | some (.ok (db', rows)) => setDb db'; return rows
+    | some (.error e) => throw e
+    | none => execPragma q name arg
+  | .alterAddColumn _ tname cd txt =>
+    let t ← currentTable tname
+    if t.cols.any (nameEq ·.name cd.name) then err s!"duplicate column name: {cd.name}"
+    for (_, k) in cd.constraints do
+      match k with
+      | .primaryKey .. => err "Cannot add a PRIMARY KEY column"
+      | .unique .. => err "Cannot add a UNIQUE column"
+      | .generated _ true => err "cannot add a STORED column"
+      | _ => pure ()
+    let t1 ← mkTable t.name [cd] [] false false ""
+    let c := t1.cols[0]!
+    if c.notNull && c.dflt.isNone && c.generated.isNone && !t.rows.isEmpty then
+      err "Cannot add a NOT NULL column with default value NULL"
+    let dv ← match c.dflt with
+      | some d => storeValue { t with cols := t.cols.push c } t.cols.size (← evalExpr {} d)
+      | none => pure .null
+    let newFks := t1.fks.map (fun (fk : ForeignKey) => { fk with cols := [t.cols.size] })
+    let newRows := t.rows.map (fun (r : Row) => { r with vals := r.vals.push dv })
+    let t' := { t with cols := t.cols.push c, checks := t.checks ++ t1.checks, fks := t.fks ++ newFks,
+                       sql := addColumnText t.sql txt, rows := newRows }
+    let t' := { t' with rows := ← t'.rows.mapM (withGenerated t') }
+    modifyMain fun s => s.setTable t'
+    return #[]
+  | .alterRenameColumn _ tname old new =>
+    let t ← currentTable tname
+    let some ci := t.cols.toList.findIdx? (nameEq ·.name old) | err s!"no such column: \"{old}\""
+    if t.cols.any (nameEq ·.name new) then err s!"duplicate column name: {new}"
+    let t' := { t with cols := t.cols.modify ci (fun c => { c with name := new }), sql := renameIdent t.sql old new }
+    modifyMain fun s => { (s.setTable t') with objs := (s.setTable t').objs.map (renameColInIndex tname old new) }
+    return #[]
+  | .alterRename _ tname new =>
+    let t ← currentTable tname
+    let db ← getDb
+    if objExists db new then err s!"there is already another table or index with this name: {new}"
+    let q' := "\"" ++ new ++ "\""
+    let t' := { t with name := new, sql := renameIdent t.sql tname q' }
+    modifyMain fun s => { s with objs := s.objs.map (renameTableObj tname new q' t') }
+    return #[]
+  | .alterDropColumn _ tname col =>
+    let t ← currentTable tname
+    let some ci := t.cols.toList.findIdx? (nameEq ·.name col) | err s!"no such column: \"{col}\""
+    if t.pk.contains ci then err s!"cannot drop PRIMARY KEY column: \"{col}\""
+    if t.uniques.any (·.cols.any (·.1 == ci)) then err s!"cannot drop UNIQUE column: \"{col}\""
+    if t.cols.size == 1 then err s!"cannot drop column \"{col}\": no other columns exist"
+    let shift (i : Nat) : Nat := if i > ci then i - 1 else i
+    let t' := { t with cols := t.cols.eraseIdx! ci, rowidCol := t.rowidCol.map shift, pk := t.pk.map shift,
+                       sql := dropColumnText t.sql col,
+                       rows := t.rows.map fun r => { r with vals := r.vals.eraseIdx! ci } }
+    modifyMain fun s => s.setTable t'
+    return #[]
+  | .reindex none => return #[]
+  | .reindex (some n) =>
+    let db ← getDb
+    if (collOfName n).isSome || (db.main.findTable n).isSome || db.main.indexes.any (nameEq ·.name n) then return #[]
+    err "unable to identify the object to be reindexed"
+  | .analyze _ => return #[]
+  | .vacuum _ none => return #[]
   | _ => err "statement not modelled yet"
+
+/-- ON DELETE actions for the children of a deleted parent row. -/
+partial def fkOnParentDelete (pname : Name) (pr : Row) : M Unit := do
+  let db ← getDb
+  if !db.pragmas.foreignKeys then return
+  for (t, fk, cr) in fkChildren db pname pr do
+    match fk.onDelete with
+    | "CASCADE" =>
+      let t ← currentTable t.name
+      modifyMain fun s => s.setTable { t with rows := t.rows.filter (·.rowid != cr.rowid) }
+      -- foreign key actions are trigger programs: counted in total_changes()
+      modify fun c => { c with db := { c.db with totalChanges := c.db.totalChanges + 1 } }
+      fkOnParentDelete t.name cr
+    | "SET NULL" | "SET DEFAULT" =>
+      let t ← currentTable t.name
+      let mut nv := cr.vals
+      for i in fk.cols do
+        let v ← if fk.onDelete == "SET NULL" then pure Value.null else
+          match t.cols[i]!.dflt with
+          | some d => evalExpr {} d
+          | none => pure .null
+        nv := nv.set! i v
+      modifyMain fun s => s.setTable { t with rows := t.rows.map fun r => if r.rowid == cr.rowid then { r with vals := nv } else r }
+      modify fun c => { c with db := { c.db with totalChanges := c.db.totalChanges + 1 } }
+    | "RESTRICT" => err "FOREIGN KEY constraint failed" SQLITE_CONSTRAINT_FOREIGNKEY
+    | _ => pure ()
+
+/-- ON UPDATE actions for the children of a parent row whose key changed. -/
+partial def fkOnParentUpdate (pname : Name) (old new : Row) : M Unit := do
+  let db ← getDb
+  if !db.pragmas.foreignKeys then return
+  let some parent := db.main.findTable pname | return
+  for (t, fk, cr) in fkChildren db pname old do
+    let pcols := fkParentCols parent fk
+    let changed := pcols.any fun pc => compareValues .binary (parentVal parent old pc) (parentVal parent new pc) != .eq
+    if !changed then continue
+    match fk.onUpdate with
+    | "CASCADE" | "SET NULL" | "SET DEFAULT" =>
+      let t ← currentTable t.name
+      let mut nv := cr.vals
+      for (i, pc) in fk.cols.zip pcols do
+        let v ← match fk.onUpdate with
+          | "CASCADE" => pure (parentVal parent new pc)
+          | "SET NULL" => pure Value.null
+          | _ => match t.cols[i]!.dflt with
+            | some d => evalExpr {} d
+            | none => pure .null
+        nv := nv.set! i v
+      modifyMain fun s => s.setTable { t with rows := t.rows.map fun r => if r.rowid == cr.rowid then { r with vals := nv } else r }
+      modify fun c => { c with db := { c.db with totalChanges := c.db.totalChanges + 1 } }
+    | "RESTRICT" => err "FOREIGN KEY constraint failed" SQLITE_CONSTRAINT_FOREIGNKEY
+    | _ => pure ()
+
+/-- Is `n` a view (DML on it runs its INSTEAD OF triggers)? -/
+partial def viewWithTriggers (n : Name) : M Bool := do
+  let db ← getDb
+  return (db.main.findTable n).isNone && (db.main.findView n).isSome
+
+partial def viewRows (q : QEnv) (n : Name) : M (Src × Array Row) := namedSource q none n n
+
+partial def insertView (q : QEnv) (vname : Name) (cols : List Name) (src : InsertSource) : M (Array (Array Value)) := do
+  let (vsrc, _) ← viewRows q vname
+  let rows ← match src with
+    | .values rs => rs.toArray.mapM fun r => r.toArray.mapM (evalExpr q)
+    | .select sel => do let (_, rs) ← runSelect q sel; pure rs
+    | .defaults => pure #[#[]]
+  let hasIO := (← getDb).main.triggers.any fun tr => nameEq tr.table vname && tr.time == .insteadOf &&
+    match tr.event with | .insert => true | _ => false
+  if !hasIO then err s!"cannot modify {vname} because it is a view"
+  let n := vsrc.cols.size
+  let idx := if cols.isEmpty then List.range n else cols.filterMap fun c => vsrc.cols.toList.findIdx? fun (m, _, _) => nameEq m c
+  for r in rows do
+    let mut vals := Array.replicate n Value.null
+    for (ci, k) in idx.zipIdx do vals := vals.set! ci (r[k]?.getD .null)
+    runViewTriggers q vname .insert none (some ⟨-1, vals⟩) vsrc
+  return #[]
+
+partial def updateView (q : QEnv) (vname : Name) (sets : List (List Name × Expr)) (wh : Option Expr) : M (Array (Array Value)) := do
+  let (vsrc, rows) ← viewRows q vname
+  let hasIO := (← getDb).main.triggers.any fun tr => nameEq tr.table vname && tr.time == .insteadOf &&
+    match tr.event with | .update _ => true | _ => false
+  if !hasIO then err s!"cannot modify {vname} because it is a view"
+  for r in rows do
+    let qr := { q with env := { q.env with frames := { srcs := #[vsrc], cur := #[some r] } :: q.env.frames } }
+    if let some w := wh then
+      if truth (← evalExpr qr w) != some true then continue
+    let mut nv := r.vals
+    for (names, ex) in sets do
+      let v ← evalExpr qr ex
+      for nm in names do
+        match vsrc.cols.toList.findIdx? (fun (m, _, _) => nameEq m nm) with
+        | some i => nv := nv.set! i v
+        | none => err s!"no such column: {nm}"
+    runViewTriggers q vname (.update (sets.flatMap (·.1))) (some r) (some { r with vals := nv }) vsrc
+  return #[]
+
+partial def deleteView (q : QEnv) (vname : Name) (wh : Option Expr) : M (Array (Array Value)) := do
+  let (vsrc, rows) ← viewRows q vname
+  let hasIO := (← getDb).main.triggers.any fun tr => nameEq tr.table vname && tr.time == .insteadOf &&
+    match tr.event with | .delete => true | _ => false
+  if !hasIO then err s!"cannot modify {vname} because it is a view"
+  for r in rows do
+    let qr := { q with env := { q.env with frames := { srcs := #[vsrc], cur := #[some r] } :: q.env.frames } }
+    if let some w := wh then
+      if truth (← evalExpr qr w) != some true then continue
+    runViewTriggers q vname .delete (some r) none vsrc
+  return #[]
+
+/-- INSTEAD OF triggers of a view. -/
+partial def runViewTriggers (q : QEnv) (vname : Name) (ev : TriggerEvent) (old new : Option Row) (src : Src) : M Unit := do
+  for tr in (← getDb).main.triggers do
+    if !nameEq tr.table vname || tr.time != .insteadOf then continue
+    let fires := match tr.event, ev with
+      | .insert, .insert | .delete, .delete => true
+      | .update cols, .update changed => cols.isEmpty || cols.any fun c => changed.any (nameEq · c)
+      | _, _ => false
+    if !fires then continue
+    let qt := { q with env := { q.env with newRow := new.map (src, ·), oldRow := old.map (src, ·) } }
+    if let some w := tr.when_ then
+      if truth (← evalExpr qt w) != some true then continue
+    for st in tr.body do
+      let r ← try (some <$> execStmt qt st) catch e => if e.code == 0 then pure none else throw e
+      if r.isNone then break
 
 partial def execPragma (q : QEnv) (name : Name) (arg : Option Expr) : M (Array (Array Value)) := do
   let db ← getDb
@@ -629,16 +1044,29 @@ partial def runTriggers (q : QEnv) (time : TriggerTime) (ev : TriggerEvent) (tab
       if r.isNone then break
 end
 
-/-- Execute a statement atomically: on error the database is as before. -/
-def runStmt (s : Stmt) : M (Array (Array Value)) := do
+/-- Execute a statement atomically: on error the database is as before
+    (except for what SQLite keeps: `OR FAIL` rows, and the counters). The
+    error is returned, not thrown, so that the state after it is kept. -/
+def runStmt (s : Stmt) : M (Except Err (Array (Array Value))) := do
   let saved ← get
   try
+    let before := fkOrphans saved.db
     let rows ← execStmt {} s
-    return rows
+    let db ← getDb
+    -- immediate foreign keys: the violation counter at the end of the statement
+    if db.pragmas.foreignKeys then
+      let isDml := match s with | .insert .. | .update .. | .delete .. => true | _ => false
+      if isDml && fkOrphans db > before then
+        -- a DELETE's rows were deleted (and counted) before the check failed
+        let counted := match s with | .delete .. => db.changes | _ => 0
+        set { saved with db := { saved.db with changes := 0, totalChanges := saved.db.totalChanges + counted } }
+        return .error { code := SQLITE_CONSTRAINT_FOREIGNKEY, msg := "FOREIGN KEY constraint failed" }
+    return .ok rows
   catch e =>
-    -- keep the counters, restore the data
-    set { saved with db := { saved.db with changes := saved.db.changes } }
-    throw e
+    if !e.keep then
+      -- a failed statement changes nothing, and changes() becomes 0
+      set { saved with db := { saved.db with changes := 0 } }
+    return .error e
 
 /-- Run a script as the driver does: statement by statement, printing rows and errors. -/
 partial def runScript (src : ByteArray) : ByteArray := Id.run do
@@ -651,7 +1079,7 @@ partial def runScript (src : ByteArray) : ByteArray := Id.run do
     match parseNext src pos with
     | .empty => break
     | .error msg tail =>
-      out := out ++ renderErr ⟨SQLITE_ERROR, msg⟩
+      out := out ++ renderErr { code := SQLITE_ERROR, msg }
       if tail ≤ pos then
         -- no progress: skip to after the next ';'
         let mut i := pos
@@ -660,11 +1088,14 @@ partial def runScript (src : ByteArray) : ByteArray := Id.run do
       else pos := tail
     | .ok stmt tail =>
       pos := tail
-      match (runStmt stmt).run ctx with
-      | .ok (rows, ctx') =>
+      match (runStmt stmt).run.run ctx with
+      | (.ok (.ok rows), ctx') =>
         ctx := ctx'
         for r in rows do out := out ++ renderRow r
-      | .error e => out := out ++ renderErr e
+      | (.ok (.error e), ctx') | (.error e, ctx') =>
+        ctx := ctx'
+        out := out ++ renderErr e
+        if let some t := e.tail then pos := t
   return out
 
 end Sql
