@@ -76,6 +76,32 @@ structure AggArg where
   vals : List Value
   deriving Inhabited
 
+def windowParamBase : Nat := 1000000000
+
+/-- Replace each window-function call (outside subqueries) by a numbered
+    parameter; returns the rewritten expressions and the calls in order. -/
+partial def replaceWindows (es : List Expr) : List Expr × List Expr :=
+  let rec go (e : Expr) : StateM (Array Expr) Expr := do
+    match e with
+    | .call n d args st ob f (some w) =>
+      let k := (← get).size
+      modify (·.push (.call n d args st ob f (some w)))
+      return .param "__window" (windowParamBase + k)
+    | .call n d args st ob f none => return .call n d (← args.mapM go) st ob f none
+    | .unop o a => return .unop o (← go a)
+    | .binop o a b => return .binop o (← go a) (← go b)
+    | .collate a c => return .collate (← go a) c
+    | .cast a t => return .cast (← go a) t
+    | .isNull ng a => return .isNull ng (← go a)
+    | .between ng a b c => return .between ng (← go a) (← go b) (← go c)
+    | .inList ng a l => return .inList ng (← go a) (← l.mapM go)
+    | .like o ng a b c => return .like o ng (← go a) (← go b) (← c.mapM go)
+    | .case_ b ws el => return .case_ (← b.mapM go) (← ws.mapM fun (x, y) => do pure (← go x, ← go y)) (← el.mapM go)
+    | .row l => return .row (← l.mapM go)
+    | x => return x
+  let (es', calls) := (es.mapM go).run #[]
+  (es', calls.toList)
+
 def iifPick : List Value → Value
   | c :: v :: rest => if truth c == some true then v else iifPick rest
   | [e] => e
@@ -269,8 +295,7 @@ partial def evalExpr (q : QEnv) (e : Expr) : M Value := do
   | .row _ => err "row value misused"
   | .call n distinct args star ob filter over =>
     if over.isSome then
-      match env.windowVals.find? (fun _ => false) with
-      | _ => err s!"misuse of window function {n}()"
+      err s!"misuse of window function {n}()"
     else if isAggCall n args.length star false then
       evalAgg q n distinct args star ob filter
     else
@@ -349,9 +374,14 @@ partial def evalAgg (q : QEnv) (n : Name) (distinct : Bool) (args : List Expr) (
     for (vs, _) in rows do
       if !(seen.any fun s => rowsEq [coll] s.toArray vs.toArray) then seen := seen.push vs
     rows := seen.map (·, #[])
-  let vals := rows.map (·.1)
-  let arg1 := vals.map fun vs => vs.head?.getD .null
   let coll := ((args.head?.bind (exprColl q.env)).map (·.1)).getD .binary
+  aggFinish q n star args coll (rows.map (·.1))
+
+/-- An aggregate over the argument lists of its rows (after FILTER, ORDER BY, DISTINCT). -/
+partial def aggFinish (q : QEnv) (n : Name) (star : Bool) (args : List Expr) (coll : Coll)
+    (vals : Array (List Value)) : M Value := do
+  let name := n.toLower
+  let arg1 := vals.map fun vs => vs.head?.getD .null
   match name with
   | "count" =>
     if star || args.isEmpty then return .int vals.size
@@ -652,6 +682,183 @@ partial def setCur (q : QEnv) (cur : Array Cur) : QEnv :=
   | f :: rest => { q with env := { q.env with frames := { f with cur } :: rest } }
   | [] => q
 
+/-- A window definition with its base window (named in the WINDOW clause) merged in. -/
+partial def resolveWindow (windows : List (Name × Window)) (w : Window) : M Window := do
+  let .mk base part ord frame := w
+  match base with
+  | none => return w
+  | some b =>
+    match windows.find? (fun (n, _) => nameEq n b) with
+    | none => err s!"no such window: {b}"
+    | some (_, bw) =>
+      let .mk _ bpart bord bframe ← resolveWindow windows bw
+      if !part.isEmpty then err s!"cannot override PARTITION clause of window: {b}"
+      if !ord.isEmpty && !bord.isEmpty then err s!"cannot override ORDER BY clause of window: {b}"
+      return .mk none bpart (if ord.isEmpty then bord else ord) (frame.orElse fun _ => bframe)
+
+/-- Values of one window function call for each row context, and the sorted order of the rows. -/
+partial def computeWindow (ctxs : Array QEnv) (windows : List (Name × Window)) (call : Expr) :
+    M (Array Value × Array Nat) := do
+  let .call n _ args star _ filter (some w0) := call | err "internal: window"
+  let .mk _ part ord frame ← resolveWindow windows w0
+  let name := n.toLower
+  let nrows := ctxs.size
+  let pkeys ← ctxs.mapM fun c => part.toArray.mapM (evalExpr c)
+  let okeys ← ctxs.mapM fun c => ord.toArray.mapM fun (.mk e _ _) => evalExpr c e
+  let pcolls := part.map fun e => ((ctxs[0]?.bind (fun c => exprColl c.env e)).map (·.1)).getD .binary
+  let ocolls := ord.map fun (.mk e _ _) => ((ctxs[0]?.bind (fun c => exprColl c.env e)).map (·.1)).getD .binary
+  let odirs := ord.map fun (.mk _ d nl) => (d, nl)
+  let order := stableSort (fun i j =>
+      match lexCompare pcolls [] pkeys[i]! pkeys[j]! with
+      | .eq => lexCompare ocolls odirs okeys[i]! okeys[j]!
+      | o => o) (Array.range nrows)
+  -- partitions: runs of equal partition keys in sorted order
+  let mut parts : Array (Array Nat) := #[]
+  for i in order do
+    match parts.back? with
+    | some p => if lexCompare pcolls [] pkeys[p[0]!]! pkeys[i]! == .eq then parts := parts.pop.push (p.push i) else parts := parts.push #[i]
+    | none => parts := parts.push #[i]
+  -- per-row argument values
+  let argv ← ctxs.mapM fun c => args.mapM (evalExpr c)
+  let pass ← ctxs.mapM fun c => match filter with
+    | some f => do pure (truth (← evalExpr c f) == some true)
+    | none => pure true
+  let constArg (k : Nat) (dflt : Int) : M Int := do
+    match args[k]? with
+    | none => return dflt
+    | some e => match ← evalExpr (ctxs[0]?.getD {}) e with
+      | .int i => return i
+      | v => match realAsInt v.numeric.toReal with
+        | some i => return i
+        | none => return (if v.isNull then dflt else v.numeric.toInt)
+  let mut result := Array.replicate nrows Value.null
+  let isPeer (a b : Nat) : Bool := lexCompare ocolls odirs okeys[a]! okeys[b]! == .eq
+  for p in parts do
+    let m := p.size
+    let mut firstPeer := Array.replicate m 0
+    let mut lastPeer := Array.replicate m 0
+    let mut groupIdx := Array.replicate m 0
+    let mut g : Nat := 0
+    for j in [0:m] do
+      if j > 0 && isPeer p[j - 1]! p[j]! then
+        firstPeer := firstPeer.set! j firstPeer[j - 1]!
+        groupIdx := groupIdx.set! j groupIdx[j - 1]!
+      else
+        firstPeer := firstPeer.set! j j
+        if j > 0 then g := g + 1
+        groupIdx := groupIdx.set! j g
+    for j' in [0:m] do
+      let j := m - 1 - j'
+      if j + 1 < m && isPeer p[j]! p[j + 1]! then lastPeer := lastPeer.set! j lastPeer[j + 1]!
+      else lastPeer := lastPeer.set! j j
+    let ngroups : Nat := g + 1
+    let gIdx := groupIdx
+    let groupStart (k : Nat) : Nat := ((List.range m).find? (fun x => gIdx[x]! == k)).getD m
+    let groupEnd (k : Nat) : Nat := ((List.range m).reverse.find? (fun x => gIdx[x]! == k)).getD 0
+    let fP := firstPeer
+    let lP := lastPeer
+    let frameOf (j : Nat) : M (List Nat) := do
+      let fr := frame.getD (if ord.isEmpty then .mk .rows .unboundedPreceding .unboundedFollowing .noOthers
+                            else .mk .range .unboundedPreceding .currentRow .noOthers)
+      let .mk unit st en excl := fr
+      let offset (e : Expr) (start : Bool) : M Value := do
+        let v ← evalExpr (ctxs[p[j]!]!) e
+        let bad : Bool := match v with
+          | .int i => decide (i < 0) | .real r => r < 0.0 | _ => true
+        if bad then
+          err (if start then "frame starting offset must be a non-negative number" else "frame ending offset must be a non-negative number")
+        return v
+      let bound (b : FrameBound) (isStart : Bool) : M Int := do
+        match b with
+        | .unboundedPreceding => return 0
+        | .unboundedFollowing => return (m : Int) - 1
+        | .currentRow =>
+          match unit with
+          | .rows => return j
+          | _ => return (if isStart then fP[j]! else lP[j]!)
+        | .preceding e | .following e =>
+          let v ← offset e isStart
+          let prec := match b with | .preceding _ => true | _ => false
+          match unit with
+          | .rows =>
+            let k := v.numeric.toInt
+            return (if prec then (j : Int) - k else j + k)
+          | .groups =>
+            let k := v.numeric.toInt
+            let tg : Int := if prec then (gIdx[j]! : Int) - k else gIdx[j]! + k
+            if tg < 0 then return (if isStart then 0 else -1)
+            if tg ≥ ngroups then return (if isStart then m else (m : Int) - 1)
+            return (if isStart then groupStart tg.toNat else groupEnd tg.toNat)
+          | .range =>
+            let key := okeys[p[j]!]![0]?.getD .null
+            if key.isNull then return (if isStart then fP[j]! else lP[j]!)
+            let desc := match ord.head? with | some (.mk _ d _) => d == .desc | none => false
+            let x := key.toReal
+            let d := v.toReal
+            let target := if prec != desc then x - d else x + d
+            let inside (k : Nat) : Bool :=
+              let kv := okeys[p[k]!]![0]?.getD .null
+              if kv.isNull then false else
+              let y := kv.toReal
+              if isStart then (if desc then y ≤ target else y ≥ target)
+              else (if desc then y ≥ target else y ≤ target)
+            if isStart then return (((List.range m).find? inside).getD m : Nat)
+            else return (match (List.range m).reverse.find? inside with | some k => (k : Int) | none => -1)
+      let lo ← bound st true
+      let hi ← bound en false
+      let mut out := []
+      let mut k := lo
+      while k ≤ hi do
+        if k ≥ 0 && k < m then
+          let kk := k.toNat
+          let excluded := match excl with
+            | .noOthers => false
+            | .currentRow => kk == j
+            | .group => isPeer p[kk]! p[j]!
+            | .ties => kk != j && isPeer p[kk]! p[j]!
+          if !excluded then out := kk :: out
+        k := k + 1
+      return out.reverse
+    for j in [0:m] do
+      let row := p[j]!
+      let v ← match name with
+        | "row_number" => pure (Value.int (j + 1))
+        | "rank" => pure (.int (fP[j]! + 1))
+        | "dense_rank" => pure (.int (gIdx[j]! + 1))
+        | "percent_rank" => pure (.real (if m ≤ 1 then 0.0 else intToReal fP[j]! / intToReal ((m : Int) - 1)))
+        | "cume_dist" => pure (.real (intToReal (lP[j]! + 1) / intToReal m))
+        | "ntile" =>
+          let nt ← constArg 0 1
+          if nt ≤ 0 then err "argument of ntile must be a positive integer"
+          let nt := nt.toNat
+          let base := m / nt
+          let extra := m % nt
+          let bucket := if j < extra * (base + 1) then j / (base + 1) else extra + (j - extra * (base + 1)) / (max base 1)
+          pure (.int (bucket + 1))
+        | "lag" | "lead" =>
+          let off ← constArg 1 1
+          let k : Int := if name == "lag" then (j : Int) - off else j + off
+          if k ≥ 0 && k < m then pure ((argv[p[k.toNat]!]!)[0]?.getD .null)
+          else match args[2]? with
+            | some e => evalExpr ctxs[row]! e
+            | none => pure .null
+        | "first_value" | "last_value" | "nth_value" =>
+          let fr ← frameOf j
+          let nth ← constArg 1 1
+          if name == "nth_value" && nth ≤ 0 then err "second argument to nth_value must be a positive integer"
+          let pick := if name == "first_value" then fr.head?
+            else if name == "last_value" then fr.getLast?
+            else fr[(nth - 1).toNat]?
+          pure ((pick.bind fun k => (argv[p[k]!]!)[0]?).getD .null)
+        | _ =>
+          if !(isAggCall n args.length star false) then err s!"no such window function: {n}"
+          let fr ← frameOf j
+          let vals := (fr.filter fun k => pass[p[k]!]!).toArray.map fun k => argv[p[k]!]!
+          let coll := ((args.head?.bind fun e => (ctxs[0]?.bind fun c => exprColl c.env e)).map (·.1)).getD .binary
+          aggFinish ctxs[row]! n star args coll vals
+      result := result.set! row v
+  return (result, order)
+
 -- FROM
 
 /-- The rows of a named table, view or CTE, with its source description. -/
@@ -936,6 +1143,11 @@ partial def runCore (q : QEnv) (core : SelectCore) (orderBy : List OrderTerm) :
       | _ => return e
     let obExprs ← orderBy.mapM obExpr
     let isAgg := !groupBy.isEmpty || exprs.any hasAgg || (having.map hasAgg).getD false || obExprs.any hasAgg
+    -- window calls become numbered placeholders, computed over the row contexts
+    let (wexprs, wcalls) := replaceWindows (exprs ++ obExprs)
+    let exprs := wexprs.take exprs.length
+    let obExprs := wexprs.drop exprs.length
+    let mut ctxs : Array QEnv := #[]
     let mut out : Array (Array Value × Array Value) := #[]
     if isAgg then
       -- groups, in order of their key
@@ -978,16 +1190,24 @@ partial def runCore (q : QEnv) (core : SelectCore) (orderBy : List OrderTerm) :
         let qg := { withFrame rep aliases with env := { (withFrame rep aliases).env with group := some grp } }
         if let some h := having then
           if truth (← evalExpr qg h) != some true then continue
-        let vals ← exprs.toArray.mapM (evalExpr qg)
-        let keys ← obExprs.toArray.mapM (evalExpr qg)
-        out := out.push (vals, keys)
+        ctxs := ctxs.push qg
     else
       if having.isSome then err "HAVING clause on a non-aggregate query"
       for cur in kept do
-        let qr := withFrame cur aliases
-        let vals ← exprs.toArray.mapM (evalExpr qr)
-        let keys ← obExprs.toArray.mapM (evalExpr qr)
-        out := out.push (vals, keys)
+        ctxs := ctxs.push (withFrame cur aliases)
+    -- window functions: each call's values; rows come out in the windows' sort order
+    let mut order := Array.range ctxs.size
+    let mut wvals : Array (Array Value) := #[]
+    for c in wcalls do
+      let (vs, ord) ← computeWindow ctxs windows c
+      wvals := wvals.push vs
+      if !(match c with | .call _ _ _ _ _ _ (some (.mk none [] [] _)) => true | _ => false) then order := ord
+    for i in order do
+      let base := ctxs[i]!
+      let qi := { base with env := { base.env with params := (wvals.toList.zipIdx.map fun (vs, k) => (windowParamBase + k, vs[i]!)) ++ base.env.params } }
+      let vals ← exprs.toArray.mapM (evalExpr qi)
+      let keys ← obExprs.toArray.mapM (evalExpr qi)
+      out := out.push (vals, keys)
     if distinct then
       let colls := cmeta.toList.map (·.coll)
       let mut d := #[]
