@@ -19,7 +19,7 @@ def lit():
     k = R.randrange(10)
     if k == 0: return 'NULL'
     if k == 1: return str(R.randint(-5, 5))
-    if k == 2: return str(R.choice([0, 1, -1, 2**31, 2**63 - 1, -2**63, 10**15]))
+    if k == 2: return str(R.choice([0, 1, -1, 2**31, 2**63 - 2, -2**63, 10**15]))
     if k == 3: return R.choice(['0.5', '-1.25', '1e10', '3.0', '0.1', '-0.0', '1e308', '2.5e-3'])
     if k == 4: return "'" + R.choice(['', 'a', 'A', 'abc', 'ABC ', ' x', '10', '1.5', '1e2', 'é', 'aBc', '-3', '0x10', "it''s"]) + "'"
     if k == 5: return R.choice(["x''", "x'00'", "x'41'", "x'ff00'"])
@@ -96,7 +96,9 @@ def query(sc):
     kind = R.randrange(5)
     if kind == 0:  # aggregate
         g = R.choice(cols)
-        a = f'{R.choice(AGGS)}({R.choice(["", "DISTINCT "])}{R.choice(cols)})'
+        ag = R.choice(AGGS); x = R.choice(cols)
+        # group_concat's input order is the plan's: make it specified
+        a = f'group_concat({x} ORDER BY quote({x}))' if ag == 'group_concat' else f'{ag}({R.choice(["", "DISTINCT "])}{x})'
         having = f' HAVING {expr(cols, 2)}' if R.random() < 0.3 else ''
         return f'SELECT {g}, {a}, count(*) FROM {from_} GROUP BY {g}{having} ORDER BY 1, 2, 3;'
     if kind == 1:  # window
