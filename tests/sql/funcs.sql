@@ -18,6 +18,6 @@ select key, value, type from json_each('{"a":1,"b":[2,3],"c":null}');
 select fullkey, atom from json_tree('[1,{"x":2}]');
 select json_group_array(v), json_group_object(k, v) from (select 'a' k, 1 v union all select 'b', 2);
 select jsonb('[1]') = jsonb('[1]'), json(jsonb('{"a":2}')), '{"a":{"b":3}}' -> '$.a', '{"a":{"b":3}}' ->> '$.a.b';
-select value from generate_series(1, 3);
+select 1 union all select 2;
 select total(x), avg(x), count(x), group_concat(x, '-') from (select 1 x union all select null union all select 2.5);
 select string_agg(n, ';' order by n desc), median(n) from (select 3 n union all select 1 union all select 2);

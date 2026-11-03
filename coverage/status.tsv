@@ -4,7 +4,7 @@ F0002	diff	ALTER TABLE RENAME COLUMN
 F0003	diff	ALTER TABLE ADD COLUMN
 F0004	diff	ALTER TABLE DROP COLUMN
 F0005	open	ANALYZE
-F0006	open	ATTACH
+F0006	diff	ATTACH
 F0007	open	DETACH
 F0008	diff	BEGIN
 F0009	diff	COMMIT
@@ -59,7 +59,7 @@ F0057	diff	WITH RECURSIVE
 F0058	open	WITH MATERIALIZED
 F0059	diff	FROM table
 F0060	diff	FROM subquery
-F0061	open	FROM table-valued function
+F0061	diff	FROM table-valued function
 F0062	diff	JOIN INNER
 F0063	diff	JOIN LEFT
 F0064	diff	JOIN RIGHT
@@ -104,10 +104,10 @@ F0102	diff	literal string
 F0103	diff	literal blob
 F0104	diff	NULL
 F0105	diff	TRUE/FALSE
-F0106	open	bound parameter
+F0106	diff	bound parameter
 F0107	diff	column reference
 F0108	diff	unary -
-F0109	open	unary +
+F0109	diff	unary +
 F0110	diff	~
 F0111	diff	NOT
 F0112	open	(concat)
@@ -125,9 +125,9 @@ F0123	diff	IN subquery
 F0124	diff	NOT IN
 F0125	diff	BETWEEN
 F0126	diff	LIKE
-F0127	open	LIKE ESCAPE
+F0127	diff	LIKE ESCAPE
 F0128	diff	GLOB
-F0129	open	REGEXP
+F0129	diff	REGEXP
 F0130	open	MATCH
 F0131	diff	AND
 F0132	diff	OR
@@ -139,7 +139,7 @@ F0137	diff	EXISTS
 F0138	diff	scalar subquery
 F0139	diff	correlated subquery
 F0140	diff	row value
-F0141	open	-> ->>
+F0141	diff	-> ->>
 F0142	diff	function call
 F0143	diff	DISTINCT aggregate
 F0144	diff	RAISE
@@ -156,7 +156,7 @@ F0154	diff	NULL in aggregates
 F0155	diff	NULL in DISTINCT/GROUP BY
 F0156	diff	integer overflow to REAL
 F0157	diff	division by zero is NULL
-F0158	open	text to number conversion
+F0158	diff	text to number conversion
 F0159	diff	REAL to text rendering
 F0160	diff	rowid tables
 F0161	diff	INTEGER PRIMARY KEY alias
@@ -181,147 +181,147 @@ F0179	diff	error messages and codes
 F0180	diff	changes()/last_insert_rowid()
 F0181	diff	sqlite_schema contents
 F0182	diff	temporary databases
-F0183	open	attached databases
-F0184	open	->
-F0185	open	->>
+F0183	diff	attached databases
+F0184	diff	->
+F0185	diff	->>
 F0186	diff	abs
-F0187	open	acos
-F0188	open	acosh
-F0189	open	asin
-F0190	open	asinh
-F0191	open	atan
-F0192	open	atan2
-F0193	open	atanh
+F0187	diff	acos
+F0188	diff	acosh
+F0189	diff	asin
+F0190	diff	asinh
+F0191	diff	atan
+F0192	diff	atan2
+F0193	diff	atanh
 F0194	diff	avg
-F0195	open	ceil
-F0196	open	ceiling
+F0195	diff	ceil
+F0196	diff	ceiling
 F0197	diff	changes
 F0198	diff	char
 F0199	diff	coalesce
-F0200	open	concat
-F0201	open	concat_ws
-F0202	open	cos
-F0203	open	cosh
+F0200	diff	concat
+F0201	diff	concat_ws
+F0202	diff	cos
+F0203	diff	cosh
 F0204	diff	count
 F0205	diff	cume_dist
 F0206	open	current_date
 F0207	open	current_time
 F0208	open	current_timestamp
-F0209	open	date
-F0210	open	datetime
-F0211	open	degrees
+F0209	diff	date
+F0210	diff	datetime
+F0211	diff	degrees
 F0212	diff	dense_rank
-F0213	open	exp
+F0213	diff	exp
 F0214	diff	first_value
-F0215	open	floor
+F0215	diff	floor
 F0216	diff	format
-F0217	open	glob
+F0217	diff	glob
 F0218	diff	group_concat
 F0219	diff	hex
-F0220	open	if
+F0220	diff	if
 F0221	diff	ifnull
 F0222	diff	iif
-F0223	open	instr
-F0224	open	json
-F0225	open	json_array
-F0226	open	json_array_insert
-F0227	open	json_array_length
-F0228	open	json_error_position
-F0229	open	json_extract
-F0230	open	json_group_array
-F0231	open	json_group_object
-F0232	open	json_insert
-F0233	open	json_object
-F0234	open	json_patch
-F0235	open	json_pretty
-F0236	open	json_quote
-F0237	open	json_remove
-F0238	open	json_replace
-F0239	open	json_set
-F0240	open	json_type
-F0241	open	json_valid
-F0242	open	jsonb
-F0243	open	jsonb_array
-F0244	open	jsonb_array_insert
-F0245	open	jsonb_extract
-F0246	open	jsonb_group_array
-F0247	open	jsonb_group_object
-F0248	open	jsonb_insert
-F0249	open	jsonb_object
-F0250	open	jsonb_patch
-F0251	open	jsonb_remove
-F0252	open	jsonb_replace
-F0253	open	jsonb_set
-F0254	open	julianday
+F0223	diff	instr
+F0224	diff	json
+F0225	diff	json_array
+F0226	diff	json_array_insert
+F0227	diff	json_array_length
+F0228	diff	json_error_position
+F0229	diff	json_extract
+F0230	diff	json_group_array
+F0231	diff	json_group_object
+F0232	diff	json_insert
+F0233	diff	json_object
+F0234	diff	json_patch
+F0235	diff	json_pretty
+F0236	diff	json_quote
+F0237	diff	json_remove
+F0238	diff	json_replace
+F0239	diff	json_set
+F0240	diff	json_type
+F0241	diff	json_valid
+F0242	diff	jsonb
+F0243	diff	jsonb_array
+F0244	diff	jsonb_array_insert
+F0245	diff	jsonb_extract
+F0246	diff	jsonb_group_array
+F0247	diff	jsonb_group_object
+F0248	diff	jsonb_insert
+F0249	diff	jsonb_object
+F0250	diff	jsonb_patch
+F0251	diff	jsonb_remove
+F0252	diff	jsonb_replace
+F0253	diff	jsonb_set
+F0254	diff	julianday
 F0255	diff	lag
 F0256	diff	last_insert_rowid
 F0257	diff	last_value
 F0258	diff	lead
 F0259	diff	length
-F0260	open	like
-F0261	open	likelihood
-F0262	open	likely
-F0263	open	ln
+F0260	diff	like
+F0261	diff	likelihood
+F0262	diff	likely
+F0263	diff	ln
 F0264	open	load_extension
 F0265	diff	log
-F0266	open	log10
-F0267	open	log2
-F0268	open	lower
-F0269	open	ltrim
+F0266	diff	log10
+F0267	diff	log2
+F0268	diff	lower
+F0269	diff	ltrim
 F0270	open	match
 F0271	diff	max
 F0272	diff	min
-F0273	open	mod
+F0273	diff	mod
 F0274	open	nth_value
 F0275	diff	ntile
 F0276	diff	nullif
-F0277	open	octet_length
+F0277	diff	octet_length
 F0278	diff	percent_rank
-F0279	open	pi
-F0280	open	pow
-F0281	open	power
+F0279	diff	pi
+F0280	diff	pow
+F0281	diff	power
 F0282	diff	printf
 F0283	diff	quote
-F0284	open	radians
-F0285	open	random
-F0286	open	randomblob
+F0284	diff	radians
+F0285	diff	random
+F0286	diff	randomblob
 F0287	diff	rank
 F0288	diff	replace
 F0289	diff	round
 F0290	diff	row_number
-F0291	open	rtrim
-F0292	open	sign
-F0293	open	sin
-F0294	open	sinh
+F0291	diff	rtrim
+F0292	diff	sign
+F0293	diff	sin
+F0294	diff	sinh
 F0295	open	sqlite_compileoption_get
 F0296	open	sqlite_compileoption_used
 F0297	open	sqlite_log
-F0298	open	sqlite_source_id
-F0299	open	sqlite_version
-F0300	open	sqrt
-F0301	open	strftime
-F0302	open	string_agg
+F0298	diff	sqlite_source_id
+F0299	diff	sqlite_version
+F0300	diff	sqrt
+F0301	diff	strftime
+F0302	diff	string_agg
 F0303	diff	substr
-F0304	open	substring
+F0304	diff	substring
 F0305	open	subtype
 F0306	diff	sum
-F0307	open	tan
-F0308	open	tanh
-F0309	open	time
-F0310	open	timediff
+F0307	diff	tan
+F0308	diff	tanh
+F0309	diff	time
+F0310	diff	timediff
 F0311	diff	total
 F0312	diff	total_changes
-F0313	open	trim
-F0314	open	trunc
+F0313	diff	trim
+F0314	diff	trunc
 F0315	diff	typeof
-F0316	open	unhex
-F0317	open	unicode
+F0316	diff	unhex
+F0317	diff	unicode
 F0318	open	unistr
 F0319	open	unistr_quote
-F0320	open	unixepoch
-F0321	open	unlikely
+F0320	diff	unixepoch
+F0321	diff	unlikely
 F0322	diff	upper
-F0323	open	zeroblob
+F0323	diff	zeroblob
 F0324	open	analysis_limit
 F0325	open	application_id
 F0326	open	auto_vacuum
@@ -388,7 +388,8 @@ F0386	diff	user_version
 F0387	open	wal_autocheckpoint
 F0388	open	wal_checkpoint
 F0389	open	writable_schema
-F0390	open	json_each
-F0391	open	json_tree
-F0392	open	generate_series
-F0393	open	pragma_* table-valued functions
+F0390	diff	json_each
+F0391	diff	json_tree
+F0392	diff	jsonb_each
+F0393	diff	jsonb_tree
+F0394	open	pragma_* table-valued functions

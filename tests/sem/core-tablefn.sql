@@ -1,0 +1,1 @@
+create table t(k, doc); insert into t values(1,'[1,2]'),(2,'{"a":3}'); select k, key, value from t, json_each(t.doc); select k, value from t join json_each(doc) on 1; select k, value from t left join json_each(t.doc) j on j.value > 1;

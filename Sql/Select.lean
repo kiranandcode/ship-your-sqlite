@@ -348,7 +348,7 @@ partial def evalExpr (q : QEnv) (e : Expr) : M Value := do
           | none => pure none
         pure (likeMatch (utf8Chars (textOf p)) (utf8Chars (textOf s)) escC
           (!(← getDb).pragmas.caseSensitiveLike))
-      | .regexp => err "no such function: REGEXP"
+      | .regexp => err "no such function: regexp"
       | .match_ => err "unable to use function MATCH in the requested context"
     return .int (if r != neg then 1 else 0)
   | .case_ base whens els =>
@@ -1179,7 +1179,21 @@ partial def evalFrom (q : QEnv) : FromItem → M (Array Src × Array (Array Cur)
     return (#[metaSrc (alias.getD n) cols], rows.mapIdx fun i r => #[some ⟨i + 1, r⟩])
   | .join l kind natural r on usingCols => do
     let (ls, lrows) ← evalFrom q l
-    let (rs, rrows) ← evalFrom q r
+    -- a table-valued function on the right may refer to the left sources: its
+    -- rows are computed per left row
+    let (rs, rrows0) ← match r with
+      | .tableFn _ n _ alias => do
+        let (cols, _) ← tableFunction n []
+        pure (#[metaSrc (alias.getD n) cols], #[])
+      | _ => evalFrom q r
+    let rowsFor (lr : Array Cur) : M (Array (Array Cur)) := do
+      match r with
+      | .tableFn _ n args _ =>
+        let qp := { q with env := { q.env with frames := { srcs := ls, cur := lr } :: q.env.frames } }
+        let vs ← args.mapM (evalExpr qp)
+        let (_, rows) ← tableFunction n (vs.zip (args.map Json.exprIsJson))
+        pure (rows.mapIdx fun i row => #[some (⟨i + 1, row⟩ : Row)])
+      | _ => pure rrows0
     let srcs := ls ++ rs
     -- USING / NATURAL columns: equality on each, right copy hidden from *
     let common : List Name :=
@@ -1203,14 +1217,16 @@ partial def evalFrom (q : QEnv) : FromItem → M (Array Src × Array (Array Cur)
       | some e => return truth (← evalExpr q' e) == some true
       | none => return true
     let mut out := #[]
+    let rrows := rrows0
     let mut rmatched := Array.replicate rrows.size false
     for lr in lrows do
+      let rrows ← rowsFor lr
       let mut any := false
       for h : j in [0:rrows.size] do
         let cur := lr ++ rrows[j]
         if ← joinCond cur then
           out := out.push cur; any := true
-          rmatched := rmatched.set! j true
+          if j < rmatched.size then rmatched := rmatched.set! j true
       if !any && (kind == .left || kind == .full) then
         out := out.push (lr ++ Array.replicate rs.size none)
     if kind == .right || kind == .full then
@@ -1225,19 +1241,6 @@ partial def evalFrom (q : QEnv) : FromItem → M (Array Src × Array (Array Cur)
 partial def tableFunction (n : Name) (argsJ : List (Value × Bool)) : M (Array ColMeta × Array (Array Value)) := do
   let args := argsJ.map (·.1)
   match n.toLower with
-  | "generate_series" =>
-    let start := (args[0]?.getD (Value.int 0)).numeric.toInt
-    let stop := match args[1]? with | some v => if v.isNull then maxI64 else v.numeric.toInt | none => maxI64
-    let step := match args[2]? with | some v => if v.isNull then 1 else v.numeric.toInt | none => 1
-    let step := if step == 0 then 1 else step
-    let mut rows := #[]
-    let mut v := start
-    let mut fuel := 10000000
-    while fuel > 0 && (if step > 0 then v ≤ stop else v ≥ stop) do
-      rows := rows.push (#[.int v, .int start, .int stop, .int step] : Array Value)
-      v := v + step; fuel := fuel - 1
-    let cols : Array ColMeta := #["value", "start", "stop", "step"].map fun c => ⟨c, none, .binary⟩
-    return (cols, rows)
   | _ =>
     match Json.tableFn? n.toLower argsJ with
     | some (.ok (cols, rows)) =>
