@@ -120,6 +120,10 @@ structure Db where
   changes : Int := 0
   totalChanges : Int := 0
   lastRowid : Int := 0
+  /-- PRAGMA settings that are not modelled elsewhere, by name (`Sql.Pragma`) -/
+  pragmaVals : List (String × Value) := []
+  /-- the schema cookie (`PRAGMA schema_version`) -/
+  schemaVersion : Int := 0
   deriving Inhabited
 
 namespace Schema

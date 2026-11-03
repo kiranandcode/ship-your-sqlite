@@ -3,6 +3,7 @@
 -/
 import Sql.Select
 import Sql.ParseStmt
+import Sql.Pragma
 
 namespace Sql
 
@@ -793,7 +794,14 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
         setDb { db with savepoints := [], inTxn := false }
       else setDb { db with savepoints := rest }
       return #[]
-  | .pragma _ name arg _ => execPragma q name arg
+  | .pragma sch name arg call =>
+    let argV ← match arg with
+      | some e => some <$> evalExpr q (match e with | .col none none n => .lit (.ofString n) | x => x)
+      | none => pure none
+    match Pragma.run (← getDb) sch name.toLower argV call with
+    | some (.ok (db', rows)) => setDb db'; return rows
+    | some (.error e) => throw e
+    | none => execPragma q name arg
   | .alterAddColumn _ tname cd txt =>
     let t ← currentTable tname
     if t.cols.any (nameEq ·.name cd.name) then err s!"duplicate column name: {cd.name}"
