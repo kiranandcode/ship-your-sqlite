@@ -58,7 +58,12 @@ structure Table where
   sql : String
   /-- in the `temp` database -/
   temp : Bool := false
+  /-- in an attached database of that name -/
+  attachedTo : Option Name := none
   deriving Inhabited
+
+/-- The database a table belongs to. -/
+def Table.dbName (t : Table) : Name := t.attachedTo.getD (if t.temp then "temp" else "main")
 
 structure Index where
   name : Name
@@ -76,6 +81,7 @@ structure View where
   q : Select
   sql : String
   temp : Bool := false
+  attachedTo : Option Name := none
   deriving Inhabited
 
 structure Trigger where
@@ -122,6 +128,8 @@ structure Db where
   lastRowid : Int := 0
   /-- PRAGMA settings that are not modelled elsewhere, by name (`Sql.Pragma`) -/
   pragmaVals : List (String × Value) := []
+  /-- attached databases, in ATTACH order -/
+  attached : List Name := []
   /-- state of the executable's stand-in for SQLite's PRNG (`random()`) -/
   prng : Nat := 0
   /-- the schema cookie (`PRAGMA schema_version`) -/
@@ -133,13 +141,20 @@ namespace Schema
 def tables (s : Schema) : List Table :=
   s.objs.toList.filterMap fun | .table t => some t | _ => none
 
-/-- A table by name: the `temp` one first, as SQLite searches temp before main. -/
-def findTable (s : Schema) (n : Name) : Option Table :=
-  (s.tables.find? fun t => t.temp && nameEq t.name n).orElse fun _ => s.tables.find? (nameEq ·.name n)
+/-- A table by name, searching `temp`, then `main`, then the attached databases
+    (in the order of `attachOrder`). -/
+def findTable (s : Schema) (n : Name) (attachOrder : List Name := []) : Option Table :=
+  let ts := s.tables.filter (nameEq ·.name n)
+  (ts.find? (·.temp)).orElse fun _ => (ts.find? fun t => !t.temp && t.attachedTo.isNone).orElse fun _ =>
+    attachOrder.findSome? fun a => ts.find? fun t => t.attachedTo.any (nameEq · a)
 
 /-- A table of one database: `temp` (true) or `main` (false). -/
 def findTableIn (s : Schema) (temp : Bool) (n : Name) : Option Table :=
-  s.tables.find? fun t => t.temp == temp && nameEq t.name n
+  s.tables.find? fun t => t.temp == temp && t.attachedTo.isNone && nameEq t.name n
+
+/-- A table of a named database (`main`, `temp` or attached). -/
+def findTableDb (s : Schema) (db : Name) (n : Name) : Option Table :=
+  s.tables.find? fun t => nameEq t.dbName db && nameEq t.name n
 
 def findView (s : Schema) (n : Name) : Option View :=
   let vs := s.objs.toList.filterMap fun | .view v => if nameEq v.name n then some v else none | _ => none
@@ -156,7 +171,7 @@ def objName : SchemaObj → Name
 
 def setTable (s : Schema) (t : Table) : Schema :=
   { s with objs := s.objs.map fun o => match o with
-      | .table u => if nameEq u.name t.name && u.temp == t.temp then .table t else o
+      | .table u => if nameEq u.name t.name && nameEq u.dbName t.dbName then .table t else o
       | _ => o }
 
 end Schema

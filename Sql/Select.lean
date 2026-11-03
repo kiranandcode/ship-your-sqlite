@@ -1042,10 +1042,9 @@ partial def namedSource (q : QEnv) (sch : Option Name) (n : Name) (alias : Name)
       return (metaSrc alias cols, rows.mapIdx fun i r => ⟨i + 1, r⟩)
   let db ← getDb
   let tbl ← match sch with
-    | none => pure (db.main.findTable n)
+    | none => pure (db.main.findTable n db.attached)
     | some s =>
-      if nameEq s "main" then pure (db.main.findTableIn false n)
-      else if nameEq s "temp" then pure (db.main.findTableIn true n)
+      if nameEq s "main" || nameEq s "temp" || db.attached.any (nameEq · s) then pure (db.main.findTableDb s n)
       else err s!"no such table: {s}.{n}"
   if let some t := tbl then
     return (tableSrc alias t, t.rows)
@@ -1055,22 +1054,24 @@ partial def namedSource (q : QEnv) (sch : Option Name) (n : Name) (alias : Name)
       (cols.zip v.cols.toArray).map fun (c, nm) => { c with name := nm }
     return (metaSrc alias cols, rows.mapIdx fun i r => ⟨i + 1, r⟩)
   if nameEq n "sqlite_schema" || nameEq n "sqlite_master" || nameEq n "sqlite_temp_schema" || nameEq n "sqlite_temp_master" then
-    let rows := schemaRows db (nameEq n "sqlite_temp_schema" || nameEq n "sqlite_temp_master")
+    let which : Name := if nameEq n "sqlite_temp_schema" || nameEq n "sqlite_temp_master" then "temp" else (sch.getD "main")
+    let rows := schemaRows db which
     let cols : Array ColMeta := #["type", "name", "tbl_name", "rootpage", "sql"].map fun c => ⟨c, none, .binary⟩
     return (metaSrc alias cols, rows.mapIdx fun i r => ⟨i + 1, r⟩)
   err s!"no such table: {n}"
 
 /-- Rows of `sqlite_schema` (or `sqlite_temp_schema`): tables and indexes take
     root pages 2, 3, … in creation order; views and triggers have 0. -/
-partial def schemaRows (db : Db) (temp : Bool := false) : Array (Array Value) := Id.run do
+partial def schemaRows (db : Db) (which : Name := "main") : Array (Array Value) := Id.run do
   let mut out := #[]
   let mut page : Int := 1
   for o in db.main.objs do
-    let isTemp := match o with
-      | .table t => t.temp | .view v => v.temp
-      | .index ix => ((db.main.findTable ix.table).map (·.temp)).getD false
-      | .trigger tr => ((db.main.findTable tr.table).map (·.temp)).getD false
-    if isTemp != temp then continue
+    let dbn : Name := match o with
+      | .table t => t.dbName
+      | .view v => v.attachedTo.getD (if v.temp then "temp" else "main")
+      | .index ix => ((db.main.findTable ix.table db.attached).map (·.dbName)).getD "main"
+      | .trigger tr => ((db.main.findTable tr.table db.attached).map (·.dbName)).getD "main"
+    if !nameEq dbn which then continue
     match o with
     | .table t =>
       page := page + 1

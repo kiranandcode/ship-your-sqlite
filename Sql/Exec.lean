@@ -131,12 +131,13 @@ def modifyMain (f : Schema → Schema) : M Unit :=
   modify fun c => { c with db := { c.db with main := f c.db.main } }
 
 /-- Is the name taken in the database (`temp` or `main`) an object would go to? -/
-def objExists (db : Db) (n : Name) (temp : Bool := false) : Bool :=
+def objExists (db : Db) (n : Name) (temp : Bool := false) (att : Option Name := none) : Bool :=
+  let target : Name := att.getD (if temp then "temp" else "main")
   db.main.objs.any fun o => nameEq (Schema.objName o) n && (match o with
-    | .table t => t.temp == temp
-    | .view v => v.temp == temp
-    | .index ix => (((db.main.findTable ix.table).map (·.temp)).getD false) == temp
-    | .trigger tr => (((db.main.findTable tr.table).map (·.temp)).getD false) == temp)
+    | .table t => nameEq t.dbName target
+    | .view v => nameEq (v.attachedTo.getD (if v.temp then "temp" else "main")) target
+    | .index ix => nameEq (((db.main.findTable ix.table db.attached).map (·.dbName)).getD "main") target
+    | .trigger tr => nameEq (((db.main.findTable tr.table db.attached).map (·.dbName)).getD "main") target)
 
 /-- The sources of a single table, for evaluating its constraints and defaults. -/
 def rowScope (t : Table) (alias : Name) (r : Row) : Scope :=
@@ -221,7 +222,7 @@ def sortRows (t : Table) (rows : Array Row) : Array Row :=
   else stableSort (fun a b => compare a.rowid b.rowid) rows
 
 def currentTable (n : Name) : M Table := do
-  match (← getDb).main.findTable n with
+  match (← getDb).main.findTable n (← getDb).attached with
   | some t => return t
   | none =>
     if (← getDb).main.findView n |>.isSome then err s!"cannot modify {n} because it is a view"
@@ -483,8 +484,11 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
   | .createTable temp ine sch name cols cons wr strict asSel sql tailStart =>
     let temp := temp || sch.any (nameEq · "temp")
     let db ← getDb
+    let att : Option Name := sch.bind fun s => if db.attached.any (nameEq · s) then some s else none
+    if let some s := sch then
+      if !(nameEq s "main" || nameEq s "temp" || att.isSome) then err s!"unknown database {s}"
     let errAt {α} (m : String) (t : Nat) : M α := throw { code := SQLITE_ERROR, msg := m, tail := some t }
-    if objExists db name temp then
+    if objExists db name temp att then
       if ine then return #[]
       if (db.main.findTable name).isSome || (db.main.findView name).isSome then errAt s!"table {name} already exists" tailStart
       errAt s!"there is already an index named {name}" tailStart
@@ -503,7 +507,7 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
         let sqlText := "CREATE TABLE " ++ name ++ "(" ++ ",".intercalate (cds.map fun c => c.name ++ (if c.type.isEmpty then "" else " " ++ c.type)) ++ ")"
         pure { t with sql := sqlText, rows := rows.mapIdx fun i r => ⟨i + 1, r⟩ }
       | none => mkTable name cols cons wr strict sql
-    let t := { t with temp }
+    let t := { t with temp, attachedTo := att }
     -- automatic indexes for UNIQUE and non-rowid PRIMARY KEY constraints
     let nAuto := t.uniques.length
     modifyMain fun s => { s with objs := s.objs.push (.table t) ++
@@ -851,6 +855,31 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
                        sql := dropColumnText t.sql col,
                        rows := t.rows.map fun r => { r with vals := r.vals.eraseIdx! ci } }
     modifyMain fun s => s.setTable t'
+    return #[]
+  | .attach file schema =>
+    let f ← evalExpr q file
+    let nm ← match schema with
+      | .col none none n => pure n
+      | e => do pure (String.fromUTF8! (textOf (← evalExpr q e)))
+    let db ← getDb
+    if nameEq nm "main" || nameEq nm "temp" || db.attached.any (nameEq · nm) then
+      err s!"database {nm} is already in use"
+    if db.attached.length ≥ 10 then err "too many attached databases - max 10"
+    let fname := String.fromUTF8! (textOf f)
+    if !(fname == ":memory:" || fname == "") then
+      err "ATTACH of a database file is not modelled (the semantics has no file system yet)"
+    setDb { db with attached := db.attached ++ [nm] }
+    return #[]
+  | .detach nm =>
+    let db ← getDb
+    if nameEq nm "main" || nameEq nm "temp" then err s!"cannot detach database {nm}"
+    if !(db.attached.any (nameEq · nm)) then err s!"no such database: {nm}"
+    let gone (o : SchemaObj) : Bool := match o with
+      | .table t => t.attachedTo.any (nameEq · nm)
+      | .view v => v.attachedTo.any (nameEq · nm)
+      | .index ix => ((db.main.findTable ix.table db.attached).bind (·.attachedTo)).any (nameEq · nm)
+      | .trigger tr => ((db.main.findTable tr.table db.attached).bind (·.attachedTo)).any (nameEq · nm)
+    setDb { db with attached := db.attached.filter (!nameEq · nm), main := { db.main with objs := db.main.objs.filter (!gone ·) } }
     return #[]
   | .reindex none => return #[]
   | .reindex (some n) =>
