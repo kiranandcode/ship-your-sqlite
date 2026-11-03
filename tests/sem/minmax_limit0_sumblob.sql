@@ -1,0 +1,17 @@
+select min(3, 3.0), max(3, 3.0), min(3.0, 3), max(3.0, 3), min('a', 'A' collate nocase), max('a' collate nocase, 'A');
+select min(-9223372036854775808, -9223372036854775808 + -70), max(1, 1.0, 1);
+select json_type(min(json('[1]'), '[1]')), json_type(max(json('[1]'), '[1]'));
+create table t(a, b);
+insert into t values(1, x'31303030'), (2, '7'), (3, x'2D312E35');
+select sum(b), total(b), avg(b) from t;
+select a, sum(b) over (order by a) from t;
+select zeroblob(1e12) from t limit 0;
+select a from t limit 0 offset 1/0;
+select count(*) from t limit 0;
+select abs(-9223372036854775807-1) from t where a > 0 limit 0;
+select * from (select zeroblob(1e12) from t limit 0);
+create table u as select a, b from t limit 0;
+select count(*) from u;
+pragma table_info(u);
+select a from t limit 0 offset 'x';
+select a from t limit 'x';

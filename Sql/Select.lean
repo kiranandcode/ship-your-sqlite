@@ -206,9 +206,11 @@ def SumCtx.init (p : SumCtx) (i : Int) : SumCtx :=
 /-- sqlite3_value_numeric_type: a text is an integer only if all of it reads as one. -/
 def numericForSum (v : Value) : Value :=
   match v with
-  | .text t | .blob t => match numericOfText t false with
+  -- sqlite3_value_numeric_type converts TEXT only: a BLOB sums as a REAL
+  | .text t => match numericOfText t false with
     | some (.int i) => .int i
     | _ => .real v.toReal
+  | .blob _ => .real v.toReal
   | w => w
 
 def SumCtx.step (p : SumCtx) (v : Value) : SumCtx :=
@@ -880,7 +882,11 @@ def callFnST (fuel : Nat) (q : QEnv) (n : Name) (args : List Expr) (_distinct : 
           | "coalesce" | "ifnull" => vs.findIdx? (!·.isNull)
           | "nullif" | "likely" | "unlikely" | "likelihood" => if v.isNull then none else some 0
           | "iif" | "if" => iifIndex vs
-          | "min" | "max" => if vs.length ≥ 2 then vs.findIdx? (fun x => compareValues .binary x v == .eq && x.rank == v.rank) else none
+          | "min" | "max" =>
+            if vs.length < 2 then none else
+            let same := fun x => compareValues .binary x v == .eq && x.rank == v.rank
+            -- the argument min()/max() returned (min: the last of equal ones)
+            if n.toLower == "min" then (vs.reverse.findIdx? same).map (vs.length - 1 - ·) else vs.findIdx? same
           | _ => none
         return (v, (pick.bind (flags[·]?)).getD false)
 
@@ -1089,9 +1095,10 @@ def scalarFn (fuel : Nat) (n : Name) (vs : List Value) (colls : List (Option (Co
         if nargs < 2 then wrong
         if vs.any (·.isNull) then return .null
         let coll := (colls.findSome? id).map (·.1) |>.getD .binary
+        -- minmaxFunc: min() moves to a later argument on a tie, max() does not
         let better (a b : Value) : Bool :=
           let o := compareValues coll a b
-          if name == "min" then o == .lt else o == .gt
+          if name == "min" then o != .gt else o == .gt
         return vs.foldl (fun acc v => if better v acc then v else acc) a0
       | "zeroblob" =>
         if nargs != 1 then wrong
@@ -1710,7 +1717,7 @@ def expandCols (fuel : Nat) (srcs : Array Src) (cols : List ResultCol) : M (List
 
 /-- One SELECT core: result metadata and rows, plus the sort keys of
     `orderBy` evaluated per row (for a simple, non-compound select). -/
-def runCore (fuel : Nat) (q : QEnv) (core : SelectCore) (orderBy : List OrderTerm) :
+def runCore (fuel : Nat) (q : QEnv) (core : SelectCore) (orderBy : List OrderTerm) (noRows : Bool := false) :
     M (Array ColMeta × Array (Array Value × Array Value)) :=
   match fuel with
   | 0 => outOfFuel
@@ -1729,6 +1736,9 @@ def runCore (fuel : Nat) (q : QEnv) (core : SelectCore) (orderBy : List OrderTer
         return (cols, out)
       | .select distinct cols from_ where_ groupBy having windows =>
         let _ := windows
+        -- `noRows` (LIMIT 0): SQLite jumps past the loop before computing a
+        -- row (computeLimitRegisters); only the sources are opened
+        let where_ := if noRows then some (.lit (.int 0)) else where_
         -- result-column aliases usable in WHERE (`*` columns resolve as columns anyway)
         let aliases0 := cols.filterMap fun | .expr e (some a) _ => some (a, e) | _ => none
         let (srcs, rows) ← match from_ with
@@ -1756,6 +1766,7 @@ def runCore (fuel : Nat) (q : QEnv) (core : SelectCore) (orderBy : List OrderTer
           match rc with
           | .expr e _ _ => ⟨resultName q srcs rc, exprAff qm.env e, ((exprColl qm.env e).map (·.1)).getD .binary⟩
           | _ => ⟨"", none, .binary⟩
+        if noRows then return (cmeta, #[])
         -- ORDER BY terms: a result column number, a result alias, or an expression
         let obExpr (t : OrderTerm) : M Expr := do
           let .mk e _ _ := t
@@ -1875,12 +1886,14 @@ def runSelect (fuel : Nat) (q : QEnv) (sel : Select) : M (Array ColMeta × Array
       let limitN ← match limit with
         | some l => some <$> limitValue (← evalExpr fuel q l)
         | none => pure none
-      let offsetN ← match offset with
-        | some o => limitValue (← evalExpr fuel q o)
-        | none => pure 0
+      -- LIMIT 0 jumps past the loop before OFFSET is computed (computeLimitRegisters)
+      let offsetN ← match offset, limitN with
+        | _, some 0 => pure 0
+        | some o, _ => limitValue (← evalExpr fuel q o)
+        | none, _ => pure 0
       let dirs := orderBy.map fun (.mk _ d nl) => (d, nl)
       let (cols, rows) ← if rest.isEmpty then do
-          let (cols, rows) ← runCore fuel q first orderBy
+          let (cols, rows) ← runCore fuel q first orderBy (limitN == some 0)
           let colls := orderBy.map fun (.mk e _ _) =>
             match e with
             | .collate _ c => (collOfName c).getD .binary
