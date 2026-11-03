@@ -7,6 +7,7 @@ import Sql.Query
 import Sql.Printf
 import Sql.DateTime
 import Sql.Json
+import Sql.Pragma
 
 namespace Sql
 
@@ -1058,6 +1059,9 @@ partial def namedSource (q : QEnv) (sch : Option Name) (n : Name) (alias : Name)
     let rows := schemaRows db which
     let cols : Array ColMeta := #["type", "name", "tbl_name", "rootpage", "sql"].map fun c => ⟨c, none, .binary⟩
     return (metaSrc alias cols, rows.mapIdx fun i r => ⟨i + 1, r⟩)
+  if n.toLower.startsWith "pragma_" then
+    let (cols, rows) ← tableFunction n []
+    return (metaSrc alias cols, rows.mapIdx fun i r => ⟨i + 1, r⟩)
   err s!"no such table: {n}"
 
 /-- Rows of `sqlite_schema` (or `sqlite_temp_schema`): tables and indexes take
@@ -1221,6 +1225,13 @@ partial def evalFrom (q : QEnv) : FromItem → M (Array Src × Array (Array Cur)
     let srcs'' := if kind == .right || kind == .full then srcs else srcs'
     return (srcs'', out)
 
+/-- The columns of views for `Sql.Pragma`: their SELECT run on the current state. -/
+partial def viewCols : M Pragma.ViewCols := do
+  let ctx ← get
+  return fun v => match ((runSelect {} v.q).run).run ctx with
+    | (.ok (cols, _), _) => some (cols.map fun c => (c.name, c.aff))
+    | _ => none
+
 /-- Table-valued functions. -/
 partial def tableFunction (n : Name) (argsJ : List (Value × Bool)) : M (Array ColMeta × Array (Array Value)) := do
   let args := argsJ.map (·.1)
@@ -1239,8 +1250,16 @@ partial def tableFunction (n : Name) (argsJ : List (Value × Bool)) : M (Array C
     let cols : Array ColMeta := #["value", "start", "stop", "step"].map fun c => ⟨c, none, .binary⟩
     return (cols, rows)
   | _ =>
+    -- pragma_<name>(arg, schema): eponymous virtual tables of pragma.c
+    match Pragma.tableValued (← viewCols) (← getDb) n args with
+    | some (.ok (db', cols, rows)) =>
+      modify fun c => { c with db := db' }
+      return (cols.toArray.map fun c => ⟨c, none, .binary⟩, rows)
+    | some (.error e) => throw e
+    | none =>
     match Json.tableFn? n.toLower argsJ with
     | some (.ok (cols, rows)) =>
+      modify fun c => { c with db := Pragma.registerModule c.db n }
       return (cols.toArray.map fun c => ⟨c, none, .binary⟩, rows.toArray.map (·.toArray))
     | some (.error e) => throw e
     | none => err s!"no such table: {n}"

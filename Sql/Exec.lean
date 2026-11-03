@@ -798,14 +798,14 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
         setDb { db with savepoints := [], inTxn := false }
       else setDb { db with savepoints := rest }
       return #[]
-  | .pragma sch name arg call =>
+  | .pragma sch name arg _ =>
     let argV ← match arg with
-      | some e => some <$> evalExpr q (match e with | .col none none n => .lit (.ofString n) | x => x)
+      | some (.lit v) => pure (some v)
+      | some e => some <$> evalExpr q e
       | none => pure none
-    match Pragma.run (← getDb) sch name.toLower argV call with
-    | some (.ok (db', rows)) => setDb db'; return rows
-    | some (.error e) => throw e
-    | none => execPragma q name arg
+    match Pragma.runWith (← viewCols) (← getDb) sch name argV with
+    | .ok (db', rows) => setDb db'; return rows
+    | .error e => throw e
   | .alterAddColumn _ tname cd txt =>
     let t ← currentTable tname
     if t.cols.any (nameEq ·.name cd.name) then err s!"duplicate column name: {cd.name}"
@@ -1013,44 +1013,6 @@ partial def runViewTriggers (q : QEnv) (vname : Name) (ev : TriggerEvent) (old n
       let r ← try (some <$> execStmt qt st) catch e => if e.code == 0 then pure none else throw e
       if r.isNone then break
 
-partial def execPragma (q : QEnv) (name : Name) (arg : Option Expr) : M (Array (Array Value)) := do
-  let db ← getDb
-  let argV ← match arg with
-    | some e => some <$> evalExpr q (match e with | .col none none n => .lit (.ofString n) | x => x)
-    | none => pure none
-  let boolArg (v : Value) : Bool :=
-    match v with
-    | .text s => let u := (String.fromUTF8! s).toLower; u == "on" || u == "yes" || u == "true" || u == "1"
-    | w => truth w == some true
-  match name.toLower with
-  | "user_version" =>
-    match argV with
-    | some v => modifyMain (fun s => { s with userVersion := v.numeric.toInt }); return #[]
-    | none => return #[#[.int db.main.userVersion]]
-  | "foreign_keys" =>
-    match argV with
-    | some v => setDb { db with pragmas := { db.pragmas with foreignKeys := boolArg v } }; return #[]
-    | none => return #[#[.int (if db.pragmas.foreignKeys then 1 else 0)]]
-  | "case_sensitive_like" =>
-    if let some v := argV then setDb { db with pragmas := { db.pragmas with caseSensitiveLike := boolArg v } }
-    return #[]
-  | "recursive_triggers" =>
-    match argV with
-    | some v => setDb { db with pragmas := { db.pragmas with recursiveTriggers := boolArg v } }; return #[]
-    | none => return #[#[.int (if db.pragmas.recursiveTriggers then 1 else 0)]]
-  | "integrity_check" | "quick_check" => return #[#[.ofString "ok"]]
-  | "table_info" | "table_xinfo" =>
-    let some v := argV | return #[]
-    let tn := String.fromUTF8! (textOf v)
-    match db.main.findTable tn with
-    | none => return #[]
-    | some t =>
-      return t.cols.mapIdx fun i c =>
-        #[.int i, .ofString c.name, .ofString c.type, .int (if c.notNull then 1 else 0),
-          (match c.dflt with | some _ => .ofString "?" | none => .null),
-          .int (match t.pk.findIdx? (· == i) with | some k => k + 1 | none => 0)]
-  | _ => return #[]
-
 /-- Run the triggers of `table` for an event at a time. -/
 partial def runTriggers (q : QEnv) (time : TriggerTime) (ev : TriggerEvent) (table : Name)
     (old new : Option Row) : M Unit := do
@@ -1090,6 +1052,8 @@ def runStmt (s : Stmt) : M (Except Err (Array (Array Value))) := do
         let counted := match s with | .delete .. => db.changes | _ => 0
         set { saved with db := { saved.db with changes := 0, totalChanges := saved.db.totalChanges + counted } }
         return .error { code := SQLITE_CONSTRAINT_FOREIGNKEY, msg := "FOREIGN KEY constraint failed" }
+    -- schema cookie, pages, table hash order (Sql.Pragma)
+    setDb (Pragma.afterStmt saved.db (← getDb) s)
     return .ok rows
   catch e =>
     if !e.keep then

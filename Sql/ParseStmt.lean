@@ -276,16 +276,30 @@ partial def parseStmt : P Stmt := do
   if ← eatKw "ANALYZE" then return .analyze (← nameOpt)
   failHere
 
+/-- The value of a PRAGMA (`nmnum`, `plus_num`, `minus_num` of parse.y), as
+    the text `sqlite3Pragma` sees: a number's token text (with its sign for
+    `-`), an identifier's or keyword's name. A string literal is passed as a
+    BLOB of its dequoted bytes, so that `integrity_check` can tell `'5'` from
+    `5` (it reads the raw token). -/
 partial def pragmaValue : P Expr := do
-  if ← eatOp "MINUS" then return .unop .neg (← parsePrimary)
-  if ← eatOp "PLUS" then return ← parsePrimary
+  let number : P (Option String) := do
+    match ← peek with
+    | some t => if t.tk == .integer || t.tk == .float then advance; return some (← text t) else return none
+    | none => return none
+  if ← eatOp "MINUS" then
+    match ← number with | some s => return .lit (.ofString ("-" ++ s)) | none => failHere
+  if ← eatOp "PLUS" then
+    match ← number with | some s => return .lit (.ofString s) | none => failHere
+  if let some s ← number then return .lit (.ofString s)
   match ← peek with
-  | some { tk := .kw c, .. } =>
-    if c == "ON" || c == "DELETE" || c == "DEFAULT" || c == "NULL" then
-      let t := (← get).toks[(← get).pos]!
-      advance; return .lit (.ofString (← text t))
-    parsePrimary
-  | _ => parsePrimary
+  | some t =>
+    match t.tk with
+    | .str => advance; return .lit (.blob (unquote (← text t)).toUTF8)
+    | .kw c =>
+      if c == "ON" || c == "DELETE" || c == "DEFAULT" then advance; return .lit (.ofString (← text t))
+      return .lit (.ofString (← name))
+    | _ => return .lit (.ofString (← name))
+  | none => failHere
 
 partial def parseInsert (ctes : List Cte) : P Stmt := do
   let oc ← if ← eatKw "REPLACE" then pure (some ConflictRes.replace) else do kw "INSERT"; orConflict
