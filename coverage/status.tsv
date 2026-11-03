@@ -5,7 +5,7 @@ F0003	diff	ALTER TABLE ADD COLUMN
 F0004	diff	ALTER TABLE DROP COLUMN
 F0005	open	ANALYZE
 F0006	diff	ATTACH
-F0007	open	DETACH
+F0007	diff	DETACH
 F0008	diff	BEGIN
 F0009	diff	COMMIT
 F0010	diff	END
@@ -14,12 +14,12 @@ F0012	diff	SAVEPOINT
 F0013	diff	RELEASE
 F0014	diff	ROLLBACK TO
 F0015	diff	CREATE TABLE
-F0016	open	CREATE TABLE AS SELECT
+F0016	diff	CREATE TABLE AS SELECT
 F0017	diff	CREATE TEMP TABLE
 F0018	diff	CREATE INDEX
 F0019	diff	CREATE UNIQUE INDEX
-F0020	open	CREATE INDEX partial
-F0021	open	CREATE INDEX on expressions
+F0020	diff	CREATE INDEX partial
+F0021	diff	CREATE INDEX on expressions
 F0022	diff	CREATE VIEW
 F0023	diff	CREATE TRIGGER BEFORE
 F0024	diff	CREATE TRIGGER AFTER
@@ -39,9 +39,9 @@ F0037	diff	INSERT SELECT
 F0038	diff	INSERT DEFAULT VALUES
 F0039	diff	INSERT OR REPLACE
 F0040	diff	INSERT OR IGNORE
-F0041	open	INSERT OR ABORT
+F0041	diff	INSERT OR ABORT
 F0042	diff	INSERT OR FAIL
-F0043	open	INSERT OR ROLLBACK
+F0043	diff	INSERT OR ROLLBACK
 F0044	diff	REPLACE
 F0045	diff	UPSERT DO NOTHING
 F0046	diff	UPSERT DO UPDATE
@@ -56,7 +56,7 @@ F0054	open	VACUUM
 F0055	open	VACUUM INTO
 F0056	diff	WITH
 F0057	diff	WITH RECURSIVE
-F0058	open	WITH MATERIALIZED
+F0058	diff	WITH MATERIALIZED
 F0059	diff	FROM table
 F0060	diff	FROM subquery
 F0061	diff	FROM table-valued function
@@ -64,7 +64,7 @@ F0062	diff	JOIN INNER
 F0063	diff	JOIN LEFT
 F0064	diff	JOIN RIGHT
 F0065	diff	JOIN FULL
-F0066	open	JOIN CROSS
+F0066	diff	JOIN CROSS
 F0067	diff	JOIN NATURAL
 F0068	diff	JOIN USING
 F0069	diff	comma join
@@ -128,7 +128,7 @@ F0126	diff	LIKE
 F0127	diff	LIKE ESCAPE
 F0128	diff	GLOB
 F0129	diff	REGEXP
-F0130	open	MATCH
+F0130	diff	MATCH
 F0131	diff	AND
 F0132	diff	OR
 F0133	diff	CASE simple
@@ -143,7 +143,7 @@ F0141	diff	-> ->>
 F0142	diff	function call
 F0143	diff	DISTINCT aggregate
 F0144	diff	RAISE
-F0145	open	ISNULL/NOTNULL
+F0145	diff	ISNULL/NOTNULL
 F0146	diff	storage classes
 F0147	diff	type affinity of columns
 F0148	diff	affinity of expressions
@@ -173,10 +173,10 @@ F0171	diff	FOREIGN KEY constraint
 F0172	diff	ON DELETE/UPDATE actions
 F0173	diff	DEFAULT values
 F0174	diff	ON CONFLICT resolution
-F0175	open	deferred constraints
+F0175	diff	deferred constraints
 F0176	diff	transactions and savepoints
 F0177	diff	autocommit
-F0178	open	recursive triggers
+F0178	diff	recursive triggers
 F0179	diff	error messages and codes
 F0180	diff	changes()/last_insert_rowid()
 F0181	diff	sqlite_schema contents
@@ -272,7 +272,7 @@ F0270	open	match
 F0271	diff	max
 F0272	diff	min
 F0273	diff	mod
-F0274	open	nth_value
+F0274	diff	nth_value
 F0275	diff	ntile
 F0276	diff	nullif
 F0277	diff	octet_length
@@ -293,8 +293,8 @@ F0291	diff	rtrim
 F0292	diff	sign
 F0293	diff	sin
 F0294	diff	sinh
-F0295	open	sqlite_compileoption_get
-F0296	open	sqlite_compileoption_used
+F0295	diff	sqlite_compileoption_get
+F0296	diff	sqlite_compileoption_used
 F0297	open	sqlite_log
 F0298	diff	sqlite_source_id
 F0299	diff	sqlite_version
@@ -303,7 +303,7 @@ F0301	diff	strftime
 F0302	diff	string_agg
 F0303	diff	substr
 F0304	diff	substring
-F0305	open	subtype
+F0305	diff	subtype
 F0306	diff	sum
 F0307	diff	tan
 F0308	diff	tanh
@@ -316,78 +316,78 @@ F0314	diff	trunc
 F0315	diff	typeof
 F0316	diff	unhex
 F0317	diff	unicode
-F0318	open	unistr
-F0319	open	unistr_quote
+F0318	diff	unistr
+F0319	diff	unistr_quote
 F0320	diff	unixepoch
 F0321	diff	unlikely
 F0322	diff	upper
 F0323	diff	zeroblob
-F0324	open	analysis_limit
-F0325	open	application_id
-F0326	open	auto_vacuum
-F0327	open	automatic_index
-F0328	open	busy_timeout
-F0329	open	cache_size
-F0330	open	cache_spill
-F0331	open	case_sensitive_like
-F0332	open	cell_size_check
-F0333	open	checkpoint_fullfsync
-F0334	open	collation_list
-F0335	open	compile_options
-F0336	open	count_changes
-F0337	open	data_version
-F0338	open	database_list
-F0339	open	default_cache_size
-F0340	open	defer_foreign_keys
-F0341	open	empty_result_callbacks
-F0342	open	encoding
-F0343	open	foreign_key_check
-F0344	open	foreign_key_list
+F0324	diff	analysis_limit
+F0325	diff	application_id
+F0326	diff	auto_vacuum
+F0327	diff	automatic_index
+F0328	diff	busy_timeout
+F0329	diff	cache_size
+F0330	diff	cache_spill
+F0331	diff	case_sensitive_like
+F0332	diff	cell_size_check
+F0333	diff	checkpoint_fullfsync
+F0334	diff	collation_list
+F0335	diff	compile_options
+F0336	diff	count_changes
+F0337	diff	data_version
+F0338	diff	database_list
+F0339	diff	default_cache_size
+F0340	diff	defer_foreign_keys
+F0341	diff	empty_result_callbacks
+F0342	diff	encoding
+F0343	diff	foreign_key_check
+F0344	diff	foreign_key_list
 F0345	diff	foreign_keys
-F0346	open	freelist_count
-F0347	open	full_column_names
-F0348	open	fullfsync
-F0349	open	function_list
-F0350	open	hard_heap_limit
-F0351	open	ignore_check_constraints
+F0346	diff	freelist_count
+F0347	diff	full_column_names
+F0348	diff	fullfsync
+F0349	diff	function_list
+F0350	diff	hard_heap_limit
+F0351	diff	ignore_check_constraints
 F0352	open	incremental_vacuum
-F0353	open	index_info
-F0354	open	index_list
-F0355	open	index_xinfo
+F0353	diff	index_info
+F0354	diff	index_list
+F0355	diff	index_xinfo
 F0356	diff	integrity_check
-F0357	open	journal_mode
-F0358	open	journal_size_limit
-F0359	open	legacy_alter_table
-F0360	open	locking_mode
-F0361	open	max_page_count
-F0362	open	mmap_size
-F0363	open	module_list
-F0364	open	optimize
-F0365	open	page_count
-F0366	open	page_size
-F0367	open	pragma_list
-F0368	open	query_only
-F0369	open	quick_check
-F0370	open	read_uncommitted
-F0371	open	recursive_triggers
-F0372	open	reverse_unordered_selects
-F0373	open	schema_version
-F0374	open	secure_delete
-F0375	open	short_column_names
-F0376	open	shrink_memory
-F0377	open	soft_heap_limit
-F0378	open	synchronous
+F0357	diff	journal_mode
+F0358	diff	journal_size_limit
+F0359	diff	legacy_alter_table
+F0360	diff	locking_mode
+F0361	diff	max_page_count
+F0362	diff	mmap_size
+F0363	diff	module_list
+F0364	diff	optimize
+F0365	diff	page_count
+F0366	diff	page_size
+F0367	diff	pragma_list
+F0368	diff	query_only
+F0369	diff	quick_check
+F0370	diff	read_uncommitted
+F0371	diff	recursive_triggers
+F0372	diff	reverse_unordered_selects
+F0373	diff	schema_version
+F0374	diff	secure_delete
+F0375	diff	short_column_names
+F0376	diff	shrink_memory
+F0377	diff	soft_heap_limit
+F0378	diff	synchronous
 F0379	diff	table_info
-F0380	open	table_list
-F0381	open	table_xinfo
-F0382	open	temp_store
-F0383	open	temp_store_directory
-F0384	open	threads
-F0385	open	trusted_schema
+F0380	diff	table_list
+F0381	diff	table_xinfo
+F0382	diff	temp_store
+F0383	diff	temp_store_directory
+F0384	diff	threads
+F0385	diff	trusted_schema
 F0386	diff	user_version
-F0387	open	wal_autocheckpoint
-F0388	open	wal_checkpoint
-F0389	open	writable_schema
+F0387	diff	wal_autocheckpoint
+F0388	diff	wal_checkpoint
+F0389	diff	writable_schema
 F0390	diff	json_each
 F0391	diff	json_tree
 F0392	diff	jsonb_each
