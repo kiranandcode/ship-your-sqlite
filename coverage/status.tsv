@@ -1,0 +1,394 @@
+id	status	name
+F0001	diff	ALTER TABLE RENAME
+F0002	diff	ALTER TABLE RENAME COLUMN
+F0003	diff	ALTER TABLE ADD COLUMN
+F0004	diff	ALTER TABLE DROP COLUMN
+F0005	open	ANALYZE
+F0006	open	ATTACH
+F0007	open	DETACH
+F0008	diff	BEGIN
+F0009	diff	COMMIT
+F0010	diff	END
+F0011	diff	ROLLBACK
+F0012	diff	SAVEPOINT
+F0013	diff	RELEASE
+F0014	diff	ROLLBACK TO
+F0015	diff	CREATE TABLE
+F0016	open	CREATE TABLE AS SELECT
+F0017	diff	CREATE TEMP TABLE
+F0018	diff	CREATE INDEX
+F0019	diff	CREATE UNIQUE INDEX
+F0020	open	CREATE INDEX partial
+F0021	open	CREATE INDEX on expressions
+F0022	diff	CREATE VIEW
+F0023	diff	CREATE TRIGGER BEFORE
+F0024	diff	CREATE TRIGGER AFTER
+F0025	diff	CREATE TRIGGER INSTEAD OF
+F0026	diff	CREATE TRIGGER FOR EACH ROW WHEN
+F0027	open	CREATE VIRTUAL TABLE
+F0028	diff	DELETE
+F0029	diff	DELETE LIMIT
+F0030	diff	DROP INDEX
+F0031	diff	DROP TABLE
+F0032	diff	DROP TRIGGER
+F0033	diff	DROP VIEW
+F0034	open	EXPLAIN
+F0035	open	EXPLAIN QUERY PLAN
+F0036	diff	INSERT VALUES
+F0037	diff	INSERT SELECT
+F0038	diff	INSERT DEFAULT VALUES
+F0039	diff	INSERT OR REPLACE
+F0040	diff	INSERT OR IGNORE
+F0041	open	INSERT OR ABORT
+F0042	diff	INSERT OR FAIL
+F0043	open	INSERT OR ROLLBACK
+F0044	diff	REPLACE
+F0045	diff	UPSERT DO NOTHING
+F0046	diff	UPSERT DO UPDATE
+F0047	diff	RETURNING
+F0048	diff	PRAGMA
+F0049	diff	REINDEX
+F0050	diff	SELECT
+F0051	diff	UPDATE
+F0052	diff	UPDATE FROM
+F0053	diff	UPDATE LIMIT
+F0054	open	VACUUM
+F0055	open	VACUUM INTO
+F0056	diff	WITH
+F0057	diff	WITH RECURSIVE
+F0058	open	WITH MATERIALIZED
+F0059	diff	FROM table
+F0060	diff	FROM subquery
+F0061	open	FROM table-valued function
+F0062	diff	JOIN INNER
+F0063	diff	JOIN LEFT
+F0064	diff	JOIN RIGHT
+F0065	diff	JOIN FULL
+F0066	open	JOIN CROSS
+F0067	diff	JOIN NATURAL
+F0068	diff	JOIN USING
+F0069	diff	comma join
+F0070	diff	WHERE
+F0071	diff	GROUP BY
+F0072	diff	HAVING
+F0073	diff	aggregate without GROUP BY
+F0074	diff	bare columns in aggregate
+F0075	diff	ORDER BY
+F0076	diff	ORDER BY COLLATE
+F0077	diff	NULLS FIRST/LAST
+F0078	diff	LIMIT
+F0079	diff	OFFSET
+F0080	diff	DISTINCT
+F0081	diff	ALL
+F0082	diff	UNION
+F0083	diff	UNION ALL
+F0084	diff	INTERSECT
+F0085	diff	EXCEPT
+F0086	diff	VALUES clause
+F0087	diff	WINDOW clause
+F0088	diff	OVER partition
+F0089	diff	OVER order
+F0090	diff	frame ROWS
+F0091	diff	frame RANGE
+F0092	diff	frame GROUPS
+F0093	diff	frame EXCLUDE
+F0094	diff	FILTER clause
+F0095	diff	aggregate ORDER BY
+F0096	diff	INDEXED BY
+F0097	diff	NOT INDEXED
+F0098	diff	AS alias
+F0099	diff	literal integer
+F0100	diff	literal real
+F0101	diff	literal hex integer
+F0102	diff	literal string
+F0103	diff	literal blob
+F0104	diff	NULL
+F0105	diff	TRUE/FALSE
+F0106	open	bound parameter
+F0107	diff	column reference
+F0108	diff	unary -
+F0109	open	unary +
+F0110	diff	~
+F0111	diff	NOT
+F0112	open	(concat)
+F0113	diff	* / %
+F0114	diff	+ -
+F0115	open	<< >> &
+F0116	open	(bitwise)
+F0117	diff	< <= > >=
+F0118	diff	= == != <>
+F0119	diff	IS
+F0120	diff	IS NOT
+F0121	diff	IS DISTINCT FROM
+F0122	diff	IN list
+F0123	diff	IN subquery
+F0124	diff	NOT IN
+F0125	diff	BETWEEN
+F0126	diff	LIKE
+F0127	open	LIKE ESCAPE
+F0128	diff	GLOB
+F0129	open	REGEXP
+F0130	open	MATCH
+F0131	diff	AND
+F0132	diff	OR
+F0133	diff	CASE simple
+F0134	diff	CASE searched
+F0135	diff	CAST
+F0136	diff	COLLATE
+F0137	diff	EXISTS
+F0138	diff	scalar subquery
+F0139	diff	correlated subquery
+F0140	diff	row value
+F0141	open	-> ->>
+F0142	diff	function call
+F0143	diff	DISTINCT aggregate
+F0144	diff	RAISE
+F0145	open	ISNULL/NOTNULL
+F0146	diff	storage classes
+F0147	diff	type affinity of columns
+F0148	diff	affinity of expressions
+F0149	diff	comparison affinity rules
+F0150	diff	collating sequence BINARY
+F0151	diff	collating sequence NOCASE
+F0152	diff	collating sequence RTRIM
+F0153	diff	three-valued logic
+F0154	diff	NULL in aggregates
+F0155	diff	NULL in DISTINCT/GROUP BY
+F0156	diff	integer overflow to REAL
+F0157	diff	division by zero is NULL
+F0158	open	text to number conversion
+F0159	diff	REAL to text rendering
+F0160	diff	rowid tables
+F0161	diff	INTEGER PRIMARY KEY alias
+F0162	diff	AUTOINCREMENT
+F0163	diff	WITHOUT ROWID
+F0164	diff	STRICT tables
+F0165	diff	generated columns VIRTUAL
+F0166	diff	generated columns STORED
+F0167	diff	NOT NULL constraint
+F0168	diff	UNIQUE constraint
+F0169	diff	CHECK constraint
+F0170	diff	PRIMARY KEY constraint
+F0171	diff	FOREIGN KEY constraint
+F0172	diff	ON DELETE/UPDATE actions
+F0173	diff	DEFAULT values
+F0174	diff	ON CONFLICT resolution
+F0175	open	deferred constraints
+F0176	diff	transactions and savepoints
+F0177	diff	autocommit
+F0178	open	recursive triggers
+F0179	diff	error messages and codes
+F0180	diff	changes()/last_insert_rowid()
+F0181	diff	sqlite_schema contents
+F0182	diff	temporary databases
+F0183	open	attached databases
+F0184	open	->
+F0185	open	->>
+F0186	diff	abs
+F0187	open	acos
+F0188	open	acosh
+F0189	open	asin
+F0190	open	asinh
+F0191	open	atan
+F0192	open	atan2
+F0193	open	atanh
+F0194	diff	avg
+F0195	open	ceil
+F0196	open	ceiling
+F0197	diff	changes
+F0198	open	char
+F0199	diff	coalesce
+F0200	open	concat
+F0201	open	concat_ws
+F0202	open	cos
+F0203	open	cosh
+F0204	diff	count
+F0205	diff	cume_dist
+F0206	open	current_date
+F0207	open	current_time
+F0208	open	current_timestamp
+F0209	open	date
+F0210	open	datetime
+F0211	open	degrees
+F0212	diff	dense_rank
+F0213	open	exp
+F0214	diff	first_value
+F0215	open	floor
+F0216	open	format
+F0217	open	glob
+F0218	diff	group_concat
+F0219	open	hex
+F0220	open	if
+F0221	diff	ifnull
+F0222	diff	iif
+F0223	open	instr
+F0224	open	json
+F0225	open	json_array
+F0226	open	json_array_insert
+F0227	open	json_array_length
+F0228	open	json_error_position
+F0229	open	json_extract
+F0230	open	json_group_array
+F0231	open	json_group_object
+F0232	open	json_insert
+F0233	open	json_object
+F0234	open	json_patch
+F0235	open	json_pretty
+F0236	open	json_quote
+F0237	open	json_remove
+F0238	open	json_replace
+F0239	open	json_set
+F0240	open	json_type
+F0241	open	json_valid
+F0242	open	jsonb
+F0243	open	jsonb_array
+F0244	open	jsonb_array_insert
+F0245	open	jsonb_extract
+F0246	open	jsonb_group_array
+F0247	open	jsonb_group_object
+F0248	open	jsonb_insert
+F0249	open	jsonb_object
+F0250	open	jsonb_patch
+F0251	open	jsonb_remove
+F0252	open	jsonb_replace
+F0253	open	jsonb_set
+F0254	open	julianday
+F0255	diff	lag
+F0256	diff	last_insert_rowid
+F0257	diff	last_value
+F0258	diff	lead
+F0259	open	length
+F0260	open	like
+F0261	open	likelihood
+F0262	open	likely
+F0263	open	ln
+F0264	open	load_extension
+F0265	diff	log
+F0266	open	log10
+F0267	open	log2
+F0268	open	lower
+F0269	open	ltrim
+F0270	open	match
+F0271	diff	max
+F0272	diff	min
+F0273	open	mod
+F0274	open	nth_value
+F0275	diff	ntile
+F0276	diff	nullif
+F0277	open	octet_length
+F0278	diff	percent_rank
+F0279	open	pi
+F0280	open	pow
+F0281	open	power
+F0282	open	printf
+F0283	open	quote
+F0284	open	radians
+F0285	open	random
+F0286	open	randomblob
+F0287	diff	rank
+F0288	diff	replace
+F0289	open	round
+F0290	diff	row_number
+F0291	open	rtrim
+F0292	open	sign
+F0293	open	sin
+F0294	open	sinh
+F0295	open	sqlite_compileoption_get
+F0296	open	sqlite_compileoption_used
+F0297	open	sqlite_log
+F0298	open	sqlite_source_id
+F0299	open	sqlite_version
+F0300	open	sqrt
+F0301	open	strftime
+F0302	open	string_agg
+F0303	open	substr
+F0304	open	substring
+F0305	open	subtype
+F0306	diff	sum
+F0307	open	tan
+F0308	open	tanh
+F0309	open	time
+F0310	open	timediff
+F0311	diff	total
+F0312	diff	total_changes
+F0313	open	trim
+F0314	open	trunc
+F0315	diff	typeof
+F0316	open	unhex
+F0317	open	unicode
+F0318	open	unistr
+F0319	open	unistr_quote
+F0320	open	unixepoch
+F0321	open	unlikely
+F0322	diff	upper
+F0323	open	zeroblob
+F0324	open	analysis_limit
+F0325	open	application_id
+F0326	open	auto_vacuum
+F0327	open	automatic_index
+F0328	open	busy_timeout
+F0329	open	cache_size
+F0330	open	cache_spill
+F0331	open	case_sensitive_like
+F0332	open	cell_size_check
+F0333	open	checkpoint_fullfsync
+F0334	open	collation_list
+F0335	open	compile_options
+F0336	open	count_changes
+F0337	open	data_version
+F0338	open	database_list
+F0339	open	default_cache_size
+F0340	open	defer_foreign_keys
+F0341	open	empty_result_callbacks
+F0342	open	encoding
+F0343	open	foreign_key_check
+F0344	open	foreign_key_list
+F0345	diff	foreign_keys
+F0346	open	freelist_count
+F0347	open	full_column_names
+F0348	open	fullfsync
+F0349	open	function_list
+F0350	open	hard_heap_limit
+F0351	open	ignore_check_constraints
+F0352	open	incremental_vacuum
+F0353	open	index_info
+F0354	open	index_list
+F0355	open	index_xinfo
+F0356	diff	integrity_check
+F0357	open	journal_mode
+F0358	open	journal_size_limit
+F0359	open	legacy_alter_table
+F0360	open	locking_mode
+F0361	open	max_page_count
+F0362	open	mmap_size
+F0363	open	module_list
+F0364	open	optimize
+F0365	open	page_count
+F0366	open	page_size
+F0367	open	pragma_list
+F0368	open	query_only
+F0369	open	quick_check
+F0370	open	read_uncommitted
+F0371	open	recursive_triggers
+F0372	open	reverse_unordered_selects
+F0373	open	schema_version
+F0374	open	secure_delete
+F0375	open	short_column_names
+F0376	open	shrink_memory
+F0377	open	soft_heap_limit
+F0378	open	synchronous
+F0379	diff	table_info
+F0380	open	table_list
+F0381	open	table_xinfo
+F0382	open	temp_store
+F0383	open	temp_store_directory
+F0384	open	threads
+F0385	open	trusted_schema
+F0386	diff	user_version
+F0387	open	wal_autocheckpoint
+F0388	open	wal_checkpoint
+F0389	open	writable_schema
+F0390	open	json_each
+F0391	open	json_tree
+F0392	open	generate_series
+F0393	open	pragma_* table-valued functions

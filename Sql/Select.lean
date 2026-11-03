@@ -1,6 +1,8 @@
 /-
   The evaluator: expressions, subqueries and SELECT (mutually recursive).
 -/
+import Std.Data.HashMap
+import Std.Data.HashSet
 import Sql.Query
 import Sql.Printf
 import Sql.DateTime
@@ -52,10 +54,36 @@ def lexCompare (colls : List Coll) (dirs : List (SortDir × NullsOrder)) (a b : 
 def rowsEq (colls : List Coll) (a b : Array Value) : Bool :=
   lexCompare colls [] a b == .eq
 
+/-- A key equal for two rows exactly when `rowsEq` holds: numbers by value (an
+    integral REAL as the integer), text folded by its collation. -/
+def canonKey (colls : List Coll) (r : Array Value) : String := Id.run do
+  let mut out := ""
+  for h : i in [0:r.size] do
+    let c := colls[i]?.getD .binary
+    let piece := match r[i] with
+      | .null => "N"
+      | .int n => s!"I{n}"
+      | .real x => match realAsInt x with
+        | some n => if intToReal n == x then s!"I{n}" else s!"R{Real.bits x}"
+        | none => s!"R{Real.bits (if x == 0.0 then 0.0 else x)}"
+      | .text t =>
+        let bs := match c with
+          | .binary => t.toList
+          | .nocase => t.toList.map lowerB
+          | .rtrim => (t.toList.reverse.dropWhile (· == 32)).reverse
+        "T" ++ hexOf ⟨bs.toArray⟩
+      | .blob b => "B" ++ hexOf b
+    out := out ++ piece ++ ","
+  return out
+
 def dedupe (colls : List Coll) (rows : Array (Array Value)) : Array (Array Value) := Id.run do
   let mut out := #[]
+  let mut seen : Std.HashSet String := {}
   for r in rows do
-    if !(out.any (rowsEq colls r)) then out := out.push r
+    let k := canonKey colls r
+    if !seen.contains k then
+      seen := seen.insert k
+      out := out.push r
   return out
 
 /-- The integer value of a LIMIT/OFFSET expression. -/
@@ -1297,6 +1325,7 @@ partial def runCore (q : QEnv) (core : SelectCore) (orderBy : List OrderTerm) :
     if isAgg then
       -- groups, in order of their key
       let mut groups : Array (Array Value × Array (Array Cur)) := #[]
+      let mut gindex : Std.HashMap String Nat := {}
       for cur in kept do
         let key ← groupBy.toArray.mapM fun g => do
           let g' := match g with
@@ -1305,9 +1334,12 @@ partial def runCore (q : QEnv) (core : SelectCore) (orderBy : List OrderTerm) :
           if hasAgg g' then err "aggregate functions are not allowed in the GROUP BY clause"
           evalExpr (withFrame cur aliases) g'
         let gcolls := groupBy.map fun g => ((exprColl qm.env g).map (·.1)).getD .binary
-        match groups.findIdx? (fun (k, _) => rowsEq gcolls k key) with
+        let ck := canonKey gcolls key
+        match gindex.get? ck with
         | some i => groups := groups.modify i fun (k, rs) => (k, rs.push cur)
-        | none => groups := groups.push (key, #[cur])
+        | none =>
+          gindex := gindex.insert ck groups.size
+          groups := groups.push (key, #[cur])
       if groupBy.isEmpty && groups.isEmpty then groups := #[(#[], #[])]
       let gcolls := groupBy.map fun g => ((exprColl qm.env g).map (·.1)).getD .binary
       if !groupBy.isEmpty then groups := stableSort (fun a b => lexCompare gcolls [] a.1 b.1) groups
@@ -1356,8 +1388,12 @@ partial def runCore (q : QEnv) (core : SelectCore) (orderBy : List OrderTerm) :
     if distinct then
       let colls := cmeta.toList.map (·.coll)
       let mut d := #[]
+      let mut seen : Std.HashSet String := {}
       for r in out do
-        if !(d.any fun x => rowsEq colls x.1 r.1) then d := d.push r
+        let k := canonKey colls r.1
+        if !seen.contains k then
+          seen := seen.insert k
+          d := d.push r
       out := d
     return (cmeta, out)
 
@@ -1393,8 +1429,12 @@ partial def runSelect (q : QEnv) (sel : Select) : M (Array ColMeta × Array (Arr
         match op with
         | .unionAll => acc := acc ++ rs
         | .union => acc := stableSort (lexCompare colls []) (dedupe colls (acc ++ rs))
-        | .intersect => acc := stableSort (lexCompare colls []) (dedupe colls (acc.filter fun r => rs.any (rowsEq colls r)))
-        | .except => acc := stableSort (lexCompare colls []) (dedupe colls (acc.filter fun r => !(rs.any (rowsEq colls r))))
+        | .intersect =>
+          let rk : Std.HashSet String := rs.foldl (fun st r => st.insert (canonKey colls r)) {}
+          acc := stableSort (lexCompare colls []) (dedupe colls (acc.filter fun r => rk.contains (canonKey colls r)))
+        | .except =>
+          let rk : Std.HashSet String := rs.foldl (fun st r => st.insert (canonKey colls r)) {}
+          acc := stableSort (lexCompare colls []) (dedupe colls (acc.filter fun r => !rk.contains (canonKey colls r)))
       -- ORDER BY of a compound refers to result columns
       if orderBy.isEmpty then pure (cols, acc) else
       let mut idx := #[]
