@@ -35,3 +35,7 @@ name = "Sql"
 [[lean_exe]]
 name = "real_check"
 root = "tools.RealCheck"
+
+[[lean_exe]]
+name = "sql_run"
+root = "tools.SqlRun"
