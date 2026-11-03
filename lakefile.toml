@@ -27,3 +27,11 @@ srcDir = "build/gen"
 [[lean_exe]]
 name = "sqlite_run"
 root = "SqliteRun"
+
+# The SQL semantics (Phase 2). Independent of CCLib.
+[[lean_lib]]
+name = "Sql"
+
+[[lean_exe]]
+name = "real_check"
+root = "tools.RealCheck"
