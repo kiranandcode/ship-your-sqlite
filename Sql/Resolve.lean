@@ -76,6 +76,7 @@ partial def staticFrom (q : QEnv) : FromItem → M (Array Src)
       return #[metaSrc (alias.getD n) cs]
     if nameEq n "sqlite_schema" || nameEq n "sqlite_master" || nameEq n "sqlite_temp_schema" || nameEq n "sqlite_temp_master" then
       return #[metaSrc (alias.getD n) (#["type", "name", "tbl_name", "rootpage", "sql"].map fun c => ⟨c, none, .binary⟩)]
+    if n.toLower.startsWith "pragma_" then return #[← tableFnSrc n alias]
     match sch with
     | some s => err s!"no such table: {s}.{n}"
     | none => err s!"no such table: {n}"

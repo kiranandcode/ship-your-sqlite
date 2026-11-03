@@ -437,6 +437,16 @@ def adjustPages (db : Db) (dbk : String) (k : Int) : Db := Id.run do
   db := setCookie db dbk "$pages" p
   return setCookie db dbk "$free" f
 
+def pageSizes : List Int := [512, 1024, 2048, 4096, 8192, 16384, 32768, 65536]
+
+/-- Open the temp database (`sqlite3OpenTempDatabase`), whose page size is
+    the last one requested by `PRAGMA page_size` (`db->nextPagesize`). -/
+def openTemp (db : Db) : Db :=
+  if pvInt db "temp_open" 0 != 0 then db else
+  let db := setPvInt db "temp_open" 1
+  let n := pvInt db "next_page_size" 0
+  if pageSizes.contains n then setPvInt db "temp.page_size" n else db
+
 /-! ## Statement hook (schema cookie, pages, table hash) -/
 
 /-- What identifies a database's schema (not its contents). -/
@@ -486,7 +496,7 @@ def afterStmt (before after : Db) (s : Stmt) : Db := Id.run do
     if signature before dbk == signature after dbk then continue
     db := setCookie db dbk "schema_version" (db.cookie dbk "schema_version" + 1)
     db := adjustPages db dbk ((btrees after dbk : Int) - btrees before dbk)
-    if dbk == "temp" then db := setPvInt db "temp_open" 1
+    if dbk == "temp" then db := openTemp db
     if reload then db := setHash db dbk none
     else
       let old := tableNames before dbk
@@ -497,6 +507,26 @@ def afterStmt (before after : Db) (s : Stmt) : Db := Id.run do
       db := setHash db dbk (some h2)
   return db
 
+/-! ## Flags the executor consults -/
+
+def SQLITE_READONLY : Nat := 8
+
+/-- Statements that open a write transaction (refused under `query_only`):
+    DML always, DDL when it changes the schema (not `IF [NOT] EXISTS` no-ops). -/
+def writes (before after : Db) : Stmt → Bool
+  | .insert .. | .update .. | .delete .. => true
+  | .createTable .. | .createIndex .. | .createView .. | .createTrigger .. | .drop ..
+  | .alterRename .. | .alterRenameColumn .. | .alterAddColumn .. | .alterDropColumn ..
+  | .createVirtualTable .. => (databases after).any fun (k, _) => signature before k != signature after k
+  | _ => false
+
+/-- DML whose result under `count_changes` is the number of changed rows. -/
+def countsChanges : Stmt → Bool
+  | .insert _ _ _ _ _ _ _ _ ret => ret.isEmpty
+  | .update _ _ _ _ _ _ _ _ ret _ _ _ => ret.isEmpty
+  | .delete _ _ _ _ _ ret _ _ _ => ret.isEmpty
+  | _ => false
+
 /-! ## Result helpers -/
 
 abbrev Rows := Array (Array Value)
@@ -506,6 +536,7 @@ def txt (s : String) : Value := .ofString s
 def int (i : Int) : Value := .int i
 def one (v : Value) : Rows := #[#[v]]
 def fail {α} (msg : String) : Except Err α := throw { code := SQLITE_ERROR, msg }
+def readonly {α} : Except Err α := throw { code := SQLITE_READONLY, msg := "attempt to write a readonly database" }
 
 /-- The text of an argument as `zRight` (NULL: no argument). -/
 def argBytes : Value → Option Bytes
@@ -529,12 +560,37 @@ def journalDefault (db : Db) (dbk : String) : String :=
 
 def journalMode (db : Db) (dbk : String) : String := pvStr db (dbk ++ ".journal_mode") (journalDefault db dbk)
 
+def valEq : Value → Value → Bool
+  | .null, .null => true
+  | .int a, .int b => a == b
+  | .real a, .real b => a.toBits == b.toBits
+  | .text a, .text b | .blob a, .blob b => a.data == b.data
+  | _, _ => false
+
+/-- The database has been written in the open transaction (its pager is past
+    the reader state): its contents, schema or header differ from the state at
+    BEGIN. -/
+def dirty (db : Db) (dbk : String) : Bool :=
+  db.inTxn && match db.savepoints.getLast? with
+    | none => false
+    | some (_, snap) =>
+      let old : Db := { db with main := snap }
+      let p := dbk ++ "."
+      old.main.cookies.filter (·.1.startsWith p) != db.main.cookies.filter (·.1.startsWith p) ||
+      signature old dbk != signature db dbk ||
+      (tablesIn db dbk).any fun t => match (tablesIn old dbk).find? (nameEq ·.name t.name) with
+        | none => true
+        | some u => u.rows.size != t.rows.size || (u.rows.zip t.rows).any fun (a, b) =>
+            a.rowid != b.rowid || a.vals.size != b.vals.size || (a.vals.zip b.vals).any fun (x, y) => !valEq x y
+
 /-- `sqlite3PagerSetJournalMode` and `OP_JournalMode` for in-memory databases
-    (only MEMORY and OFF) and the temp database (not WAL). -/
+    (only MEMORY and OFF) and the temp database (not WAL); no change once the
+    database has been written in the open transaction
+    (`sqlite3PagerOkToChangeJournalMode`). -/
 def setJournal (db : Db) (dbk : String) (mode : String) : Db :=
   let memdb := journalDefault db dbk == "memory"
   let ok := if memdb then mode == "memory" || mode == "off" else mode != "wal"
-  if ok then setPv db (dbk ++ ".journal_mode") (txt mode) else db
+  if ok && !dirty db dbk then setPv db (dbk ++ ".journal_mode") (txt mode) else db
 
 /-! ## View columns -/
 
@@ -770,7 +826,7 @@ def runWith (vc : ViewCols) (db0 : Db) (schema : Option String) (name : String) 
       | none => fail s!"unknown database {s}"
   let explicit := schema.isSome
   -- naming temp opens it
-  let db := if dbk == "temp" then setPvInt db0 "temp_open" 1 else db0
+  let db := if dbk == "temp" then openTemp db0 else db0
   let some _ := pragmaNames.find? (· == name) | return (db, #[])
   let zDb : Option String := if explicit then some dbk else none
   let zStr := z.map str
@@ -789,6 +845,7 @@ def runWith (vc : ViewCols) (db0 : Db) (schema : Option String) (name : String) 
     match z with
     | none => return (db, one (int (db.cookie dbk name)))
     | some z =>
+      if flag db "query_only" then readonly
       let db := markWritten (setCookie db dbk name (atoi z)) dbk
       return (if name == "schema_version" then setHash db dbk none else db, #[])
   | "data_version" => return (db, one (int 1))
@@ -839,6 +896,7 @@ def runWith (vc : ViewCols) (db0 : Db) (schema : Option String) (name : String) 
       let c := db.cookie dbk "default_cache_size"
       return (db, one (int (if c > 0 then c else if c < 0 then -c else -2000)))
     | some z =>
+      if flag db "query_only" then readonly
       let size := (atoi z).natAbs
       let db := markWritten (setCookie db dbk "default_cache_size" size) dbk
       return (setPvInt db (dbk ++ ".cache_size") size, #[])
@@ -960,15 +1018,16 @@ def runWith (vc : ViewCols) (db0 : Db) (schema : Option String) (name : String) 
     | none => return (db, one (int (pageSize db dbk)))
     | some z =>
       let n := atoi z
-      let pow2 := [512, 1024, 2048, 4096, 8192, 16384, 32768, 65536].contains n
-      if pages db dbk ≥ 1 || !pow2 then return (db, #[])
+      let db := setPvInt db "next_page_size" n
+      if pages db dbk ≥ 1 || !pageSizes.contains n then return (db, #[])
       return (setPvInt db (dbk ++ ".page_size") n, #[])
   | "secure_delete" =>
     let b : Option Int := z.map fun z => if iEq z (bs "fast") then 2 else if getBoolean z false then 1 else 0
     let db := match b with
       | some b =>
         let db := if explicit then db else
-          (databases db).foldl (fun db (k, _) => setPvInt db (k ++ ".secure_delete") b) db
+          (databases db).foldl (fun db (k, _) =>
+            if k == "temp" && !tempOpen db then db else setPvInt db (k ++ ".secure_delete") b) db
         setPvInt db (dbk ++ ".secure_delete") b
       | none => db
     return (db, one (int (pvInt db (dbk ++ ".secure_delete") 0)))

@@ -35,6 +35,15 @@ def isIntegerType (t : String) : Bool := t.trimAscii.toString.toUpper == "INTEGE
 
 def strictTypes : List String := ["INT", "INTEGER", "REAL", "TEXT", "BLOB", "ANY"]
 
+/-- `sqlite3AddColumn`: a type ending in `ALWAYS` (or `GENERATED ALWAYS`) is
+    the start of a generated-column clause, not part of the type. -/
+def stripGeneratedAlways (ty : String) : String :=
+  let low := ty.toLower
+  if ty.length ≥ 16 && low.endsWith "always" then
+    let t := ((ty.dropEnd 6).trimAsciiEnd).toString
+    if t.length ≥ 9 && t.toLower.endsWith "generated" then ((t.dropEnd 9).trimAsciiEnd).toString else t
+  else ty
+
 def mkTable (name : Name) (cols : List ColumnDef) (cons : List (Option Name × TableConstraint))
     (withoutRowid strict : Bool) (sql : String) : M Table := do
   let mut cs : Array Column := #[]
@@ -43,7 +52,7 @@ def mkTable (name : Name) (cols : List ColumnDef) (cons : List (Option Name × T
     if strict && !(strictTypes.contains cd.type.trimAscii.toString.toUpper) then
       if cd.type.trimAscii.toString.isEmpty then err s!"missing datatype for {name}.{cd.name}"
       err s!"unknown datatype for {name}.{cd.name}: \"{cd.type}\""
-    let ty := cd.type.trimAscii.toString
+    let ty := stripGeneratedAlways cd.type.trimAscii.toString
     let ty := if strictTypes.contains ty.toUpper then ty.toUpper else P.unquote ty
     let mut c : Column := { name := cd.name, type := ty, aff := affinityOfType ty }
     for (_, k) in cd.constraints do
@@ -186,7 +195,7 @@ def checkRow (t : Table) (r : Row) : M Unit := do
     let c := t.cols[i]
     if c.notNull && (r.vals[i]?.getD .null).isNull then
       err s!"NOT NULL constraint failed: {t.name}.{c.name}" SQLITE_CONSTRAINT_NOTNULL
-  for (nm, e) in t.checks do
+  for (nm, e) in (if Pragma.flag (← getDb) "ignore_check_constraints" then [] else t.checks) do
     let v ← evalExpr (qOfRow t r) e
     if truth v == some false then
       err s!"CHECK constraint failed: {nm.getD ""}" SQLITE_CONSTRAINT_CHECK
@@ -1049,6 +1058,10 @@ def runStmt (s : Stmt) : M (Except Err (Array (Array Value))) := do
     staticStmt s
     let rows ← execStmt {} s
     let db ← getDb
+    -- PRAGMA query_only: a statement that opens a write transaction fails
+    -- (after the errors of prepare, which the executor finds while running)
+    if Pragma.flag saved.db "query_only" && Pragma.writes saved.db db s then
+      throw { code := Pragma.SQLITE_READONLY, msg := "attempt to write a readonly database" }
     -- immediate foreign keys: the violation counter at the end of the statement
     if db.pragmas.foreignKeys then
       let isDml := match s with | .insert .. | .update .. | .delete .. => true | _ => false
@@ -1059,6 +1072,8 @@ def runStmt (s : Stmt) : M (Except Err (Array (Array Value))) := do
         return .error { code := SQLITE_CONSTRAINT_FOREIGNKEY, msg := "FOREIGN KEY constraint failed" }
     -- schema cookie, pages, table hash order (Sql.Pragma)
     setDb (Pragma.afterStmt saved.db (← getDb) s)
+    -- PRAGMA count_changes: DML without RETURNING returns the number of changes
+    if Pragma.flag db "count_changes" && Pragma.countsChanges s then return .ok #[#[.int db.changes]]
     return .ok rows
   catch e =>
     if !e.keep then
