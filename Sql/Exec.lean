@@ -717,12 +717,15 @@ def execStmt (fuel : Nat) (q : QEnv) (s : Stmt) : M (Array (Array Value)) :=
           | none => pure (#[], #[#[]])
         let mut targets : Array (Row × Array Cur) := #[]
         for r in t.rows do
-          for fr in frows do
+          -- which matching FROM row is used is the plan's choice
+          for fr in ← chooseOrder frows do
             let qr := { q with env := { q.env with frames := { srcs := #[src] ++ fsrcs, cur := #[some r] ++ fr } :: q.env.frames } }
             let ok ← match wh with
               | some w => do pure (truth (← evalExpr fuel qr w) == some true)
               | none => pure true
             if ok then targets := targets.push (r, fr); break
+        -- the order the rows are updated in is the plan's
+        targets ← chooseOrder targets
         let mut updated := #[]
         for (old, fr) in targets do
           let t ← currentTable tname
@@ -811,6 +814,8 @@ def execStmt (fuel : Nat) (q : QEnv) (s : Stmt) : M (Array (Array Value)) :=
           match wh with
           | some w => if truth (← evalExpr fuel qr w) == some true then gone := gone.push r
           | none => gone := gone.push r
+        -- the order the rows are deleted in is the plan's
+        gone ← chooseOrder gone
         let out ← resultRows fuel q t alias gone ret
         for r in gone do
           runTriggers fuel q .before .delete tname (some r) none
