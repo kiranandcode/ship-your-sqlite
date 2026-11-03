@@ -26,6 +26,9 @@ export SQLITE_SHA3_256=92281c86e2957f9b9305890f9ac04204caa7b677cc868dc326d942689
 export SQLITE_DIR="$SYS_ROOT/build/sqlite"
 export SQLITE_SRC="$SQLITE_DIR/sqlite-amalgamation-$SQLITE_VERNUM"
 
+# clightgen / ccomp language options shared by the export and the ccomp oracle
+export CG_FLAGS="-fstruct-passing"
+
 # Heavy jobs: at most 2 at once, each capped.
 syscap() { systemd-run --user --scope -q -p MemoryMax=16G "$@"; }
 unset _sys_here

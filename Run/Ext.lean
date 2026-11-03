@@ -31,6 +31,8 @@ inductive ExtErr where
 
 /-- The state of the outside world. -/
 structure World where
+  /-- the bytes of fd 0 not read yet -/
+  stdin : ByteArray := .empty
   /-- bytes written to fd 1 -/
   out : ByteArray := .empty
   /-- bytes written to fd 2 -/
@@ -41,6 +43,9 @@ structure World where
   clock : Nat := 0
   /-- `exit` was called with this status -/
   exited : Option Int := none
+  /-- variadic activations: the block of one of the callee's locals ↦ the block
+      holding its variadic arguments (8-byte slots), see `Run.Runner` -/
+  va : List (Block × Block) := []
 
 /-- The result of one external call. -/
 structure ExtOut where
@@ -185,6 +190,12 @@ def callExternal (w : World) (name : String) (args : List Val) (m : Mem) :
       if fd == 1 then ok (int64 n) (w' := { w with out := w.out ++ bs })
       else if fd == 2 then ok (int64 n) (w' := { w with err := w.err ++ bs })
       else throw (.unsupported s!"write to fd {fd}")
+  | "read", [fd, buf, n] => some do
+      let fd ← argInt fd; let (b, o) ← argPtr buf; let n ← argNat n
+      if fd != 0 then throw (.unsupported s!"read from fd {fd}") else
+      let k := min n w.stdin.size
+      let m' ← storeBytes m b o (w.stdin.extract 0 k).toList
+      ok (int64 k) m' { w with stdin := w.stdin.extract k w.stdin.size }
   -- memory and strings
   | "realloc", [p, n] => some do
       let n ← argNat n

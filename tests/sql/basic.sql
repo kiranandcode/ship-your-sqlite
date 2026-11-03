@@ -1,0 +1,11 @@
+create table t(a integer, b text, c real, d);
+insert into t values (1, 'one', 1.5, null), (2, 'two''s', 2.0, x'00ff'), (3, null, -0.1, 3);
+select * from t order by a desc;
+select a, b || '!', c * 2, typeof(d) from t where c > 0;
+select count(*), sum(a), avg(c), max(b), group_concat(b, ',') from t;
+select null = null, null is null, 1 = '1', 1 < 'a', 'abc' like 'A%';
+select 1/0, 7/2, 7.0/2, -7 % 3, 1e308*10, round(2.5), abs(-9223372036854775807);
+select * from nosuch;
+select upper('héllo'), length('héllo'), hex('é'), unicode('é');
+select json_object('a', 1, 'b', json_array(1, 2.5, 'x')), json_extract('{"x":[1,2]}', '$.x[1]');
+select sqrt(2), pi(), exp(1);
