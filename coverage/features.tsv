@@ -1,0 +1,394 @@
+id	area	name	source
+F0001	statement	ALTER TABLE RENAME	lang.html
+F0002	statement	ALTER TABLE RENAME COLUMN	lang.html
+F0003	statement	ALTER TABLE ADD COLUMN	lang.html
+F0004	statement	ALTER TABLE DROP COLUMN	lang.html
+F0005	statement	ANALYZE	lang.html
+F0006	statement	ATTACH	lang.html
+F0007	statement	DETACH	lang.html
+F0008	statement	BEGIN	lang.html
+F0009	statement	COMMIT	lang.html
+F0010	statement	END	lang.html
+F0011	statement	ROLLBACK	lang.html
+F0012	statement	SAVEPOINT	lang.html
+F0013	statement	RELEASE	lang.html
+F0014	statement	ROLLBACK TO	lang.html
+F0015	statement	CREATE TABLE	lang.html
+F0016	statement	CREATE TABLE AS SELECT	lang.html
+F0017	statement	CREATE TEMP TABLE	lang.html
+F0018	statement	CREATE INDEX	lang.html
+F0019	statement	CREATE UNIQUE INDEX	lang.html
+F0020	statement	CREATE INDEX partial	lang.html
+F0021	statement	CREATE INDEX on expressions	lang.html
+F0022	statement	CREATE VIEW	lang.html
+F0023	statement	CREATE TRIGGER BEFORE	lang.html
+F0024	statement	CREATE TRIGGER AFTER	lang.html
+F0025	statement	CREATE TRIGGER INSTEAD OF	lang.html
+F0026	statement	CREATE TRIGGER FOR EACH ROW WHEN	lang.html
+F0027	statement	CREATE VIRTUAL TABLE	lang.html
+F0028	statement	DELETE	lang.html
+F0029	statement	DELETE LIMIT	lang.html
+F0030	statement	DROP INDEX	lang.html
+F0031	statement	DROP TABLE	lang.html
+F0032	statement	DROP TRIGGER	lang.html
+F0033	statement	DROP VIEW	lang.html
+F0034	statement	EXPLAIN	lang.html
+F0035	statement	EXPLAIN QUERY PLAN	lang.html
+F0036	statement	INSERT VALUES	lang.html
+F0037	statement	INSERT SELECT	lang.html
+F0038	statement	INSERT DEFAULT VALUES	lang.html
+F0039	statement	INSERT OR REPLACE	lang.html
+F0040	statement	INSERT OR IGNORE	lang.html
+F0041	statement	INSERT OR ABORT	lang.html
+F0042	statement	INSERT OR FAIL	lang.html
+F0043	statement	INSERT OR ROLLBACK	lang.html
+F0044	statement	REPLACE	lang.html
+F0045	statement	UPSERT DO NOTHING	lang.html
+F0046	statement	UPSERT DO UPDATE	lang.html
+F0047	statement	RETURNING	lang.html
+F0048	statement	PRAGMA	lang.html
+F0049	statement	REINDEX	lang.html
+F0050	statement	SELECT	lang.html
+F0051	statement	UPDATE	lang.html
+F0052	statement	UPDATE FROM	lang.html
+F0053	statement	UPDATE LIMIT	lang.html
+F0054	statement	VACUUM	lang.html
+F0055	statement	VACUUM INTO	lang.html
+F0056	statement	WITH	lang.html
+F0057	statement	WITH RECURSIVE	lang.html
+F0058	statement	WITH MATERIALIZED	lang.html
+F0059	clause	FROM table	lang.html
+F0060	clause	FROM subquery	lang.html
+F0061	clause	FROM table-valued function	lang.html
+F0062	clause	JOIN INNER	lang.html
+F0063	clause	JOIN LEFT	lang.html
+F0064	clause	JOIN RIGHT	lang.html
+F0065	clause	JOIN FULL	lang.html
+F0066	clause	JOIN CROSS	lang.html
+F0067	clause	JOIN NATURAL	lang.html
+F0068	clause	JOIN USING	lang.html
+F0069	clause	comma join	lang.html
+F0070	clause	WHERE	lang.html
+F0071	clause	GROUP BY	lang.html
+F0072	clause	HAVING	lang.html
+F0073	clause	aggregate without GROUP BY	lang.html
+F0074	clause	bare columns in aggregate	lang.html
+F0075	clause	ORDER BY	lang.html
+F0076	clause	ORDER BY COLLATE	lang.html
+F0077	clause	NULLS FIRST/LAST	lang.html
+F0078	clause	LIMIT	lang.html
+F0079	clause	OFFSET	lang.html
+F0080	clause	DISTINCT	lang.html
+F0081	clause	ALL	lang.html
+F0082	clause	UNION	lang.html
+F0083	clause	UNION ALL	lang.html
+F0084	clause	INTERSECT	lang.html
+F0085	clause	EXCEPT	lang.html
+F0086	clause	VALUES clause	lang.html
+F0087	clause	WINDOW clause	lang.html
+F0088	clause	OVER partition	lang.html
+F0089	clause	OVER order	lang.html
+F0090	clause	frame ROWS	lang.html
+F0091	clause	frame RANGE	lang.html
+F0092	clause	frame GROUPS	lang.html
+F0093	clause	frame EXCLUDE	lang.html
+F0094	clause	FILTER clause	lang.html
+F0095	clause	aggregate ORDER BY	lang.html
+F0096	clause	INDEXED BY	lang.html
+F0097	clause	NOT INDEXED	lang.html
+F0098	clause	AS alias	lang.html
+F0099	expression	literal integer	lang.html
+F0100	expression	literal real	lang.html
+F0101	expression	literal hex integer	lang.html
+F0102	expression	literal string	lang.html
+F0103	expression	literal blob	lang.html
+F0104	expression	NULL	lang.html
+F0105	expression	TRUE/FALSE	lang.html
+F0106	expression	bound parameter	lang.html
+F0107	expression	column reference	lang.html
+F0108	expression	unary -	lang.html
+F0109	expression	unary +	lang.html
+F0110	expression	~	lang.html
+F0111	expression	NOT	lang.html
+F0112	expression	(concat)	lang.html
+F0113	expression	* / %	lang.html
+F0114	expression	+ -	lang.html
+F0115	expression	<< >> &	lang.html
+F0116	expression	(bitwise)	lang.html
+F0117	expression	< <= > >=	lang.html
+F0118	expression	= == != <>	lang.html
+F0119	expression	IS	lang.html
+F0120	expression	IS NOT	lang.html
+F0121	expression	IS DISTINCT FROM	lang.html
+F0122	expression	IN list	lang.html
+F0123	expression	IN subquery	lang.html
+F0124	expression	NOT IN	lang.html
+F0125	expression	BETWEEN	lang.html
+F0126	expression	LIKE	lang.html
+F0127	expression	LIKE ESCAPE	lang.html
+F0128	expression	GLOB	lang.html
+F0129	expression	REGEXP	lang.html
+F0130	expression	MATCH	lang.html
+F0131	expression	AND	lang.html
+F0132	expression	OR	lang.html
+F0133	expression	CASE simple	lang.html
+F0134	expression	CASE searched	lang.html
+F0135	expression	CAST	lang.html
+F0136	expression	COLLATE	lang.html
+F0137	expression	EXISTS	lang.html
+F0138	expression	scalar subquery	lang.html
+F0139	expression	correlated subquery	lang.html
+F0140	expression	row value	lang.html
+F0141	expression	-> ->>	lang.html
+F0142	expression	function call	lang.html
+F0143	expression	DISTINCT aggregate	lang.html
+F0144	expression	RAISE	lang.html
+F0145	expression	ISNULL/NOTNULL	lang.html
+F0146	semantics	storage classes	lang.html
+F0147	semantics	type affinity of columns	lang.html
+F0148	semantics	affinity of expressions	lang.html
+F0149	semantics	comparison affinity rules	lang.html
+F0150	semantics	collating sequence BINARY	lang.html
+F0151	semantics	collating sequence NOCASE	lang.html
+F0152	semantics	collating sequence RTRIM	lang.html
+F0153	semantics	three-valued logic	lang.html
+F0154	semantics	NULL in aggregates	lang.html
+F0155	semantics	NULL in DISTINCT/GROUP BY	lang.html
+F0156	semantics	integer overflow to REAL	lang.html
+F0157	semantics	division by zero is NULL	lang.html
+F0158	semantics	text to number conversion	lang.html
+F0159	semantics	REAL to text rendering	lang.html
+F0160	semantics	rowid tables	lang.html
+F0161	semantics	INTEGER PRIMARY KEY alias	lang.html
+F0162	semantics	AUTOINCREMENT	lang.html
+F0163	semantics	WITHOUT ROWID	lang.html
+F0164	semantics	STRICT tables	lang.html
+F0165	semantics	generated columns VIRTUAL	lang.html
+F0166	semantics	generated columns STORED	lang.html
+F0167	semantics	NOT NULL constraint	lang.html
+F0168	semantics	UNIQUE constraint	lang.html
+F0169	semantics	CHECK constraint	lang.html
+F0170	semantics	PRIMARY KEY constraint	lang.html
+F0171	semantics	FOREIGN KEY constraint	lang.html
+F0172	semantics	ON DELETE/UPDATE actions	lang.html
+F0173	semantics	DEFAULT values	lang.html
+F0174	semantics	ON CONFLICT resolution	lang.html
+F0175	semantics	deferred constraints	lang.html
+F0176	semantics	transactions and savepoints	lang.html
+F0177	semantics	autocommit	lang.html
+F0178	semantics	recursive triggers	lang.html
+F0179	semantics	error messages and codes	lang.html
+F0180	semantics	changes()/last_insert_rowid()	lang.html
+F0181	semantics	sqlite_schema contents	lang.html
+F0182	semantics	temporary databases	lang.html
+F0183	semantics	attached databases	lang.html
+F0184	function	->	pragma_function_list
+F0185	function	->>	pragma_function_list
+F0186	function	abs	pragma_function_list
+F0187	function	acos	pragma_function_list
+F0188	function	acosh	pragma_function_list
+F0189	function	asin	pragma_function_list
+F0190	function	asinh	pragma_function_list
+F0191	function	atan	pragma_function_list
+F0192	function	atan2	pragma_function_list
+F0193	function	atanh	pragma_function_list
+F0194	function	avg	pragma_function_list
+F0195	function	ceil	pragma_function_list
+F0196	function	ceiling	pragma_function_list
+F0197	function	changes	pragma_function_list
+F0198	function	char	pragma_function_list
+F0199	function	coalesce	pragma_function_list
+F0200	function	concat	pragma_function_list
+F0201	function	concat_ws	pragma_function_list
+F0202	function	cos	pragma_function_list
+F0203	function	cosh	pragma_function_list
+F0204	function	count	pragma_function_list
+F0205	function	cume_dist	pragma_function_list
+F0206	function	current_date	pragma_function_list
+F0207	function	current_time	pragma_function_list
+F0208	function	current_timestamp	pragma_function_list
+F0209	function	date	pragma_function_list
+F0210	function	datetime	pragma_function_list
+F0211	function	degrees	pragma_function_list
+F0212	function	dense_rank	pragma_function_list
+F0213	function	exp	pragma_function_list
+F0214	function	first_value	pragma_function_list
+F0215	function	floor	pragma_function_list
+F0216	function	format	pragma_function_list
+F0217	function	glob	pragma_function_list
+F0218	function	group_concat	pragma_function_list
+F0219	function	hex	pragma_function_list
+F0220	function	if	pragma_function_list
+F0221	function	ifnull	pragma_function_list
+F0222	function	iif	pragma_function_list
+F0223	function	instr	pragma_function_list
+F0224	function	json	pragma_function_list
+F0225	function	json_array	pragma_function_list
+F0226	function	json_array_insert	pragma_function_list
+F0227	function	json_array_length	pragma_function_list
+F0228	function	json_error_position	pragma_function_list
+F0229	function	json_extract	pragma_function_list
+F0230	function	json_group_array	pragma_function_list
+F0231	function	json_group_object	pragma_function_list
+F0232	function	json_insert	pragma_function_list
+F0233	function	json_object	pragma_function_list
+F0234	function	json_patch	pragma_function_list
+F0235	function	json_pretty	pragma_function_list
+F0236	function	json_quote	pragma_function_list
+F0237	function	json_remove	pragma_function_list
+F0238	function	json_replace	pragma_function_list
+F0239	function	json_set	pragma_function_list
+F0240	function	json_type	pragma_function_list
+F0241	function	json_valid	pragma_function_list
+F0242	function	jsonb	pragma_function_list
+F0243	function	jsonb_array	pragma_function_list
+F0244	function	jsonb_array_insert	pragma_function_list
+F0245	function	jsonb_extract	pragma_function_list
+F0246	function	jsonb_group_array	pragma_function_list
+F0247	function	jsonb_group_object	pragma_function_list
+F0248	function	jsonb_insert	pragma_function_list
+F0249	function	jsonb_object	pragma_function_list
+F0250	function	jsonb_patch	pragma_function_list
+F0251	function	jsonb_remove	pragma_function_list
+F0252	function	jsonb_replace	pragma_function_list
+F0253	function	jsonb_set	pragma_function_list
+F0254	function	julianday	pragma_function_list
+F0255	function	lag	pragma_function_list
+F0256	function	last_insert_rowid	pragma_function_list
+F0257	function	last_value	pragma_function_list
+F0258	function	lead	pragma_function_list
+F0259	function	length	pragma_function_list
+F0260	function	like	pragma_function_list
+F0261	function	likelihood	pragma_function_list
+F0262	function	likely	pragma_function_list
+F0263	function	ln	pragma_function_list
+F0264	function	load_extension	pragma_function_list
+F0265	function	log	pragma_function_list
+F0266	function	log10	pragma_function_list
+F0267	function	log2	pragma_function_list
+F0268	function	lower	pragma_function_list
+F0269	function	ltrim	pragma_function_list
+F0270	function	match	pragma_function_list
+F0271	function	max	pragma_function_list
+F0272	function	min	pragma_function_list
+F0273	function	mod	pragma_function_list
+F0274	function	nth_value	pragma_function_list
+F0275	function	ntile	pragma_function_list
+F0276	function	nullif	pragma_function_list
+F0277	function	octet_length	pragma_function_list
+F0278	function	percent_rank	pragma_function_list
+F0279	function	pi	pragma_function_list
+F0280	function	pow	pragma_function_list
+F0281	function	power	pragma_function_list
+F0282	function	printf	pragma_function_list
+F0283	function	quote	pragma_function_list
+F0284	function	radians	pragma_function_list
+F0285	function	random	pragma_function_list
+F0286	function	randomblob	pragma_function_list
+F0287	function	rank	pragma_function_list
+F0288	function	replace	pragma_function_list
+F0289	function	round	pragma_function_list
+F0290	function	row_number	pragma_function_list
+F0291	function	rtrim	pragma_function_list
+F0292	function	sign	pragma_function_list
+F0293	function	sin	pragma_function_list
+F0294	function	sinh	pragma_function_list
+F0295	function	sqlite_compileoption_get	pragma_function_list
+F0296	function	sqlite_compileoption_used	pragma_function_list
+F0297	function	sqlite_log	pragma_function_list
+F0298	function	sqlite_source_id	pragma_function_list
+F0299	function	sqlite_version	pragma_function_list
+F0300	function	sqrt	pragma_function_list
+F0301	function	strftime	pragma_function_list
+F0302	function	string_agg	pragma_function_list
+F0303	function	substr	pragma_function_list
+F0304	function	substring	pragma_function_list
+F0305	function	subtype	pragma_function_list
+F0306	function	sum	pragma_function_list
+F0307	function	tan	pragma_function_list
+F0308	function	tanh	pragma_function_list
+F0309	function	time	pragma_function_list
+F0310	function	timediff	pragma_function_list
+F0311	function	total	pragma_function_list
+F0312	function	total_changes	pragma_function_list
+F0313	function	trim	pragma_function_list
+F0314	function	trunc	pragma_function_list
+F0315	function	typeof	pragma_function_list
+F0316	function	unhex	pragma_function_list
+F0317	function	unicode	pragma_function_list
+F0318	function	unistr	pragma_function_list
+F0319	function	unistr_quote	pragma_function_list
+F0320	function	unixepoch	pragma_function_list
+F0321	function	unlikely	pragma_function_list
+F0322	function	upper	pragma_function_list
+F0323	function	zeroblob	pragma_function_list
+F0324	pragma	analysis_limit	pragma_pragma_list
+F0325	pragma	application_id	pragma_pragma_list
+F0326	pragma	auto_vacuum	pragma_pragma_list
+F0327	pragma	automatic_index	pragma_pragma_list
+F0328	pragma	busy_timeout	pragma_pragma_list
+F0329	pragma	cache_size	pragma_pragma_list
+F0330	pragma	cache_spill	pragma_pragma_list
+F0331	pragma	case_sensitive_like	pragma_pragma_list
+F0332	pragma	cell_size_check	pragma_pragma_list
+F0333	pragma	checkpoint_fullfsync	pragma_pragma_list
+F0334	pragma	collation_list	pragma_pragma_list
+F0335	pragma	compile_options	pragma_pragma_list
+F0336	pragma	count_changes	pragma_pragma_list
+F0337	pragma	data_version	pragma_pragma_list
+F0338	pragma	database_list	pragma_pragma_list
+F0339	pragma	default_cache_size	pragma_pragma_list
+F0340	pragma	defer_foreign_keys	pragma_pragma_list
+F0341	pragma	empty_result_callbacks	pragma_pragma_list
+F0342	pragma	encoding	pragma_pragma_list
+F0343	pragma	foreign_key_check	pragma_pragma_list
+F0344	pragma	foreign_key_list	pragma_pragma_list
+F0345	pragma	foreign_keys	pragma_pragma_list
+F0346	pragma	freelist_count	pragma_pragma_list
+F0347	pragma	full_column_names	pragma_pragma_list
+F0348	pragma	fullfsync	pragma_pragma_list
+F0349	pragma	function_list	pragma_pragma_list
+F0350	pragma	hard_heap_limit	pragma_pragma_list
+F0351	pragma	ignore_check_constraints	pragma_pragma_list
+F0352	pragma	incremental_vacuum	pragma_pragma_list
+F0353	pragma	index_info	pragma_pragma_list
+F0354	pragma	index_list	pragma_pragma_list
+F0355	pragma	index_xinfo	pragma_pragma_list
+F0356	pragma	integrity_check	pragma_pragma_list
+F0357	pragma	journal_mode	pragma_pragma_list
+F0358	pragma	journal_size_limit	pragma_pragma_list
+F0359	pragma	legacy_alter_table	pragma_pragma_list
+F0360	pragma	locking_mode	pragma_pragma_list
+F0361	pragma	max_page_count	pragma_pragma_list
+F0362	pragma	mmap_size	pragma_pragma_list
+F0363	pragma	module_list	pragma_pragma_list
+F0364	pragma	optimize	pragma_pragma_list
+F0365	pragma	page_count	pragma_pragma_list
+F0366	pragma	page_size	pragma_pragma_list
+F0367	pragma	pragma_list	pragma_pragma_list
+F0368	pragma	query_only	pragma_pragma_list
+F0369	pragma	quick_check	pragma_pragma_list
+F0370	pragma	read_uncommitted	pragma_pragma_list
+F0371	pragma	recursive_triggers	pragma_pragma_list
+F0372	pragma	reverse_unordered_selects	pragma_pragma_list
+F0373	pragma	schema_version	pragma_pragma_list
+F0374	pragma	secure_delete	pragma_pragma_list
+F0375	pragma	short_column_names	pragma_pragma_list
+F0376	pragma	shrink_memory	pragma_pragma_list
+F0377	pragma	soft_heap_limit	pragma_pragma_list
+F0378	pragma	synchronous	pragma_pragma_list
+F0379	pragma	table_info	pragma_pragma_list
+F0380	pragma	table_list	pragma_pragma_list
+F0381	pragma	table_xinfo	pragma_pragma_list
+F0382	pragma	temp_store	pragma_pragma_list
+F0383	pragma	temp_store_directory	pragma_pragma_list
+F0384	pragma	threads	pragma_pragma_list
+F0385	pragma	trusted_schema	pragma_pragma_list
+F0386	pragma	user_version	pragma_pragma_list
+F0387	pragma	wal_autocheckpoint	pragma_pragma_list
+F0388	pragma	wal_checkpoint	pragma_pragma_list
+F0389	pragma	writable_schema	pragma_pragma_list
+F0390	module	json_each	checked on the oracle
+F0391	module	json_tree	checked on the oracle
+F0392	module	generate_series	checked on the oracle
+F0393	module	pragma_* table-valued functions	checked on the oracle

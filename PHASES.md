@@ -8,18 +8,18 @@ is a row in **Gaps**, and stays there until it is closed.
 
 ## Coverage (the numbers that measure progress)
 
-`scripts/coverage.py` (to be written in phase 1) prints three tables:
+`scripts/coverage.py` prints the table (`scripts/gen_features.py` regenerates the feature list):
 
-| measure | numerator | denominator | today |
+| measure | numerator | denominator | 2026-11-03 |
 |---|---|---|---|
-| export | functions of `sqlite3.c` in the elaborated Lean program | functions defined in `sqlite3.c` (from clightgen's output of the full file) | 0 / ? |
-| run | differential scripts on which Clean's interpreter on the export matches the native binary | scripts in the corpus | 0 / 0 |
-| semantics | SQL features (rows of `coverage/features.tsv`) the semantics implements and that pass the differential | rows of `features.tsv` | 0 / ? |
-| proof | functions of `sqlite3.c` with a proved spec used by the refinement | functions in the export | 0 / ? |
+| export | functions of `sqlite3.c` that are definitions of the built Lean program | functions clightgen produces for `sqlite3.c` (a superset of the 2,638 functions of a gcc -O0 object; the 4 extra are static inline helpers gcc drops) | **2642 / 2642** |
+| run | differential scripts on which Clean's interpreter on the export matches the gcc and ccomp builds | scripts in `tests/sql` | **6 / 6** |
+| semantics | rows of `coverage/features.tsv` the semantics implements and that pass the differential (`coverage/status.tsv`) | rows of `features.tsv` | 0 / 393 |
+| proof | functions of `sqlite3.c` with a proved spec used by the refinement | functions in the export | 0 / 2642 |
 
 `coverage/features.tsv` lists every statement of SQLite's grammar
 (lang.html), every expression form, every built-in function
-(`pragma_function_list`: 185 names in the default build with math functions),
+(`pragma_function_list`: 140 names in the D7 build; the 185 of the CLI include shell.c's),
 every pragma (`pragma_pragma_list`: 66), the collations, the virtual tables in
 `sqlite3.c` (`pragma_module_list`, `json_each`/`json_tree`, `sqlite_dbpage`,
 …), and the type-affinity and NULL rules, one row each. It is generated from
