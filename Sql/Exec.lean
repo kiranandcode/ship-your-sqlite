@@ -4,6 +4,7 @@
 import Sql.Select
 import Sql.ParseStmt
 import Sql.Pragma
+import Sql.Resolve
 
 namespace Sql
 
@@ -1082,6 +1083,8 @@ def runStmt (s : Stmt) : M (Except Err (Array (Array Value))) := do
   let saved ← get
   try
     let before := fkOrphans saved.db
+    -- prepare: names and functions are resolved before anything runs
+    staticStmt s
     let rows ← execStmt {} s
     let db ← getDb
     -- immediate foreign keys: the violation counter at the end of the statement
