@@ -107,7 +107,9 @@ def JP.arrayCount (p : JP) (iRoot : Nat) : Nat := Id.run do
   let mut k := 0
   let mut i := iRoot + n0
   let mut n := n0
-  while n > 0 && i < iEnd do
+  -- `i` grows by `n > 0` each iteration, from `iRoot + n0` to `iEnd`
+  for _ in [0:sz0 + 1] do
+    if !(n > 0 && i < iEnd) then break
     let (n', sz') := p.psize i
     n := n'
     i := i + sz' + n'
@@ -121,10 +123,17 @@ def endsWithBracket (path : ByteArray) (pi : Nat) : Bool :=
 
 mutual
 /-- `jsonLookupStep`: the index of the node at `path[pi..]` below `iRoot`,
-    or an error code; performs the edit `p.eEdit` on the way. -/
-partial def lookupStep (p : JP) (iRoot : Nat) (path : ByteArray) (pi : Nat) (iLabel : Nat) : Nat × JP := Id.run do
-  let mut p := p
-  if bat path pi == 0 then
+    or an error code; performs the edit `p.eEdit` on the way.
+
+    Well-founded on the rest of the path, `path.size - pi`: the recursive
+    calls are for the rest of the path after a nonempty step (`createSub`
+    calls back at the same `pi`). The loops scan the path (stopping at its
+    end, where `bat` is 0: `path.size + 1` iterations), or the children of
+    node `iRoot` (each iteration advances by a header `n > 0`: `sz + 1`
+    iterations for a payload of `sz`). -/
+def lookupStep (p : JP) (iRoot : Nat) (path : ByteArray) (pi : Nat) (iLabel : Nat) : Nat × JP :=
+  if _hz : bat path pi = 0 then Id.run do
+    let mut p := p
     if p.eEdit != 0 then
       let (n, sz) := p.psize iRoot
       let mut sz := sz + n
@@ -142,6 +151,8 @@ partial def lookupStep (p : JP) (iRoot : Nat) (path : ByteArray) (pi : Nat) (iLa
         p := p.edit iRoot' sz (some p.ins) p.ins.size
       return (iRoot', { p with iLabel := iLabel })
     return (iRoot, { p with iLabel := iLabel })
+  else Id.run do
+  let mut p := p
   let c := bat path pi
   if c == 46 then
     let x := bat p.b iRoot
@@ -153,7 +164,8 @@ partial def lookupStep (p : JP) (iRoot : Nat) (path : ByteArray) (pi : Nat) (iLa
     if bat path pk == 34 then
       zKey := pk + 1
       i := 1
-      while bat path (pk+i) != 0 && bat path (pk+i) != 34 do
+      for _ in [0:path.size + 1] do
+        if !(bat path (pk+i) != 0 && bat path (pk+i) != 34) then break
         if bat path (pk+i) == 92 && bat path (pk+i+1) != 0 then i := i + 1
         i := i + 1
       nKey := i - 1
@@ -162,14 +174,17 @@ partial def lookupStep (p : JP) (iRoot : Nat) (path : ByteArray) (pi : Nat) (iLa
     else
       zKey := pk
       i := 0
-      while bat path (pk+i) != 0 && bat path (pk+i) != 46 && bat path (pk+i) != 91 do i := i + 1
+      for _ in [0:path.size + 1] do
+        if !(bat path (pk+i) != 0 && bat path (pk+i) != 46 && bat path (pk+i) != 91) then break
+        i := i + 1
       nKey := i
       if nKey == 0 then return (lPATHERROR, p)
     if x &&& 0x0f != tOBJECT then return (lNOTFOUND, p)
     let (n, sz) := p.psize iRoot
     let mut j := iRoot + n
     let iEnd := j + sz
-    while j < iEnd do
+    for _ in [0:sz + 1] do
+      if !(j < iEnd) then break
       let x := p.typ j
       if x < tTEXT || x > tTEXTRAW then return (lERROR, p)
       let (n, sz) := p.psize j
@@ -211,7 +226,8 @@ partial def lookupStep (p : JP) (iRoot : Nat) (path : ByteArray) (pi : Nat) (iLa
     let (n, sz) := p.psize iRoot
     let mut kk : Nat := 0
     let mut i := 1
-    while isDigit (bat path (pi+i)) do
+    for _ in [0:path.size + 1] do
+      if !isDigit (bat path (pi+i)) then break
       if kk < 0xffffffff then kk := kk * 10 + (bat path (pi+i) - 48).toNat
       i := i + 1
     if i < 2 || bat path (pi+i) != 93 then
@@ -221,7 +237,7 @@ partial def lookupStep (p : JP) (iRoot : Nat) (path : ByteArray) (pi : Nat) (iLa
         if bat path (pi+2) == 45 && isDigit (bat path (pi+3)) then
           let mut nn : Nat := 0
           i := 3
-          repeat
+          for _ in [0:path.size + 1] do
             if nn < 0xffffffff then nn := nn * 10 + (bat path (pi+i) - 48).toNat
             i := i + 1
             if !isDigit (bat path (pi+i)) then break
@@ -231,7 +247,8 @@ partial def lookupStep (p : JP) (iRoot : Nat) (path : ByteArray) (pi : Nat) (iLa
       else return (lPATHERROR, p)
     let mut j := iRoot + n
     let iEnd := j + sz
-    while j < iEnd do
+    for _ in [0:sz + 1] do
+      if !(j < iEnd) then break
       if kk == 0 then
         p := { p with iDepth := u16inc p.iDepth }
         if p.iDepth ≥ maxDepth then return (lTOODEEP, p)
@@ -254,9 +271,11 @@ partial def lookupStep (p : JP) (iRoot : Nat) (path : ByteArray) (pi : Nat) (iLa
       return (rc, p)
     return (lNOTFOUND, p)
   else return (lPATHERROR, p)
+termination_by (path.size - pi, 0)
+decreasing_by all_goals (have := lt_of_bat_ne_zero _hz; simp_wf; omega)
 
 /-- `jsonCreateEditSubstructure`: the blob to insert for the rest of the path. -/
-partial def createSub (p : JP) (path : ByteArray) (pi : Nat) : Nat × ByteArray × JP :=
+def createSub (p : JP) (path : ByteArray) (pi : Nat) : Nat × ByteArray × JP :=
   if bat path pi == 0 then (0, p.ins, p)
   else
     let root : UInt8 := if bat path pi == 46 then tOBJECT else tARRAY
@@ -265,6 +284,7 @@ partial def createSub (p : JP) (path : ByteArray) (pi : Nat) : Nat × ByteArray 
     else
       let (rc, q') := lookupStep q 0 path pi 0
       (rc, q'.b, { p with iDepth := u16dec p.iDepth })
+termination_by (path.size - pi, 1)
 end
 
 /-! ## RFC 7396 merge patch (`jsonMergePatch`) -/
@@ -274,9 +294,17 @@ def mBADTARGET : Nat := 1
 def mBADPATCH : Nat := 2
 def mTOODEEP : Nat := 4
 
-partial def mergePatch (t : JP) (iTarget : Nat) (pb : ByteArray) (iPatch : Nat) (depth : Nat) : Nat × JP := Id.run do
+/-- `jsonMergePatch`. Well-founded on `maxDepth - depth` (json.c's own depth
+    limit, checked before each recursive call). The loops walk the members of
+    the patch and of the target object; each iteration advances its cursor by
+    a label and a value with nonzero headers, so `iEnd - iCursor + 1`
+    iterations suffice. -/
+def mergePatch (t : JP) (iTarget : Nat) (pb : ByteArray) (iPatch : Nat) (depth : Nat) : Nat × JP := Id.run do
   let mut t := t
   let ps (i : Nat) := payloadSize pb 0 i
+  -- a nested patch; `depth < maxDepth` is checked before each call
+  let child (t : JP) (iT iP : Nat) : Nat × JP :=
+    if _h : depth < maxDepth then mergePatch t iT pb iP (depth + 1) else (mTOODEEP, t)
   let x := (bat pb iPatch) &&& 0x0f
   if x != tOBJECT then
     let (n, sz) := ps iPatch
@@ -298,7 +326,8 @@ partial def mergePatch (t : JP) (iTarget : Nat) (pb : ByteArray) (iPatch : Nat) 
   if n == 0 then return (mBADTARGET, t)
   let iTStart := iTarget + n
   let iTEndBE := iTStart + sz
-  while iPCursor < iPEnd do
+  for _ in [0:iPEnd - iPCursor + 1] do
+    if !(iPCursor < iPEnd) then break
     let iPLabel := iPCursor
     let ePLabel := (bat pb iPCursor) &&& 0x0f
     if ePLabel < tTEXT || ePLabel > tTEXTRAW then return (mBADPATCH, t)
@@ -318,7 +347,8 @@ partial def mergePatch (t : JP) (iTarget : Nat) (pb : ByteArray) (iPatch : Nat) 
     let mut nTValue := 0
     let mut szTValue := 0
     let mut iTValue := 0
-    while iTCursor < iTEnd do
+    for _ in [0:iTEnd - iTCursor + 1] do
+      if !(iTCursor < iTEnd) then break
       iTLabel := iTCursor
       let eTLabel := t.typ iTCursor
       if eTLabel < tTEXT || eTLabel > tTEXTRAW then return (mBADTARGET, t)
@@ -343,7 +373,7 @@ partial def mergePatch (t : JP) (iTarget : Nat) (pb : ByteArray) (iPatch : Nat) 
         let savedDelta := t.delta
         t := { t with delta := 0 }
         if depth ≥ maxDepth then return (mTOODEEP, t)
-        let (rc, t') := mergePatch t iTValue pb iPValue (depth + 1)
+        let (rc, t') := child t iTValue iPValue
         t := t'
         if rc != 0 then return (rc, t)
         t := { t with delta := t.delta + savedDelta }
@@ -358,11 +388,13 @@ partial def mergePatch (t : JP) (iTarget : Nat) (pb : ByteArray) (iPatch : Nat) 
         let savedDelta := t.delta
         t := { t with delta := 0 }
         if depth ≥ maxDepth then return (mTOODEEP, t)
-        let (rc, t') := mergePatch t (iTEnd + szNew) pb iPValue (depth + 1)
+        let (rc, t') := child t (iTEnd + szNew) iPValue
         t := t'
         if rc != 0 then return (rc, t)
         t := { t with delta := t.delta + savedDelta }
   t := t.adjustIf iTarget
   return (mOK, t)
+termination_by maxDepth - depth
+decreasing_by omega
 
 end Sql.Json

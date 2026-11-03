@@ -64,12 +64,17 @@ def truncI32 (r : Float) : Int :=
 /-- What `sqlite3_value_text` hands to C code: the bytes up to the first NUL. -/
 def cstr (b : ByteArray) : ByteArray := Id.run do
   let mut i := 0
-  while i < b.size && b[i]! != 0 do i := i + 1
+  for _ in [0:b.size] do
+    if !(i < b.size && b[i]! != 0) then break
+    i := i + 1
   return b.extract 0 i
 
 def skipSpace (z : ByteArray) (i : Nat) : Nat := Id.run do
   let mut i := i
-  while isSpace (at_ z i) do i := i + 1
+  -- `isSpace 0` is false: the scan stops at `z.size` at the latest
+  for _ in [0:z.size + 1] do
+    if !isSpace (at_ z i) then break
+    i := i + 1
   return i
 
 /-- `sqlite3UpperToLower` (ASCII only). -/
@@ -110,17 +115,23 @@ def atoF (z : ByteArray) : Int × Float := Id.run do
     mState := 1
     s := (at_ z i - 48).toNat; i := i + 1
     let mut stop := false
-    while !stop && isDigit (at_ z i) do
+    -- the digit scans advance `i` and stop at `z.size` at the latest
+    -- (`isDigit 0` is false): `z.size + 1` iterations
+    for _ in [0:z.size + 1] do
+      if !(!stop && isDigit (at_ z i)) then break
       s := s * 10 + (at_ z i - 48).toNat; i := i + 1
       if s ≥ big then
         mState := 9
-        while isDigit (at_ z i) do i := i + 1; d := d + 1
+        for _ in [0:z.size + 1] do
+          if !isDigit (at_ z i) then break
+          i := i + 1; d := d + 1
         stop := true
   if at_ z i == ch '.' then
     i := i + 1
     if isDigit (at_ z i) then
       mState := mState ||| 1
-      while isDigit (at_ z i) do
+      for _ in [0:z.size + 1] do
+        if !isDigit (at_ z i) then break
         if s < big then
           s := s * 10 + (at_ z i - 48).toNat; d := d - 1
         else mState := 11
@@ -137,7 +148,8 @@ def atoF (z : ByteArray) : Int × Float := Id.run do
       let mut e : Nat := (at_ z i - 48).toNat
       i := i + 1
       mState := mState ||| 2
-      while isDigit (at_ z i) do
+      for _ in [0:z.size + 1] do
+        if !isDigit (at_ z i) then break
         e := if e < 10000 then e * 10 + (at_ z i - 48).toNat else 10000
         i := i + 1
       d := d + esign * e
@@ -222,7 +234,9 @@ def fpDecode (r : Float) (iRound : Int) : Bool × Array Nat × Int := Id.run do
       if grew then n := n + 1; iDP := iDP + 1
     else z := z.extract 0 iRound.toNat
   z := z.extract 0 n.toNat
-  while z.size > 1 && z[z.size - 1]! == 0 do z := z.pop
+  for _ in [0:z.size] do  -- each iteration pops a digit
+    if !(z.size > 1 && z[z.size - 1]! == 0) then break
+    z := z.pop
   return (neg, z, iDP)
 
 def digitStr (z : Array Nat) (a b : Nat) : String :=
@@ -402,7 +416,8 @@ def parseHhMmSs (z : ByteArray) (i0 : Nat) (p : DT) : Bool × DT := Id.run do
       if at_ z i == ch '.' && isDigit (at_ z (i + 1)) then
         let mut rScale : Float := 1.0
         i := i + 1
-        while isDigit (at_ z i) do
+        for _ in [0:z.size + 1] do  -- a digit scan: stops at `z.size` at the latest
+          if !isDigit (at_ z i) then break
           ms := ms * 10.0 + fl (at_ z i).toNat - 48.0
           rScale := rScale * 10.0
           i := i + 1
@@ -460,7 +475,9 @@ def parseYyyyMmDd (z : ByteArray) (p : DT) : Bool × DT := Id.run do
     let mut M := M0
     let mut D := D0
     let mut i := i0 + 10
-    while isSpace (at_ z i) || at_ z i == ch 'T' do i := i + 1
+    for _ in [0:z.size + 1] do  -- stops at `z.size` at the latest (`at_` is 0)
+      if !(isSpace (at_ z i) || at_ z i == ch 'T') then break
+      i := i + 1
     let (rc, p1) := parseHhMmSs z i p
     let mut p := p1
     if !rc then
@@ -669,7 +686,7 @@ def parseModifier (z : ByteArray) (p0 : DT) (idx : Nat) : Bool × DT := Id.run d
         let mut iGuess := iOrigJD
         let mut iErr : Int := 0
         let mut cnt : Nat := 0
-        repeat
+        for _ in [0:4] do  -- `cnt` counts the iterations; the 4th stops (`cnt < 3`)
           iGuess := wrapI64 (iGuess - iErr)
           let nw := computeJD (toLocaltime { iJD := iGuess, validJD := true })
           iErr := wrapI64 (nw.iJD - iOrigJD)
@@ -713,7 +730,8 @@ def parseModifier (z : ByteArray) (p0 : DT) (idx : Nat) : Bool × DT := Id.run d
     let z0 := at_ z 0
     let mut n := 1
     let mut stop := false
-    while !stop && at_ z n != 0 do
+    for _ in [0:z.size + 1] do  -- `n` grows; `at_ z n` is 0 from `z.size` on
+      if !(!stop && at_ z n != 0) then break
       let c := at_ z n
       if c == ch ':' || isSpace c then stop := true
       else if c == ch '-' && ((n == 5 && (getDigits z 1 (specs "40f")).length == 1)
@@ -873,7 +891,8 @@ def strftime (clock : Clock) (args : List Value) : Value := Id.run do
     let mut i := 0
     let mut j := 0
     let app (o : ByteArray) (s : String) : ByteArray := o ++ s.toUTF8
-    while i < f.size do
+    for _ in [0:f.size] do  -- `i` grows by 1 or 2
+      if !(i < f.size) then break
       if f[i]! != ch '%' then
         i := i + 1
         continue
@@ -922,6 +941,12 @@ def strftime (clock : Clock) (args : List Value) : Value := Id.run do
     if j < i then out := out ++ f.extract j i
     return .text out
 
+/-- A bound on the month-stepping loops of `timediff`. Each iteration moves
+    `d2` (whose year and month start as `d1`'s, with a day of month ≤ 31) one
+    month towards `d1`, so in fact at most 2 iterations run; the bound is the
+    number of months of SQLite's calendar (years -4713 to 9999). -/
+def maxMonthSteps : Nat := 12 * (9999 + 4713 + 1)
+
 /-- `timediff(A, B)`. -/
 def timediff (clock : Clock) (a b : Value) : Value := Id.run do
   let some d1 := isDate clock [a] | return .null
@@ -937,7 +962,8 @@ def timediff (clock : Clock) (a b : Value) : Value := Id.run do
     M := d1.M - d2.M
     if M < 0 then Y := Y - 1; M := M + 12
     if M != 0 then d2 := computeJD { d2 with M := d1.M, validJD := false }
-    while d1.iJD < d2.iJD do
+    for _ in [0:maxMonthSteps] do
+      if !(d1.iJD < d2.iJD) then break
       M := M - 1
       if M < 0 then M := 11; Y := Y - 1
       d2 := { d2 with M := d2.M - 1 }
@@ -951,7 +977,8 @@ def timediff (clock : Clock) (a b : Value) : Value := Id.run do
     M := d2.M - d1.M
     if M < 0 then Y := Y - 1; M := M + 12
     if M != 0 then d2 := computeJD { d2 with M := d1.M, validJD := false }
-    while d1.iJD > d2.iJD do
+    for _ in [0:maxMonthSteps] do
+      if !(d1.iJD > d2.iJD) then break
       M := M - 1
       if M < 0 then M := 11; Y := Y - 1
       d2 := { d2 with M := d2.M + 1 }

@@ -14,6 +14,11 @@ namespace Sql.Json
 
 @[inline] def bat (b : ByteArray) (i : Nat) : UInt8 := if h : i < b.size then b[i] else 0
 
+theorem lt_of_bat_ne_zero {b : ByteArray} {i : Nat} (h : ¬ bat b i = 0) : i < b.size := by
+  unfold bat at h; split at h
+  · assumption
+  · exact absurd rfl h
+
 def bytesOf (s : String) : ByteArray := s.toUTF8
 
 /-- The bytes up to the first NUL (C string semantics). -/
@@ -140,23 +145,28 @@ def payloadSizeRaw (b : ByteArray) (i : Nat) : Nat × Nat :=
 /-! ## JSON5 whitespace -/
 
 /-- `json5Whitespace`: bytes of JSON5 whitespace and comments at `z[n0..]`. -/
-partial def json5Ws (z : ByteArray) (n0 : Nat) : Nat := Id.run do
+def json5Ws (z : ByteArray) (n0 : Nat) : Nat := Id.run do
   let mut n := n0
-  repeat
+  -- Every iteration but the last advances `n`, and at `n ≥ z.size` (`bat` is
+  -- 0) the loop stops: at most `z.size + 1` iterations.
+  for _ in [0:z.size + 1] do
     let c := bat z n
     if c == 9 || c == 10 || c == 11 || c == 12 || c == 13 || c == 32 then n := n + 1
     else if c == 47 then  -- '/'
       if bat z (n+1) == 42 && bat z (n+2) != 0 then
         let mut j := n + 3
         let mut ok := true
-        while bat z j != 47 || bat z (j-1) != 42 do
+        -- `j` advances and the loop stops at a 0 byte (at the latest at `z.size`)
+        for _ in [0:z.size + 1] do
+          if !(bat z j != 47 || bat z (j-1) != 42) then break
           if bat z j == 0 then ok := false; break
           j := j + 1
         if !ok then break
         n := j + 1
       else if bat z (n+1) == 47 then
         let mut j := n + 2
-        repeat
+        -- `j` advances and the loop stops at a 0 byte (at the latest at `z.size`)
+        for _ in [0:z.size + 1] do
           let c := bat z j
           if c == 0 then break
           if c == 10 || c == 13 then break
@@ -186,7 +196,10 @@ partial def json5Ws (z : ByteArray) (n0 : Nat) : Nat := Id.run do
 
 def strspnJSpace (z : ByteArray) (i : Nat) : Nat := Id.run do
   let mut k := i
-  while isJSpace (bat z k) do k := k + 1
+  -- `isJSpace 0` is false, so the loop stops at `z.size` at the latest
+  for _ in [0:z.size + 1] do
+    if !isJSpace (bat z k) then break
+    k := k + 1
   return k - i
 
 /-! ## Text → JSONB (`jsonTranslateTextToBlob`) -/
@@ -211,11 +224,135 @@ def wrapFrom (start : Nat) (t : UInt8) : PM Unit := modify fun s =>
 /-- Is `z[i]` `\` followed by `u` and 4 hex digits (`jsonIs4HexB`)? -/
 def is4HexB (z : ByteArray) (i : Nat) : Bool := bat z i == 117 && is4Hex z (i+1)
 
-/-- Returns the index past the element, 0 bat end of input, -1 on error,
-    -2, -3, -4, -5 when `}` `]` `,` `:` is seen (with `iErr` at it). -/
-partial def tr (z : ByteArray) (i0 : Nat) : PM Int := do
+/-! The loops of the translator scan `z` forward: each iteration advances the
+    position by at least one byte, and at the end of `z` (`bat` is 0) every
+    loop stops (0 ends a string with an error, is not a digit or a label
+    character, and makes `trL` return 0, which ends an array or object with an
+    error). So `z.size + 1` iterations always suffice. -/
+
+/-- A string from its delimiter at `z[i]` (the `'` and `"` cases of `tr`). -/
+def trString (z : ByteArray) (i : Nat) : PM Int := do
+  let cDelim := bat z i
+  let mut opcode := tTEXT
+  let mut j := i + 1
+  for _ in [0:z.size + 1] do
+    for _ in [0:z.size + 1] do
+      if !isOk (bat z j) then break
+      j := j + 1
+    let c := bat z j
+    if c == cDelim then break
+    else if c == 92 then
+      j := j + 1
+      let c := bat z j
+      if c == 34 || c == 92 || c == 47 || c == 98 || c == 102 || c == 110 || c == 114 || c == 116
+         || (c == 117 && is4Hex z (j+1)) then
+        if opcode == tTEXT then opcode := tTEXTJ
+      else if c == 39 || c == 118 || c == 10 || (c == 48 && !isDigit (bat z (j+1)))
+         || (c == 0xe2 && bat z (j+1) == 0x80 && (bat z (j+2) == 0xa8 || bat z (j+2) == 0xa9))
+         || (c == 120 && is2Hex z (j+1)) then
+        opcode := tTEXT5; nonstd
+      else if c == 13 then
+        if bat z (j+1) == 10 then j := j + 1
+        opcode := tTEXT5; nonstd
+      else
+        setErr j; return -1
+    else if c ≤ 0x1f then
+      if c == 0 then setErr j; return -1
+      opcode := tTEXT5; nonstd
+    else if c == 34 then
+      opcode := tTEXT5
+    j := j + 1
+  emit (node opcode (z.extract (i+1) j))
+  return (j + 1 : Nat)
+
+def trFinish (z : ByteArray) (i j t : Nat) : PM Int := do
+  let i := if bat z i == 43 then i + 1 else i
+  emit (node (tINT + t.toUInt8) (z.extract i j))
+  return (j : Nat)
+
+def trNumber2 (z : ByteArray) (i : Nat) (t0 : Nat) (_seenE : Bool) : PM Int := do
+  let mut t := t0
+  let mut seenE := false
+  let mut j := i + 1
+  for _ in [0:z.size + 1] do
+    let c := bat z j
+    if isDigit c then j := j + 1; continue
+    if c == 46 then
+      if t &&& 2 != 0 then setErr j; return -1
+      t := t ||| 2
+      j := j + 1; continue
+    if c == 101 || c == 69 then
+      if bat z (j-1) < 48 then
+        if bat z (j-1) == 46 && j ≥ i + 2 && isDigit (bat z (j-2)) then
+          nonstd; t := t ||| 1
+        else setErr j; return -1
+      if seenE then setErr j; return -1
+      t := t ||| 2
+      seenE := true
+      let mut c := bat z (j+1)
+      if c == 43 || c == 45 then
+        j := j + 1
+        c := bat z (j+1)
+      if c < 48 || c > 57 then setErr j; return -1
+      j := j + 1; continue
+    break
+  if bat z (j-1) < 48 then
+    if bat z (j-1) == 46 && j ≥ i + 2 && isDigit (bat z (j-2)) then
+      nonstd; t := t ||| 1
+    else setErr j; return -1
+  trFinish z i j t
+
+/-- `parse_number` (t: bit 0 JSON5, bit 1 float) -/
+def trNumber (z : ByteArray) (i : Nat) (t : Nat) (_seenE : Bool) : PM Int := do
+  let c := bat z i
+  let mut t := t
+  if c ≤ 48 then
+    if c == 48 then
+      if (bat z (i+1) == 120 || bat z (i+1) == 88) && isXdigit (bat z (i+2)) then
+        nonstd
+        let mut j := i + 3
+        for _ in [0:z.size + 1] do
+          if !isXdigit (bat z j) then break
+          j := j + 1
+        return ← trFinish z i j 1
+      else if isDigit (bat z (i+1)) then
+        setErr (i+1); return -1
+    else
+      if !isDigit (bat z (i+1)) then
+        if (bat z (i+1) == 73 || bat z (i+1) == 105) && strnieq z (i+1) "inf" 3 then
+          nonstd
+          if c == 45 then emit (node tFLOAT (bytesOf "-9e999")) else emit (node tFLOAT (bytesOf "9e999"))
+          return (i + (if strnieq z (i+4) "inity" 5 then 9 else 4) : Nat)
+        if bat z (i+1) == 46 then
+          nonstd
+          return ← trNumber2 z i (t ||| 1) false
+        setErr i; return -1
+      if bat z (i+1) == 48 then
+        if isDigit (bat z (i+2)) then setErr (i+1); return -1
+        else if (bat z (i+2) == 120 || bat z (i+2) == 88) && isXdigit (bat z (i+3)) then
+          nonstd
+          t := t ||| 1
+          let mut j := i + 4
+          for _ in [0:z.size + 1] do
+            if !isXdigit (bat z j) then break
+            j := j + 1
+          return ← trFinish z i j t
+  trNumber2 z i t false
+
+mutual
+/-- `jsonTranslateTextToBlob`. Returns the index past the element, 0 at end
+    of input, -1 on error, -2, -3, -4, -5 when `}` `]` `,` `:` is seen (with
+    `iErr` at it).
+
+    `lvl` is the number of array/object levels that may still be opened; it
+    makes the recursion well-founded and never decides anything: from the top
+    (`tr`: depth 0, `lvl = maxDepth + 1`) every call has
+    `lvl + depth ≥ maxDepth + 1` (an error return may leave `depth` too high,
+    never too low), so `trArray`/`trObject` reach `lvl = 0` only after their
+    own `depth > maxDepth` check has already failed. -/
+def trL (z : ByteArray) (lvl : Nat) (i0 : Nat) : PM Int := do
   let mut i := i0
-  repeat
+  for _ in [0:z.size + 1] do
     let c := bat z i
     if c == 9 || c == 10 || c == 13 || c == 32 then
       i := i + 1 + strspnJSpace z (i+1)
@@ -225,8 +362,8 @@ partial def tr (z : ByteArray) (i0 : Nat) : PM Int := do
       else setErr i; return -1
     else break
   let c := bat z i
-  if c == 123 then trObject z i
-  else if c == 91 then trArray z i
+  if c == 123 then trObject z lvl i
+  else if c == 91 then trArray z lvl i
   else if c == 39 then nonstd; trString z i
   else if c == 34 then trString z i
   else if c == 116 then
@@ -260,204 +397,118 @@ partial def tr (z : ByteArray) (i0 : Nat) : PM Int := do
       nonstd
       return (i + nn : Nat)
     setErr i; return -1
-where
-  trString (z : ByteArray) (i : Nat) : PM Int := do
-    let cDelim := bat z i
-    let mut opcode := tTEXT
-    let mut j := i + 1
-    repeat
-      while isOk (bat z j) do j := j + 1
+termination_by (lvl, 1)
+
+def trArray (z : ByteArray) (lvl : Nat) (i : Nat) : PM Int := do
+  let iThis := (← get).out.size
+  modify fun s => { s with depth := s.depth + 1 }
+  if (← get).depth > maxDepth then setErr i; return -1
+  let .succ lvl := lvl | do setErr i; return -1  -- not reached: the depth check above failed (see `trL`)
+  let iStart := iThis
+  let mut j := i + 1
+  for _ in [0:z.size + 1] do
+    let x ← trL z lvl j
+    if x ≤ 0 then
+      if x == -3 then
+        j := (← get).iErr
+        if (← get).out.size != iStart then nonstd
+        break
+      if x != -1 then setErr j
+      return -1
+    j := x.toNat
+    let c := bat z j
+    if c == 44 then j := j + 1; continue
+    else if c == 93 then break
+    else
+      if isJSpace c then
+        j := j + 1 + strspnJSpace z (j+1)
+        if bat z j == 44 then j := j + 1; continue
+        else if bat z j == 93 then break
+      let x ← trL z lvl j
+      if x == -4 then j := (← get).iErr + 1; continue
+      if x == -3 then j := (← get).iErr; break
+    setErr j; return -1
+  wrapFrom iThis tARRAY
+  modify fun s => { s with depth := s.depth - 1 }
+  return (j + 1 : Nat)
+termination_by (lvl, 0)
+
+def trObject (z : ByteArray) (lvl : Nat) (i : Nat) : PM Int := do
+  let iThis := (← get).out.size
+  modify fun s => { s with depth := s.depth + 1 }
+  if (← get).depth > maxDepth then setErr i; return -1
+  let .succ lvl := lvl | do setErr i; return -1  -- not reached: the depth check above failed (see `trL`)
+  let iStart := iThis
+  let mut j := i + 1
+  for _ in [0:z.size + 1] do
+    let iBlob := (← get).out.size
+    let mut x ← trL z lvl j
+    if x ≤ 0 then
+      if x == -2 then
+        j := (← get).iErr
+        if (← get).out.size != iStart then nonstd
+        break
+      j := j + json5Ws z j
+      let mut op := tTEXT
       let c := bat z j
-      if c == cDelim then break
-      else if c == 92 then
-        j := j + 1
-        let c := bat z j
-        if c == 34 || c == 92 || c == 47 || c == 98 || c == 102 || c == 110 || c == 114 || c == 116
-           || (c == 117 && is4Hex z (j+1)) then
-          if opcode == tTEXT then opcode := tTEXTJ
-        else if c == 39 || c == 118 || c == 10 || (c == 48 && !isDigit (bat z (j+1)))
-           || (c == 0xe2 && bat z (j+1) == 0x80 && (bat z (j+2) == 0xa8 || bat z (j+2) == 0xa9))
-           || (c == 120 && is2Hex z (j+1)) then
-          opcode := tTEXT5; nonstd
-        else if c == 13 then
-          if bat z (j+1) == 10 then j := j + 1
-          opcode := tTEXT5; nonstd
-        else
-          setErr j; return -1
-      else if c ≤ 0x1f then
-        if c == 0 then setErr j; return -1
-        opcode := tTEXT5; nonstd
-      else if c == 34 then
-        opcode := tTEXT5
-      j := j + 1
-    emit (node opcode (z.extract (i+1) j))
-    return (j + 1 : Nat)
-  /-- `parse_number` (t: bit 0 JSON5, bit 1 float) -/
-  trNumber (z : ByteArray) (i : Nat) (t : Nat) (_seenE : Bool) : PM Int := do
-    let c := bat z i
-    let mut t := t
-    if c ≤ 48 then
-      if c == 48 then
-        if (bat z (i+1) == 120 || bat z (i+1) == 88) && isXdigit (bat z (i+2)) then
-          nonstd
-          let mut j := i + 3
-          while isXdigit (bat z j) do j := j + 1
-          return ← finish z i j 1
-        else if isDigit (bat z (i+1)) then
-          setErr (i+1); return -1
+      let esc := c == 92 && is4HexB z (j+1)
+      if esc then op := tTEXTJ
+      if jsonId1 c || esc then
+        let mut k := j + 1
+        for _ in [0:z.size + 1] do
+          let ck := bat z k
+          if jsonId2 ck && json5Ws z k == 0 then k := k + 1
+          else if ck == 92 && is4HexB z (k+1) then op := tTEXTJ; k := k + 1
+          else break
+        emit (node op (z.extract j k))
+        nonstd
+        x := (k : Int)
       else
-        if !isDigit (bat z (i+1)) then
-          if (bat z (i+1) == 73 || bat z (i+1) == 105) && strnieq z (i+1) "inf" 3 then
-            nonstd
-            if c == 45 then emit (node tFLOAT (bytesOf "-9e999")) else emit (node tFLOAT (bytesOf "9e999"))
-            return (i + (if strnieq z (i+4) "inity" 5 then 9 else 4) : Nat)
-          if bat z (i+1) == 46 then
-            nonstd
-            return ← trNumber2 z i (t ||| 1) false
-          setErr i; return -1
-        if bat z (i+1) == 48 then
-          if isDigit (bat z (i+2)) then setErr (i+1); return -1
-          else if (bat z (i+2) == 120 || bat z (i+2) == 88) && isXdigit (bat z (i+3)) then
-            nonstd
-            t := t ||| 1
-            let mut j := i + 4
-            while isXdigit (bat z j) do j := j + 1
-            return ← finish z i j t
-    trNumber2 z i t false
-  trNumber2 (z : ByteArray) (i : Nat) (t0 : Nat) (_seenE : Bool) : PM Int := do
-    let mut t := t0
-    let mut seenE := false
-    let mut j := i + 1
-    repeat
-      let c := bat z j
-      if isDigit c then j := j + 1; continue
-      if c == 46 then
-        if t &&& 2 != 0 then setErr j; return -1
-        t := t ||| 2
-        j := j + 1; continue
-      if c == 101 || c == 69 then
-        if bat z (j-1) < 48 then
-          if bat z (j-1) == 46 && j ≥ i + 2 && isDigit (bat z (j-2)) then
-            nonstd; t := t ||| 1
-          else setErr j; return -1
-        if seenE then setErr j; return -1
-        t := t ||| 2
-        seenE := true
-        let mut c := bat z (j+1)
-        if c == 43 || c == 45 then
-          j := j + 1
-          c := bat z (j+1)
-        if c < 48 || c > 57 then setErr j; return -1
-        j := j + 1; continue
-      break
-    if bat z (j-1) < 48 then
-      if bat z (j-1) == 46 && j ≥ i + 2 && isDigit (bat z (j-2)) then
-        nonstd; t := t ||| 1
-      else setErr j; return -1
-    finish z i j t
-  finish (z : ByteArray) (i j t : Nat) : PM Int := do
-    let i := if bat z i == 43 then i + 1 else i
-    emit (node (tINT + t.toUInt8) (z.extract i j))
-    return (j : Nat)
-  trArray (z : ByteArray) (i : Nat) : PM Int := do
-    let iThis := (← get).out.size
-    modify fun s => { s with depth := s.depth + 1 }
-    if (← get).depth > maxDepth then setErr i; return -1
-    let iStart := iThis
-    let mut j := i + 1
-    repeat
-      let x ← tr z j
-      if x ≤ 0 then
-        if x == -3 then
-          j := (← get).iErr
-          if (← get).out.size != iStart then nonstd
-          break
         if x != -1 then setErr j
         return -1
-      j := x.toNat
-      let c := bat z j
-      if c == 44 then j := j + 1; continue
-      else if c == 93 then break
-      else
-        if isJSpace c then
-          j := j + 1 + strspnJSpace z (j+1)
-          if bat z j == 44 then j := j + 1; continue
-          else if bat z j == 93 then break
-        let x ← tr z j
-        if x == -4 then j := (← get).iErr + 1; continue
-        if x == -3 then j := (← get).iErr; break
-      setErr j; return -1
-    wrapFrom iThis tARRAY
-    modify fun s => { s with depth := s.depth - 1 }
-    return (j + 1 : Nat)
-  trObject (z : ByteArray) (i : Nat) : PM Int := do
-    let iThis := (← get).out.size
-    modify fun s => { s with depth := s.depth + 1 }
-    if (← get).depth > maxDepth then setErr i; return -1
-    let iStart := iThis
-    let mut j := i + 1
-    repeat
-      let iBlob := (← get).out.size
-      let mut x ← tr z j
-      if x ≤ 0 then
-        if x == -2 then
-          j := (← get).iErr
-          if (← get).out.size != iStart then nonstd
-          break
-        j := j + json5Ws z j
-        let mut op := tTEXT
-        let c := bat z j
-        let esc := c == 92 && is4HexB z (j+1)
-        if esc then op := tTEXTJ
-        if jsonId1 c || esc then
-          let mut k := j + 1
-          repeat
-            let ck := bat z k
-            if jsonId2 ck && json5Ws z k == 0 then k := k + 1
-            else if ck == 92 && is4HexB z (k+1) then op := tTEXTJ; k := k + 1
-            else break
-          emit (node op (z.extract j k))
-          nonstd
-          x := (k : Int)
-        else
-          if x != -1 then setErr j
-          return -1
-      let t := (bat (← get).out iBlob) &&& 0x0f
-      if t < tTEXT || t > tTEXTRAW then setErr j; return -1
-      j := x.toNat
-      let mut gotColon := false
-      if bat z j == 58 then j := j + 1; gotColon := true
-      else if isJSpace (bat z j) then
+    let t := (bat (← get).out iBlob) &&& 0x0f
+    if t < tTEXT || t > tTEXTRAW then setErr j; return -1
+    j := x.toNat
+    let mut gotColon := false
+    if bat z j == 58 then j := j + 1; gotColon := true
+    else if isJSpace (bat z j) then
+      j := j + 1
+      for _ in [0:z.size + 1] do
+        if !isJSpace (bat z j) then break
         j := j + 1
-        while isJSpace (bat z j) do j := j + 1
-        if bat z j == 58 then j := j + 1; gotColon := true
-      if !gotColon then
-        let x2 ← tr z j
-        if x2 != -5 then
-          if x2 != -1 then setErr j
-          return -1
-        j := (← get).iErr + 1
-      -- the value
-      let xv ← tr z j
-      if xv ≤ 0 then
-        if xv != -1 then setErr j
+      if bat z j == 58 then j := j + 1; gotColon := true
+    if !gotColon then
+      let x2 ← trL z lvl j
+      if x2 != -5 then
+        if x2 != -1 then setErr j
         return -1
-      j := xv.toNat
-      let c := bat z j
-      if c == 44 then j := j + 1; continue
-      else if c == 125 then break
-      else
-        if isJSpace c then
-          j := j + 1 + strspnJSpace z (j+1)
-          if bat z j == 44 then j := j + 1; continue
-          else if bat z j == 125 then break
-        let x3 ← tr z j
-        if x3 == -4 then j := (← get).iErr + 1; continue
-        if x3 == -2 then j := (← get).iErr; break
-      setErr j; return -1
-    wrapFrom iThis tOBJECT
-    modify fun s => { s with depth := s.depth - 1 }
-    return (j + 1 : Nat)
+      j := (← get).iErr + 1
+    -- the value
+    let xv ← trL z lvl j
+    if xv ≤ 0 then
+      if xv != -1 then setErr j
+      return -1
+    j := xv.toNat
+    let c := bat z j
+    if c == 44 then j := j + 1; continue
+    else if c == 125 then break
+    else
+      if isJSpace c then
+        j := j + 1 + strspnJSpace z (j+1)
+        if bat z j == 44 then j := j + 1; continue
+        else if bat z j == 125 then break
+      let x3 ← trL z lvl j
+      if x3 == -4 then j := (← get).iErr + 1; continue
+      if x3 == -2 then j := (← get).iErr; break
+    setErr j; return -1
+  wrapFrom iThis tOBJECT
+  modify fun s => { s with depth := s.depth - 1 }
+  return (j + 1 : Nat)
+termination_by (lvl, 0)
+end
+
+/-- `jsonTranslateTextToBlob` from the top (depth 0): see `trL`. -/
+def tr (z : ByteArray) (i0 : Nat) : PM Int := trL z (maxDepth + 1) i0
 
 /-- `jsonConvertTextToBlob`: the blob, or the parse state bat the error. -/
 def convertText (z : ByteArray) : Except PState PState :=
@@ -465,7 +516,10 @@ def convertText (z : ByteArray) : Except PState PState :=
   if i > 0 then
     let mut_i := Id.run do
       let mut k := i.toNat
-      while isJSpace (bat z k) do k := k + 1
+      -- `isJSpace 0` is false: the loop stops at `z.size` at the latest
+      for _ in [0:z.size + 1] do
+        if !isJSpace (bat z k) then break
+        k := k + 1
       return k
     if bat z mut_i != 0 then
       let k := mut_i + json5Ws z mut_i
@@ -492,7 +546,9 @@ def utf8ReadLimited (z : ByteArray) (i n : Nat) : Nat × Nat := Id.run do
   let n := if n > 4 then 4 else n
   let mut c := trans
   let mut k := 1
-  while k < n && (bat z (i+k)) &&& 0xc0 == 0x80 do
+  -- `k < n ≤ 4`
+  for _ in [0:n] do
+    if !(k < n && (bat z (i+k)) &&& 0xc0 == 0x80) then break
     c := (c <<< 6) + ((bat z (i+k)).toNat &&& 0x3f)
     k := k + 1
   return (c, k)
@@ -500,7 +556,9 @@ def utf8ReadLimited (z : ByteArray) (i n : Nat) : Nat × Nat := Id.run do
 /-- `jsonBytesToBypass` on z[i..i+n) -/
 def bytesToBypass (z : ByteArray) (i0 n : Nat) : Nat := Id.run do
   let mut i := 0
-  while i + 1 < n do
+  -- `i` grows by at least 2 per iteration while `i + 1 < n`
+  for _ in [0:n] do
+    if !(i + 1 < n) then break
     if bat z (i0+i) != 92 then return i
     if bat z (i0+i+1) == 10 then i := i + 2; continue
     if bat z (i0+i+1) == 13 then
@@ -513,7 +571,7 @@ def bytesToBypass (z : ByteArray) (i0 n : Nat) : Nat := Id.run do
   return i
 
 /-- `jsonUnescapeOneChar` on z[i..i+n), z[i] = '\\': (code point, bytes used). -/
-partial def unescapeOne (z : ByteArray) (i n : Nat) : Nat × Nat :=
+def unescapeOne (z : ByteArray) (i n : Nat) : Nat × Nat :=
   if n < 2 then (invalidChar, n) else
   let c := bat z (i+1)
   if c == 117 then
@@ -531,7 +589,7 @@ partial def unescapeOne (z : ByteArray) (i n : Nat) : Nat × Nat :=
     if n < 4 then (invalidChar, n) else ((hexToInt (bat z (i+2)) <<< 4) ||| hexToInt (bat z (i+3)), 4)
   else if c == 0xe2 || c == 13 || c == 10 then
     let nSkip := bytesToBypass z i n
-    if nSkip == 0 then (invalidChar, n)
+    if _h : nSkip = 0 then (invalidChar, n)
     else if nSkip == n then (0, n)
     else if bat z (i+nSkip) == 92 then
       let (v, k) := unescapeOne z (i+nSkip) (n-nSkip)
@@ -540,6 +598,8 @@ partial def unescapeOne (z : ByteArray) (i n : Nat) : Nat × Nat :=
       let (v, k) := utf8ReadLimited z (i+nSkip) (n-nSkip)
       (v, nSkip + k)
   else (invalidChar, 2)
+termination_by n
+decreasing_by omega
 
 /-- One character of a label for `jsonLabelCompareEscaped`. -/
 def labelChar (z : ByteArray) (i n : Nat) (raw : Bool) : Nat × Nat :=
@@ -550,7 +610,7 @@ def labelChar (z : ByteArray) (i n : Nat) (raw : Bool) : Nat × Nat :=
   else unescapeOne z i n
 
 /-- `jsonLabelCompare`: labels z1[i1..i1+n1), z2[i2..i2+n2) -/
-partial def labelEq (z1 : ByteArray) (i1 n1 : Nat) (raw1 : Bool) (z2 : ByteArray) (i2 n2 : Nat) (raw2 : Bool) : Bool :=
+def labelEq (z1 : ByteArray) (i1 n1 : Nat) (raw1 : Bool) (z2 : ByteArray) (i2 n2 : Nat) (raw2 : Bool) : Bool :=
   if raw1 && raw2 then n1 == n2 && (sub z1 i1 n1).data == (sub z2 i2 n2).data
   else go i1 n1 i2 n2
 where
@@ -559,7 +619,12 @@ where
     let (c2, k2) := labelChar z2 i2 n2 raw2
     if c1 != c2 then false
     else if c1 == 0 then true
+    -- not reached: a nonzero character comes from a nonempty label and
+    -- consumes at least one byte of it (`labelChar`)
+    else if _h : n1 = 0 ∨ k1 = 0 then false
     else go (i1 + k1) (n1 - k1) (i2 + k2) (n2 - k2)
+  termination_by n1
+  decreasing_by omega
 
 /-! ## JSONB → text -/
 
@@ -614,19 +679,29 @@ structure TCtx where
 def u16inc (d : Nat) : Nat := (d + 1) % 65536
 def u16dec (d : Nat) : Nat := (d + 65535) % 65536
 
-/-- `jsonTranslateBlobToText`: append node `i`; returns the index past it. -/
-partial def blobToText (cx : TCtx) (i : Nat) (s : JStr) : Nat × JStr × TCtx := Id.run do
-  let b := cx.b
-  let (n, sz) := payloadSize b cx.delta i
-  if n == 0 then return (b.size + 1, s.malformed, cx)
+/-- `jsonTranslateBlobToText` on blob `b` (with its delta) at nesting depth
+    `depth` (u16): append node `i`; returns the index past it and the depth.
+
+    Well-founded on `b.size - i`: a child starts after its parent's header,
+    and each child returns an index past its own start (or sets an error,
+    which ends the loop over the children). So a loop over the children of a
+    node with payload `sz` runs at most `sz + 1` times. -/
+def blobToTextD (b : ByteArray) (delta : Int) (depth : Nat) (i : Nat) (s : JStr) : Nat × JStr × Nat :=
+  -- `payloadSize` gives `n = 0` here too: same result as the check below
+  if _hi : b.size ≤ i then (b.size + 1, s.malformed, depth) else Id.run do
+  let (n, sz) := payloadSize b delta i
+  if n == 0 then return (b.size + 1, s.malformed, depth)
   let t := (bat b i) &&& 0x0f
   let p := i + n
   let mut s := s
-  let mut cx := cx
+  let mut depth := depth
+  -- a child node; `i < j` always holds (`j` starts at `i + n > i` and only grows)
+  let child (d j : Nat) (s : JStr) : Nat × JStr × Nat :=
+    if _hj : i < j then blobToTextD b delta d j s else (b.size + 1, s.malformed, d)
   match t.toNat with
-  | 0 => return (i + 1, s.adds "null", cx)
-  | 1 => return (i + 1, s.adds "true", cx)
-  | 2 => return (i + 1, s.adds "false", cx)
+  | 0 => return (i + 1, s.adds "null", depth)
+  | 1 => return (i + 1, s.adds "true", depth)
+  | 2 => return (i + 1, s.adds "false", depth)
   | 3 | 5 =>
     if sz == 0 then s := s.malformed
     else s := s.add (sub b p sz)
@@ -638,7 +713,9 @@ partial def blobToText (cx : TCtx) (i : Nat) (s : JStr) : Nat × JStr × TCtx :=
       let mut ovf := false
       if bat b p == 45 then s := s.addc 45; k := k + 1
       else if bat b p == 43 then k := k + 1
-      while k < sz do
+      -- `k` counts up to `sz`
+      for _ in [0:sz] do
+        if !(k < sz) then break
         let c := bat b (p+k)
         if !isXdigit c then s := s.malformed; break
         else if u >>> 60 != 0 then ovf := true
@@ -658,7 +735,9 @@ partial def blobToText (cx : TCtx) (i : Nat) (s : JStr) : Nat × JStr × TCtx :=
       if bad then s := s.malformed
       else
         if bat b (p+k) == 46 then s := s.addc 48
-        while k < sz do
+        -- `k` counts up to `sz`
+        for _ in [0:sz] do
+          if !(k < sz) then break
           let c := bat b (p+k)
           s := s.addc c
           if c == 46 && (k + 1 == sz || !isDigit (bat b (p+k+1))) then s := s.addc 48
@@ -669,9 +748,14 @@ partial def blobToText (cx : TCtx) (i : Nat) (s : JStr) : Nat × JStr × TCtx :=
     s := s.addc 34
     let mut q := p
     let mut sz2 := sz
-    while sz2 > 0 do
+    -- every iteration that does not stop decreases `sz2` (from `sz`)
+    for _ in [0:sz + 1] do
+      if !(sz2 > 0) then break
       let mut k := 0
-      while k < sz2 && (isOk (bat b (q+k)) || bat b (q+k) == 39) do k := k + 1
+      -- `k` counts up to `sz2`
+      for _ in [0:sz2] do
+        if !(k < sz2 && (isOk (bat b (q+k)) || bat b (q+k) == 39)) then break
+        k := k + 1
       if k > 0 then
         s := s.add (sub b q k)
         if k ≥ sz2 then break
@@ -706,12 +790,13 @@ partial def blobToText (cx : TCtx) (i : Nat) (s : JStr) : Nat × JStr × TCtx :=
     s := s.addc 91
     let iEnd := p + sz
     let mut j := p
-    cx := { cx with depth := u16inc cx.depth }
-    if cx.depth > maxDepth then s := s.tooDeep
-    while j < iEnd && s.err == 0 do
-      let (j', s', cx') := blobToText cx j s
-      j := j'; s := s'.addc 44; cx := cx'
-    cx := { cx with depth := u16dec cx.depth }
+    depth := u16inc depth
+    if depth > maxDepth then s := s.tooDeep
+    for _ in [0:sz + 1] do
+      if !(j < iEnd && s.err == 0) then break
+      let (j', s', d') := child depth j s
+      j := j'; s := s'.addc 44; depth := d'
+    depth := u16dec depth
     if j > iEnd then s := s.malformed
     if sz > 0 then s := s.trim
     s := s.addc 93
@@ -720,21 +805,34 @@ partial def blobToText (cx : TCtx) (i : Nat) (s : JStr) : Nat × JStr × TCtx :=
     let iEnd := p + sz
     let mut j := p
     let mut x := 0
-    cx := { cx with depth := u16inc cx.depth }
-    if cx.depth > maxDepth then s := s.tooDeep
-    while j < iEnd && s.err == 0 do
-      let (j', s', cx') := blobToText cx j s
-      j := j'; s := s'.addc (if x % 2 == 1 then 44 else 58); cx := cx'
+    depth := u16inc depth
+    if depth > maxDepth then s := s.tooDeep
+    for _ in [0:sz + 1] do
+      if !(j < iEnd && s.err == 0) then break
+      let (j', s', d') := child depth j s
+      j := j'; s := s'.addc (if x % 2 == 1 then 44 else 58); depth := d'
       x := x + 1
-    cx := { cx with depth := u16dec cx.depth }
+    depth := u16dec depth
     if x % 2 != 0 || j > iEnd then s := s.malformed
     if sz > 0 then s := s.trim
     s := s.addc 125
   | _ => s := s.malformed
-  return (i + n + sz, s, cx)
+  return (i + n + sz, s, depth)
+termination_by b.size - i
+decreasing_by all_goals omega
 
-/-- `jsonTranslateBlobToPrettyText` -/
-partial def blobToPretty (indent : ByteArray) (nIndent : Nat) (cx : TCtx) (i : Nat) (s : JStr) : Nat × JStr × TCtx := Id.run do
+/-- `jsonTranslateBlobToText`: append node `i`; returns the index past it.
+    Only the depth of the context changes. -/
+def blobToText (cx : TCtx) (i : Nat) (s : JStr) : Nat × JStr × TCtx :=
+  let (j, s, d) := blobToTextD cx.b cx.delta cx.depth i s
+  (j, s, { cx with depth := d })
+
+/-- `jsonTranslateBlobToPrettyText`. Well-founded on `maxDepth - nIndent`:
+    the children are printed only below `maxDepth` (above it the result is
+    an error, and json.c's loop does not run). A loop over the children of a
+    node with payload `sz` runs at most `sz + 1` times: each child returns an
+    index past its start, or sets an error. -/
+def blobToPretty (indent : ByteArray) (nIndent : Nat) (cx : TCtx) (i : Nat) (s : JStr) : Nat × JStr × TCtx := Id.run do
   let b := cx.b
   let (n, sz) := payloadSize b cx.delta i
   if n == 0 then return (b.size + 1, s.malformed, cx)
@@ -750,16 +848,18 @@ partial def blobToPretty (indent : ByteArray) (nIndent : Nat) (cx : TCtx) (i : N
     let mut cx := cx
     if j < iEnd then
       s := s.addc 10
-      let ni := nIndent + 1
-      if ni ≥ maxDepth then s := s.tooDeep
-      while s.err == 0 do
-        s := ind s ni
-        let (j', s', cx') := blobToPretty indent ni cx j s
-        j := j'; s := s'; cx := cx'
-        if j ≥ iEnd then
-          if j > iEnd then s := s.malformed
-          break
-        s := s.adds ",\n"
+      if nIndent + 1 ≥ maxDepth then s := s.tooDeep
+      -- else the loop does not run (`tooDeep` sets an error)
+      if _hd : nIndent + 1 < maxDepth then
+        for _ in [0:sz + 1] do
+          if !(s.err == 0) then break
+          s := ind s (nIndent + 1)
+          let (j', s', cx') := blobToPretty indent (nIndent + 1) cx j s
+          j := j'; s := s'; cx := cx'
+          if j ≥ iEnd then
+            if j > iEnd then s := s.malformed
+            break
+          s := s.adds ",\n"
       s := s.addc 10
       s := ind s nIndent
     return (iEnd, s.addc 93, cx)
@@ -770,29 +870,36 @@ partial def blobToPretty (indent : ByteArray) (nIndent : Nat) (cx : TCtx) (i : N
     let mut cx := cx
     if j < iEnd then
       s := s.addc 10
-      let ni := nIndent + 1
-      if ni ≥ maxDepth then s := s.tooDeep
-      cx := { cx with depth := ni % 65536 }
-      while s.err == 0 do
-        s := ind s ni
-        let (j', s', cx') := blobToText cx j s
-        j := j'; s := s'; cx := cx'
-        if j > iEnd then s := s.malformed; break
-        s := s.adds ": "
-        let (j', s', cx') := blobToPretty indent ni cx j s
-        j := j'; s := s'; cx := cx'
-        if j ≥ iEnd then break
-        s := s.adds ",\n"
+      if nIndent + 1 ≥ maxDepth then s := s.tooDeep
+      cx := { cx with depth := (nIndent + 1) % 65536 }
+      -- else the loop does not run (`tooDeep` sets an error)
+      if _hd : nIndent + 1 < maxDepth then
+        for _ in [0:sz + 1] do
+          if !(s.err == 0) then break
+          s := ind s (nIndent + 1)
+          let (j', s', cx') := blobToText cx j s
+          j := j'; s := s'; cx := cx'
+          if j > iEnd then s := s.malformed; break
+          s := s.adds ": "
+          let (j', s', cx') := blobToPretty indent (nIndent + 1) cx j s
+          j := j'; s := s'; cx := cx'
+          if j ≥ iEnd then break
+          s := s.adds ",\n"
       s := s.addc 10
       s := ind s nIndent
     return (iEnd, s.addc 125, cx)
   else blobToText cx i s
+termination_by maxDepth - nIndent
+decreasing_by all_goals omega
 
 /-! ## Strict validity (`jsonbValidityCheck`) -/
 
-/-- 0 if node `i` (ending at `iEnd`) is well-formed, else the 1-based offset of the error. -/
-partial def validityCheck (b : ByteArray) (i iEnd depth : Nat) : Nat := Id.run do
-  if depth > maxDepth then return i + 1
+/-- 0 if node `i` (ending at `iEnd`) is well-formed, else the 1-based offset
+    of the error. Well-founded on `maxDepth + 1 - depth` (json.c's own depth
+    limit). Every loop scans the payload `[i + n, k)` with `k = i + n + sz`,
+    advancing `j` by at least one byte per iteration: `sz` iterations suffice. -/
+def validityCheck (b : ByteArray) (i iEnd depth : Nat) : Nat :=
+  if _hd : depth > maxDepth then i + 1 else Id.run do
   let (n, sz) := payloadSize b 0 i
   if n == 0 then return i + 1
   if i + n + sz != iEnd then return i + 1
@@ -806,7 +913,8 @@ partial def validityCheck (b : ByteArray) (i iEnd depth : Nat) : Nat := Id.run d
       j := j + 1
       if sz < 2 then return i + 1
     let k := i + n + sz
-    while j < k do
+    for _ in [0:sz] do
+      if !(j < k) then break
       if isDigit (bat b j) then j := j + 1 else return j + 1
     return 0
   | 4 =>
@@ -819,7 +927,8 @@ partial def validityCheck (b : ByteArray) (i iEnd depth : Nat) : Nat := Id.run d
     if bat b (j+1) != 120 && bat b (j+1) != 88 then return j + 2
     j := j + 2
     let k := i + n + sz
-    while j < k do
+    for _ in [0:sz] do
+      if !(j < k) then break
       if isXdigit (bat b j) then j := j + 1 else return j + 1
     return 0
   | 5 | 6 =>
@@ -839,7 +948,8 @@ partial def validityCheck (b : ByteArray) (i iEnd depth : Nat) : Nat := Id.run d
       if j + 3 > k then return j + 1
       if bat b (j+1) != 46 && bat b (j+1) != 101 && bat b (j+1) != 69 then return j + 1
       j := j + 1
-    while j < k do
+    for _ in [0:sz] do
+      if !(j < k) then break
       let c := bat b j
       if isDigit c then j := j + 1; continue
       if c == 46 then
@@ -861,14 +971,17 @@ partial def validityCheck (b : ByteArray) (i iEnd depth : Nat) : Nat := Id.run d
   | 7 =>
     let mut j := i + n
     let k := j + sz
-    while j < k do
+    for _ in [0:sz] do
+      if !(j < k) then break
       if !isOk (bat b j) && bat b j != 39 then return j + 1
       j := j + 1
     return 0
   | 8 | 9 =>
     let mut j := i + n
     let k := j + sz
-    while j < k do
+    -- (`unescapeOne` consumes at least one byte: `j + szC - 1 + 1 > j`)
+    for _ in [0:sz] do
+      if !(j < k) then break
       let c := bat b j
       if !isOk c && c != 39 then
         if c == 34 then
@@ -895,7 +1008,8 @@ partial def validityCheck (b : ByteArray) (i iEnd depth : Nat) : Nat := Id.run d
   | 11 =>
     let mut j := i + n
     let k := j + sz
-    while j < k do
+    for _ in [0:sz] do
+      if !(j < k) then break
       let (n2, sz2) := payloadSize b 0 j
       if n2 == 0 then return j + 1
       if j + n2 + sz2 > k then return j + 1
@@ -907,7 +1021,8 @@ partial def validityCheck (b : ByteArray) (i iEnd depth : Nat) : Nat := Id.run d
     let mut cnt := 0
     let mut j := i + n
     let k := j + sz
-    while j < k do
+    for _ in [0:sz] do
+      if !(j < k) then break
       let (n2, sz2) := payloadSize b 0 j
       if n2 == 0 then return j + 1
       if j + n2 + sz2 > k then return j + 1
@@ -921,6 +1036,8 @@ partial def validityCheck (b : ByteArray) (i iEnd depth : Nat) : Nat := Id.run d
     if cnt % 2 != 0 then return j + 1
     return 0
   | _ => return i + 1
+termination_by maxDepth + 1 - depth
+decreasing_by all_goals omega
 
 /-- `jsonArgIsJsonb` on a blob value. -/
 def isJsonb (b : ByteArray) : Bool :=
