@@ -94,8 +94,11 @@ index scan, the random rowid after 2^63−1) and are triaged by hand.
 
 ### Phase 2 debts
 
-- A runtime error in the middle of a streaming SELECT: SQLite has already
-  printed the earlier rows; the semantics prints only the error.
+- A runtime error in the middle of a SELECT: the rows SQLite printed before
+  it are modelled for a SELECT without aggregates, windows or ORDER BY and for
+  UNION ALL of such (`Err.printed`). Not yet: an ORDER BY the plan satisfies
+  through an index (SQLite streams; the semantics sorts), GROUP BY output
+  (groups come out one by one after the sorter), UNION/INTERSECT/EXCEPT.
 - The executable's choices where SQLite's are unspecified are SQLite's in the
   cases tested; `Derives` quantifies over them (`Choices`), except the page
   layout (2.5).
