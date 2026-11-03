@@ -26,7 +26,7 @@ mutual
 
 def staticExpr (fuel : Nat) (q : QEnv) (e : Expr) : M Unit :=
   match fuel with
-  | 0 => throw fuelErr
+  | 0 => outOfFuel
   | fuel + 1 =>
     do
       match e with
@@ -59,7 +59,7 @@ def staticExpr (fuel : Nat) (q : QEnv) (e : Expr) : M Unit :=
 /-- The sources of a FROM clause, metadata only. -/
 def staticFrom (fuel : Nat) (q : QEnv) (f0 : FromItem) : M (Array Src) :=
   match fuel with
-  | 0 => throw fuelErr
+  | 0 => outOfFuel
   | fuel + 1 =>
     match f0 with
       | .table sch n alias _ => do
@@ -118,7 +118,7 @@ def staticFrom (fuel : Nat) (q : QEnv) (f0 : FromItem) : M (Array Src) :=
 /-- The result columns of a SELECT, metadata only. -/
 def staticSelectMeta (fuel : Nat) (q : QEnv) (sel : Select) : M (Array ColMeta) :=
   match fuel with
-  | 0 => throw fuelErr
+  | 0 => outOfFuel
   | fuel + 1 =>
     do
       let .mk with_ rec_ first _ _ _ _ := sel
@@ -138,7 +138,7 @@ def staticSelectMeta (fuel : Nat) (q : QEnv) (sel : Select) : M (Array ColMeta) 
 
 def staticCore (fuel : Nat) (q : QEnv) (core : SelectCore) (orderBy : List OrderTerm) : M Unit :=
   match fuel with
-  | 0 => throw fuelErr
+  | 0 => outOfFuel
   | fuel + 1 =>
     do
       match core with
@@ -165,7 +165,7 @@ def staticCore (fuel : Nat) (q : QEnv) (core : SelectCore) (orderBy : List Order
 
 def staticSelect (fuel : Nat) (q : QEnv) (sel : Select) : M Unit :=
   match fuel with
-  | 0 => throw fuelErr
+  | 0 => outOfFuel
   | fuel + 1 =>
     do
       let .mk with_ rec_ first rest orderBy limit offset := sel

@@ -390,7 +390,7 @@ mutual
 
 def evalExpr (fuel : Nat) (q : QEnv) (e : Expr) : M Value :=
   match fuel with
-  | 0 => throw fuelErr
+  | 0 => outOfFuel
   | fuel + 1 =>
     do
       let env := q.env
@@ -591,7 +591,7 @@ def evalExpr (fuel : Nat) (q : QEnv) (e : Expr) : M Value :=
 
 def compareRows (fuel : Nat) (q : QEnv) (op : BinOp) (xs ys : List Expr) : M Value :=
   match fuel with
-  | 0 => throw fuelErr
+  | 0 => outOfFuel
   | fuel + 1 =>
     do
       if xs.length != ys.length then err "row value misused"
@@ -618,7 +618,7 @@ def compareRows (fuel : Nat) (q : QEnv) (op : BinOp) (xs ys : List Expr) : M Val
 
 def valueOf (fuel : Nat) (q : QEnv) (r0 : Resolved) : M Value :=
   match fuel with
-  | 0 => throw fuelErr
+  | 0 => outOfFuel
   | fuel + 1 =>
     match r0 with
       | .col fi si ci => do
@@ -641,7 +641,7 @@ def valueOf (fuel : Nat) (q : QEnv) (r0 : Resolved) : M Value :=
 def evalAgg (fuel : Nat) (q : QEnv) (n : Name) (distinct : Bool) (args : List Expr) (star : Bool)
     (ob : List OrderTerm) (filter : Option Expr) : M Value :=
   match fuel with
-  | 0 => throw fuelErr
+  | 0 => outOfFuel
   | fuel + 1 =>
     do
       if distinct && args.length != 1 then err "DISTINCT aggregates must have exactly one argument"
@@ -675,7 +675,7 @@ def evalAgg (fuel : Nat) (q : QEnv) (n : Name) (distinct : Bool) (args : List Ex
 def aggFinish (fuel : Nat) (q : QEnv) (n : Name) (star : Bool) (args : List Expr) (coll : Coll)
     (vals : Array (List Value)) (jflags : Option (Array (List Bool)) := none) : M Value :=
   match fuel with
-  | 0 => throw fuelErr
+  | 0 => outOfFuel
   | fuel + 1 =>
     do
       let name := n.toLower
@@ -723,7 +723,7 @@ def aggFinish (fuel : Nat) (q : QEnv) (n : Name) (star : Bool) (args : List Expr
 def callAgg (fuel : Nat) (_q : QEnv) (name : String) (vals : Array (List Value)) (flags : List Bool)
     (rowFlags : Option (Array (List Bool)) := none) : M Value :=
   match fuel with
-  | 0 => throw fuelErr
+  | 0 => outOfFuel
   | fuel + 1 =>
       let rows := match rowFlags with
         | some fs => (vals.zip fs).toList.map fun (vs, f) => vs.zip (f.zipWith (· || ·) flags)
@@ -737,7 +737,7 @@ def callAgg (fuel : Nat) (_q : QEnv) (name : String) (vals : Array (List Value))
     column whose current value has it (`json_each.value`)? -/
 def argIsJson (fuel : Nat) (q : QEnv) (a : Expr) : M Bool :=
   match fuel with
-  | 0 => throw fuelErr
+  | 0 => outOfFuel
   | fuel + 1 =>
     do
       if Json.exprIsJson a then return true
@@ -755,7 +755,7 @@ def argIsJson (fuel : Nat) (q : QEnv) (a : Expr) : M Bool :=
 
 def callFn (fuel : Nat) (q : QEnv) (n : Name) (args : List Expr) (distinct : Bool) : M Value :=
   match fuel with
-  | 0 => throw fuelErr
+  | 0 => outOfFuel
   | fuel + 1 =>
       return (← callFnST fuel q n args distinct).1
 
@@ -765,7 +765,7 @@ def callFn (fuel : Nat) (q : QEnv) (n : Name) (args : List Expr) (distinct : Boo
     return (checked against SQLite by the JSON lane, tests/sem/json_subtype.sql). -/
 def callFnST (fuel : Nat) (q : QEnv) (n : Name) (args : List Expr) (_distinct : Bool) : M (Value × Bool) :=
   match fuel with
-  | 0 => throw fuelErr
+  | 0 => outOfFuel
   | fuel + 1 =>
     do
       -- coalesce/ifnull/iif are compiled to jumps: later arguments are evaluated
@@ -823,7 +823,7 @@ def callFnST (fuel : Nat) (q : QEnv) (n : Name) (args : List Expr) (_distinct : 
 /-- An expression's value and whether it carries the JSON subtype. -/
 def evalExprST (fuel : Nat) (q : QEnv) (e : Expr) : M (Value × Bool) :=
   match fuel with
-  | 0 => throw fuelErr
+  | 0 => outOfFuel
   | fuel + 1 =>
     do
       match e with
@@ -861,7 +861,7 @@ def evalExprST (fuel : Nat) (q : QEnv) (e : Expr) : M (Value × Bool) :=
 /-- Scalar functions. -/
 def scalarFn (fuel : Nat) (n : Name) (vs : List Value) (colls : List (Option (Coll × Bool))) : M Value :=
   match fuel with
-  | 0 => throw fuelErr
+  | 0 => outOfFuel
   | fuel + 1 =>
     do
       let name := n.toLower
@@ -1055,7 +1055,7 @@ def scalarFn (fuel : Nat) (n : Name) (vs : List Value) (colls : List (Option (Co
         let c ← get
         let seed := c.db.prng
         set { c with db := { c.db with prng := seed + 1 } }
-        let x : Nat := (seed * 6364136223846793005 + 1442695040888963407) % 2 ^ 64
+        let x : Nat := c.choices.random seed 0 % 2 ^ 64
         return .int (if x ≥ 2 ^ 63 then (x : Int) - 2 ^ 64 else x)
       | "randomblob" =>
         if nargs != 1 then wrong
@@ -1064,7 +1064,7 @@ def scalarFn (fuel : Nat) (n : Name) (vs : List Value) (colls : List (Option (Co
         let c ← get
         let seed := c.db.prng
         set { c with db := { c.db with prng := seed + 1 } }
-        return .blob ⟨(Array.range n.toNat).map fun i => ((seed * 31 + i * 17) % 256).toUInt8⟩
+        return .blob ⟨(Array.range n.toNat).map fun i => (c.choices.random seed (i + 1) % 256).toUInt8⟩
       | "changes" => return .int (← getDb).changes
       | "total_changes" => return .int (← getDb).totalChanges
       | "last_insert_rowid" => return .int (← getDb).lastRowid
@@ -1127,7 +1127,7 @@ def scalarFn (fuel : Nat) (n : Name) (vs : List Value) (colls : List (Option (Co
 /-- A window definition with its base window (named in the WINDOW clause) merged in. -/
 def resolveWindow (fuel : Nat) (windows : List (Name × Window)) (w : Window) : M Window :=
   match fuel with
-  | 0 => throw fuelErr
+  | 0 => outOfFuel
   | fuel + 1 =>
     do
       let .mk base part ord frame := w
@@ -1146,7 +1146,7 @@ def resolveWindow (fuel : Nat) (windows : List (Name × Window)) (w : Window) : 
 def computeWindow (fuel : Nat) (ctxs : Array QEnv) (windows : List (Name × Window)) (call : Expr) :
     M (Array Value × Array Nat) :=
   match fuel with
-  | 0 => throw fuelErr
+  | 0 => outOfFuel
   | fuel + 1 =>
     do
       let .call n _ args star _ filter (some w0) := call | err "internal: window"
@@ -1315,7 +1315,7 @@ def computeWindow (fuel : Nat) (ctxs : Array QEnv) (windows : List (Name × Wind
 def evalFromWhere (fuel : Nat) (q : QEnv) (f : FromItem) (where_ : Option Expr) (aliases : List (Name × Expr)) :
     M (Array Src × Array (Array Cur)) :=
   match fuel with
-  | 0 => throw fuelErr
+  | 0 => outOfFuel
   | fuel + 1 =>
     do
       let (leavesL, onConds) := innerChain f
@@ -1383,7 +1383,7 @@ def evalFromWhere (fuel : Nat) (q : QEnv) (f : FromItem) (where_ : Option Expr) 
 /-- The rows of a named table, view or CTE, with its source description. -/
 def namedSource (fuel : Nat) (q : QEnv) (sch : Option Name) (n : Name) (alias : Name) : M (Src × Array Row) :=
   match fuel with
-  | 0 => throw fuelErr
+  | 0 => outOfFuel
   | fuel + 1 =>
     do
       if sch.isNone then
@@ -1414,7 +1414,7 @@ def namedSource (fuel : Nat) (q : QEnv) (sch : Option Name) (n : Name) (alias : 
 
 def cteRows (fuel : Nat) (q : QEnv) (n : Name) (cv0 : CteVal) : M (Array ColMeta × Array (Array Value)) :=
   match fuel with
-  | 0 => throw fuelErr
+  | 0 => outOfFuel
   | fuel + 1 =>
     match cv0 with
       | .rows cols rows => return (cols, rows)
@@ -1487,13 +1487,13 @@ def cteRows (fuel : Nat) (q : QEnv) (n : Name) (cv0 : CteVal) : M (Array ColMeta
                 if seen.any (rowsEq [] r) then continue
                 seen := seen.push r
               queue := queue.push r
-        if !finished && !queue.isEmpty then throw fuelErr
+        if !finished && !queue.isEmpty then outOfFuel
         return (cols, out)
 
 /-- Evaluate a FROM clause: its sources and joined rows (one `Cur` per source). -/
 def evalFrom (fuel : Nat) (q : QEnv) (f0 : FromItem) : M (Array Src × Array (Array Cur)) :=
   match fuel with
-  | 0 => throw fuelErr
+  | 0 => outOfFuel
   | fuel + 1 =>
     match f0 with
       | .table sch n alias _ => do
@@ -1569,7 +1569,7 @@ def evalFrom (fuel : Nat) (q : QEnv) (f0 : FromItem) : M (Array Src × Array (Ar
 /-- The columns of views for `Sql.Pragma`: their SELECT run on the current state. -/
 def viewCols (fuel : Nat) : M Pragma.ViewCols :=
   match fuel with
-  | 0 => throw fuelErr
+  | 0 => outOfFuel
   | fuel + 1 =>
     do
       let ctx ← get
@@ -1582,7 +1582,7 @@ def viewCols (fuel : Nat) : M Pragma.ViewCols :=
     pragma_<name> tables). -/
 def tableFnSrc (fuel : Nat) (n : Name) (alias : Option Name) : M Src :=
   match fuel with
-  | 0 => throw fuelErr
+  | 0 => outOfFuel
   | fuel + 1 =>
     do
       if Json.tableFns.contains n.toLower then
@@ -1598,7 +1598,7 @@ def tableFnSrc (fuel : Nat) (n : Name) (alias : Option Name) : M Src :=
 /-- The rows of a table-valued function. -/
 def tableFunction (fuel : Nat) (n : Name) (argsJ : List (Value × Bool)) : M (Array Row) :=
   match fuel with
-  | 0 => throw fuelErr
+  | 0 => outOfFuel
   | fuel + 1 =>
     do
       -- pragma_<name>(arg, schema): the eponymous virtual tables of pragma.c
@@ -1620,7 +1620,7 @@ def tableFunction (fuel : Nat) (n : Name) (argsJ : List (Value × Bool)) : M (Ar
 /-- Expand `*` and `t.*` into column references. -/
 def expandCols (fuel : Nat) (srcs : Array Src) (cols : List ResultCol) : M (List ResultCol) :=
   match fuel with
-  | 0 => throw fuelErr
+  | 0 => outOfFuel
   | fuel + 1 =>
     do
       let mut out := #[]
@@ -1649,7 +1649,7 @@ def expandCols (fuel : Nat) (srcs : Array Src) (cols : List ResultCol) : M (List
 def runCore (fuel : Nat) (q : QEnv) (core : SelectCore) (orderBy : List OrderTerm) :
     M (Array ColMeta × Array (Array Value × Array Value)) :=
   match fuel with
-  | 0 => throw fuelErr
+  | 0 => outOfFuel
   | fuel + 1 =>
     do
       match core with
@@ -1684,6 +1684,9 @@ def runCore (fuel : Nat) (q : QEnv) (core : SelectCore) (orderBy : List OrderTer
             if hasAgg w then err "misuse of aggregate function"
             if truth (← evalExpr fuel (withFrame cur aliases) w) == some true then kept := kept.push cur
           | _, _ => kept := kept.push cur
+        -- the order the plan visits the joined rows: it decides group and
+        -- DISTINCT representatives and the input order of aggregates
+        kept ← chooseOrder kept
         let qm := withFrame (Array.replicate srcs.size none)
         let cmeta : Array ColMeta := rcols.toArray.map fun rc =>
           match rc with
@@ -1793,11 +1796,14 @@ def runCore (fuel : Nat) (q : QEnv) (core : SelectCore) (orderBy : List OrderTer
               seen := seen.insert k
               d := d.push r
           out := d
+        -- the order of a SELECT's rows is the plan's (ORDER BY, applied
+        -- after, keeps this order among ties)
+        out ← chooseOrder out
         return (cmeta, out)
 
 def runSelect (fuel : Nat) (q : QEnv) (sel : Select) : M (Array ColMeta × Array (Array Value)) :=
   match fuel with
-  | 0 => throw fuelErr
+  | 0 => outOfFuel
   | fuel + 1 =>
     do
       let .mk with_ rec_ first rest orderBy limit offset := sel

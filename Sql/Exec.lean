@@ -273,7 +273,7 @@ def insertRow (fuel : Nat) (tname : Name) (vals : Array Value) (rowidV : Option 
       let mut cand : Int := 0
       for _ in [0:100] do
         k := k + 1
-        cand := ((k * 2862933555777941757 + 3037000493) % 2 ^ 63 : Nat)
+        cand := (c.choices.rowid k % 2 ^ 63 : Nat)
         if cand > 0 && !(t.rows.any (·.rowid == cand)) then break
       set { c with db := { c.db with prng := k } }
       pure cand
@@ -502,7 +502,7 @@ mutual
 /-- Execute a statement; returns its output rows. -/
 def execStmt (fuel : Nat) (q : QEnv) (s : Stmt) : M (Array (Array Value)) :=
   match fuel with
-  | 0 => throw fuelErr
+  | 0 => outOfFuel
   | fuel + 1 =>
     do
       match s with
@@ -955,7 +955,7 @@ def execStmt (fuel : Nat) (q : QEnv) (s : Stmt) : M (Array (Array Value)) :=
 /-- ON DELETE actions for the children of a deleted parent row. -/
 def fkOnParentDelete (fuel : Nat) (pname : Name) (pr : Row) : M Unit :=
   match fuel with
-  | 0 => throw fuelErr
+  | 0 => outOfFuel
   | fuel + 1 =>
     do
       let db ← getDb
@@ -985,7 +985,7 @@ def fkOnParentDelete (fuel : Nat) (pname : Name) (pr : Row) : M Unit :=
 /-- ON UPDATE actions for the children of a parent row whose key changed. -/
 def fkOnParentUpdate (fuel : Nat) (pname : Name) (old new : Row) : M Unit :=
   match fuel with
-  | 0 => throw fuelErr
+  | 0 => outOfFuel
   | fuel + 1 =>
     do
       let db ← getDb
@@ -1015,7 +1015,7 @@ def fkOnParentUpdate (fuel : Nat) (pname : Name) (old new : Row) : M Unit :=
 /-- Is `n` a view (DML on it runs its INSTEAD OF triggers)? -/
 def viewWithTriggers (fuel : Nat) (n : Name) : M Bool :=
   match fuel with
-  | 0 => throw fuelErr
+  | 0 => outOfFuel
   | fuel + 1 =>
     do
       let db ← getDb
@@ -1023,13 +1023,13 @@ def viewWithTriggers (fuel : Nat) (n : Name) : M Bool :=
 
 def viewRows (fuel : Nat) (q : QEnv) (n : Name) : M (Src × Array Row) :=
   match fuel with
-  | 0 => throw fuelErr
+  | 0 => outOfFuel
   | fuel + 1 =>
     namedSource fuel q none n n
 
 def insertView (fuel : Nat) (q : QEnv) (vname : Name) (cols : List Name) (src : InsertSource) : M (Array (Array Value)) :=
   match fuel with
-  | 0 => throw fuelErr
+  | 0 => outOfFuel
   | fuel + 1 =>
     do
       let (vsrc, _) ← viewRows fuel q vname
@@ -1050,7 +1050,7 @@ def insertView (fuel : Nat) (q : QEnv) (vname : Name) (cols : List Name) (src : 
 
 def updateView (fuel : Nat) (q : QEnv) (vname : Name) (sets : List (List Name × Expr)) (wh : Option Expr) : M (Array (Array Value)) :=
   match fuel with
-  | 0 => throw fuelErr
+  | 0 => outOfFuel
   | fuel + 1 =>
     do
       let (vsrc, rows) ← viewRows fuel q vname
@@ -1073,7 +1073,7 @@ def updateView (fuel : Nat) (q : QEnv) (vname : Name) (sets : List (List Name ×
 
 def deleteView (fuel : Nat) (q : QEnv) (vname : Name) (wh : Option Expr) : M (Array (Array Value)) :=
   match fuel with
-  | 0 => throw fuelErr
+  | 0 => outOfFuel
   | fuel + 1 =>
     do
       let (vsrc, rows) ← viewRows fuel q vname
@@ -1090,7 +1090,7 @@ def deleteView (fuel : Nat) (q : QEnv) (vname : Name) (wh : Option Expr) : M (Ar
 /-- INSTEAD OF triggers of a view. -/
 def runViewTriggers (fuel : Nat) (q : QEnv) (vname : Name) (ev : TriggerEvent) (old new : Option Row) (src : Src) : M Unit :=
   match fuel with
-  | 0 => throw fuelErr
+  | 0 => outOfFuel
   | fuel + 1 =>
     do
       for tr in (← getDb).main.triggers do
@@ -1111,7 +1111,7 @@ def runViewTriggers (fuel : Nat) (q : QEnv) (vname : Name) (ev : TriggerEvent) (
 def runTriggers (fuel : Nat) (q : QEnv) (time : TriggerTime) (ev : TriggerEvent) (table : Name)
     (old new : Option Row) : M Unit :=
   match fuel with
-  | 0 => throw fuelErr
+  | 0 => outOfFuel
   | fuel + 1 =>
     do
       let db ← getDb
@@ -1136,15 +1136,15 @@ end
 /-- Execute a statement atomically: on error the database is as before
     (except for what SQLite keeps: `OR FAIL` rows, and the counters). The
     error is returned, not thrown, so that the state after it is kept. -/
-def runStmt (s : Stmt) : M (Except Err (Array (Array Value))) := do
+def runStmt (fuel : Nat) (s : Stmt) : M (Except Err (Array (Array Value))) := do
   -- json.c's parse cache lives for one statement
   modify fun c => { c with jsonCache := {} }
   let saved ← get
   try
     let before := fkOrphans saved.db
     -- prepare: names and functions are resolved before anything runs
-    staticStmt evalFuel s
-    let rows ← execStmt evalFuel {} s
+    staticStmt fuel s
+    let rows ← execStmt fuel {} s
     let db ← getDb
     -- PRAGMA query_only: a statement that opens a write transaction fails
     -- (after the errors of prepare, which the executor finds while running)
@@ -1167,14 +1167,24 @@ def runStmt (s : Stmt) : M (Except Err (Array (Array Value))) := do
     if !e.keep then
       -- a failed statement changes nothing, and changes() becomes 0
       -- (the eponymous virtual tables it named stay registered)
-      let failed ← getDb
-      set { saved with db := Pragma.keepModules failed { saved.db with changes := 0 } }
+      let failed ← get
+      -- the choices made and the fuel spent are not rolled back
+      set { saved with db := Pragma.keepModules failed.db { saved.db with changes := 0 },
+                       orderPos := failed.orderPos, exhausted := failed.exhausted }
     return .error e
 
-/-- Run a script as the driver does: statement by statement, printing rows and errors. -/
-def runScript (src : ByteArray) : ByteArray := Id.run do
+/-- What a run produces: the driver's output, and whether some fuel ran out
+    (then the output is not a derivation's). -/
+structure RunResult where
+  out : ByteArray
+  exhausted : Bool
+
+/-- Run a script as the driver does, with the implementation's choices `ch`
+    and evaluator fuel `fuel`: statement by statement, printing rows and errors. -/
+def runScriptWith (ch : Choices) (fuel : Nat) (src : ByteArray) : RunResult := Id.run do
   let mut out := ByteArray.empty
-  let mut ctx : Ctx := { db := {} }
+  let mut ctx : Ctx := { db := {}, choices := ch }
+  let mut finished := false
   let mut pos := 0
   -- the script is tokenized once; a statement starts at the first token at or
   -- after its byte offset, unless the offset falls inside a token (after the
@@ -1190,7 +1200,7 @@ def runScript (src : ByteArray) : ByteArray := Id.run do
       toks := toks.extract 0 (ti - 1) ++ tokenize src pos
       ti := ti - 1
     match parseNextTok src toks ti with
-    | .empty => break
+    | .empty => finished := true; break
     | .error msg tail =>
       out := out ++ renderErr { code := SQLITE_ERROR, msg }
       if tail ≤ pos then
@@ -1202,7 +1212,7 @@ def runScript (src : ByteArray) : ByteArray := Id.run do
       else pos := tail
     | .ok stmt tail =>
       pos := tail
-      match (runStmt stmt).run.run ctx with
+      match (runStmt fuel stmt).run.run ctx with
       | (.ok (.ok rows), ctx') =>
         ctx := ctx'
         for r in rows do out := out ++ renderRow r
@@ -1210,6 +1220,9 @@ def runScript (src : ByteArray) : ByteArray := Id.run do
         ctx := ctx'
         out := out ++ renderErr e
         if let some t := e.tail then pos := t
-  return out
+  return { out, exhausted := ctx.exhausted || !finished }
+
+/-- The executable semantics: the default choices, `evalFuel`. -/
+def runScript (src : ByteArray) : ByteArray := (runScriptWith {} evalFuel src).out
 
 end Sql

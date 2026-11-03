@@ -59,8 +59,31 @@ structure Env where
   params : List (Nat × Value) := []
   deriving Inhabited
 
+/-- The choices SQL leaves to the implementation (PHASES.md, "Unspecified
+    choices"). The executable semantics takes the defaults; `Sql.Derives`
+    quantifies over all of them. -/
+structure Choices where
+  /-- the `n`-th unspecified order (`chooseOrder`), as a Lehmer code: 0 keeps
+      the executable's order, and every permutation of a list of length `m`
+      has a code below `m!` -/
+  order : Nat → Nat := fun _ => 0
+  /-- the `n`-th draw of SQLite's PRNG: `random()` takes word 0 modulo 2^64
+      (two's complement), `randomblob(N)` bytes 1..N modulo 256 -/
+  random : Nat → Nat → Nat := fun seed i =>
+    if i == 0 then (seed * 6364136223846793005 + 1442695040888963407) % 2 ^ 64
+    else (seed * 31 + (i - 1) * 17) % 256
+  /-- the `n`-th candidate of the random rowid SQLite picks after rowid
+      2^63−1 (taken modulo 2^63) -/
+  rowid : Nat → Nat := fun k => (k * 2862933555777941757 + 3037000493) % 2 ^ 63
+  deriving Inhabited
+
 structure Ctx where
   db : Db
+  /-- the implementation's choices, and how many orders were chosen so far -/
+  choices : Choices := {}
+  orderPos : Nat := 0
+  /-- some fuel ran out (the run is not a derivation, `Sql.Derives`) -/
+  exhausted : Bool := false
   /-- json.c's cache of parsed JSON texts, per statement (`Sql.Json`) -/
   jsonCache : Json.Cache := {}
   deriving Inhabited
@@ -79,6 +102,35 @@ def evalFuel : Nat := 1000000000
 /-- The total evaluator ran out of fuel (Phase 2.5): never with the fuel `sql_run`
     passes, which exceeds every depth SQLite itself allows. -/
 def fuelErr : Err := { code := SQLITE_ERROR, msg := "out of fuel" }
+
+/-- Fuel exhausted: recorded in the state (which survives errors and
+    rollbacks), then thrown. -/
+def outOfFuel {α} : M α := do
+  modify fun c => { c with exhausted := true }
+  throw fuelErr
+
+/-- The permutation with Lehmer code `code` (digit `code % n` picks among the
+    `n` elements left). Code 0 is the identity. -/
+def permute {α} (code : Nat) (xs : Array α) : Array α :=
+  if code == 0 then xs else
+  let rec go (k : Nat) (c : Nat) (l : List α) : List α :=
+    match k with
+    | 0 => l
+    | k + 1 =>
+      match l with
+      | [] => []
+      | _ =>
+        let i := c % l.length
+        match l[i]? with
+        | some x => x :: go k (c / l.length) (l.eraseIdx i)
+        | none => l
+  (go xs.size code xs.toList).toArray
+
+/-- An order SQL leaves unspecified: the next code of `Choices.order`. -/
+def chooseOrder {α} (xs : Array α) : M (Array α) := do
+  let c ← get
+  set { c with orderPos := c.orderPos + 1 }
+  return permute (c.choices.order c.orderPos) xs
 
 /-! ## Values as SQL booleans -/
 
