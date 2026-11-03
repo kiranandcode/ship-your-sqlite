@@ -1601,24 +1601,34 @@ partial def runCore (q : QEnv) (core : SelectCore) (orderBy : List OrderTerm) :
       -- the row bare columns are read from: the min/max row if there is exactly one
       -- min()/max() aggregate, else the first row of the group (SQLite 3.54)
       let minmax := exprs.filterMap fun e => match e with
-        | .call n _ [a] false [] none none =>
-          if nameEq n "min" || nameEq n "max" then some (nameEq n "min", a) else none
+        | .call n d [a] false [] none none =>
+          if nameEq n "min" || nameEq n "max" then some (nameEq n "min", d, a) else none
         | _ => none
       for (_, grp) in groups do
         let mut rep : Array Cur := grp[0]?.getD (Array.replicate srcs.size none)
+        -- with one min()/max(), minmaxStep tells the accumulator when not to
+        -- load the bare columns: they come from each row until the first
+        -- non-NULL value, then only from rows that strictly improve it; a
+        -- DISTINCT duplicate skips the step itself, so its row is loaded
         if minmax.length == 1 && !grp.isEmpty then
-          let (isMin, a) := minmax[0]!
+          let (isMin, dist, a) := minmax[0]!
           let coll := ((exprColl qm.env a).map (·.1)).getD .binary
-          let mut best : Option (Value × Array Cur) := none
+          let mut best : Option Value := none
+          let mut seen : Std.HashSet String := {}
           for cur in grp do
             let v ← evalExpr (withFrame cur) a
-            if v.isNull then continue
+            if dist && !v.isNull then
+              let k := canonKey [coll] #[v]
+              if seen.contains k then rep := cur; continue
+              seen := seen.insert k
+            if v.isNull then
+              if best.isNone then rep := cur
+              continue
             match best with
-            | none => best := some (v, cur)
-            | some (bv, _) =>
+            | none => best := some v; rep := cur
+            | some bv =>
               let o := compareValues coll v bv
-              if (isMin && o == .lt) || (!isMin && o == .gt) then best := some (v, cur)
-          if let some (_, cur) := best then rep := cur
+              if (isMin && o == .lt) || (!isMin && o == .gt) then best := some v; rep := cur
         let qg := { withFrame rep aliases with env := { (withFrame rep aliases).env with group := some grp } }
         if let some h := having then
           if truth (← evalExpr qg h) != some true then continue
