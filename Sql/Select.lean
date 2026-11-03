@@ -306,10 +306,8 @@ partial def evalExpr (q : QEnv) (e : Expr) : M Value := do
     let mut found := false
     for it in items do
       let w ← evalExpr q it
-      let aff := match exprAff env x with
-        | some a => some a
-        | none => none
-      let c := compareOp .eq (cmpAff aff (exprAff env it)) (cmpColl env x it) v w
+      -- comparisonAffinity: an IN list compares with the left side's affinity only
+      let c := compareOp .eq (exprAff env x) (cmpColl env x it) v w
       if truth c == some true then found := true; break
       if c.isNull then sawNull := true
     if v.isNull then return .null
