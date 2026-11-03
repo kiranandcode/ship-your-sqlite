@@ -328,7 +328,7 @@ partial def evalExpr (q : QEnv) (e : Expr) : M Value := do
       | w => return w
     | .bitnot =>
       if v.isNull then return .null
-      let x := v.numeric.toInt
+      let x := v.toInt
       return .int (-x - 1)
   | .binop op a b =>
     match op with
@@ -797,7 +797,7 @@ partial def scalarFn (n : Name) (vs : List Value) (colls : List (Option (Coll ×
     | some l => return .blob ⟨l.toArray⟩
     | none => return .null
   | "char" =>
-    let cs := vs.map fun v => Char.ofNat v.numeric.toInt.toNat
+    let cs := vs.map fun v => Char.ofNat v.toInt.toNat
     return .text (String.ofList cs).toUTF8
   | "unicode" =>
     if nargs != 1 then wrong
@@ -824,8 +824,8 @@ partial def scalarFn (n : Name) (vs : List Value) (colls : List (Option (Coll ×
     if nargs < 2 || nargs > 3 then wrong
     if a0.isNull || a1.isNull then return .null
     if nargs == 3 && vs[2]!.isNull then return .null
-    let z : Option Int := if nargs == 3 then some vs[2]!.numeric.toInt else none
-    let y := a1.numeric.toInt
+    let z : Option Int := if nargs == 3 then some vs[2]!.toInt else none
+    let y := a1.toInt
     match a0 with
     | .blob b =>
       let units := b.toList.map ([·])
@@ -884,7 +884,7 @@ partial def scalarFn (n : Name) (vs : List Value) (colls : List (Option (Coll ×
     return vs.foldl (fun acc v => if better v acc then v else acc) a0
   | "zeroblob" =>
     if nargs != 1 then wrong
-    let n := max 0 a0.numeric.toInt
+    let n := max 0 a0.toInt
     if n > maxLength then err "string or blob too big" SQLITE_TOOBIG
     return .blob ⟨Array.replicate n.toNat 0⟩
   | "likelihood" | "likely" | "unlikely" => return a0
@@ -912,7 +912,7 @@ partial def scalarFn (n : Name) (vs : List Value) (colls : List (Option (Coll ×
     return .int (if x ≥ 2 ^ 63 then (x : Int) - 2 ^ 64 else x)
   | "randomblob" =>
     if nargs != 1 then wrong
-    let n := max 1 a0.numeric.toInt
+    let n := max 1 a0.toInt
     if n > maxLength then err "string or blob too big" SQLITE_TOOBIG
     let c ← get
     let seed := c.db.prng

@@ -237,8 +237,9 @@ def castValue (v : Value) (ty : String) : Value :=
 
 def bitOp (op : BinOp) (a b : Value) : Value :=
   if a.isNull || b.isNull then .null else
-  let x := a.numeric.toInt
-  let y := b.numeric.toInt
+  -- sqlite3VdbeIntValue: a text gives its integer prefix
+  let x := a.toInt
+  let y := b.toInt
   let wrap (i : Int) : Int := let m := i % 2 ^ 64; if m ≥ 2 ^ 63 then m - 2 ^ 64 else m
   let toU (i : Int) : Nat := (i % 2 ^ 64).toNat
   match op with
