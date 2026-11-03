@@ -59,6 +59,33 @@ proved equal to it.
 | 2.3 the rest of the dialect | joins (all kinds), subqueries, compound selects, CTEs incl. recursive, window functions, views, triggers, indexes (as observable through ordering and constraints), constraints and ON CONFLICT, UPSERT, RETURNING, transactions/savepoints, ALTER TABLE, pragmas that affect results, the built-in function library, JSON, date/time | |
 | 2.4 differential | `scripts/difftest.sh`: `Sql.run` vs the native driver on sqllogictest, SQLite's pure-SQL tests and generated scripts; every disagreement classified | |
 
+### Phase 2 design (next)
+
+- `Sql/Value.lean`: `Value = null | int (i : Int64) | real (r : binary64) | text (UTF-8 bytes) | blob`;
+  affinity (`TEXT`, `NUMERIC`, `INTEGER`, `REAL`, `BLOB`) by SQLite's name rules; the
+  comparison order (NULL < numbers < text < blob), collations, numeric/text
+  conversions. **REAL → text** is not `%.17g`: SQLite renders with `%!.17g`
+  through `sqlite3FpDecode` (sqlite3.c 38236): 18 significant digits from
+  `sqlite3Fp2Convert10`, rounded to 17, then shortened only when digits 15–16 are
+  `99` (round the prefix up) or 14–16 are `000` (or the value is integral) **and**
+  the shorter form round-trips. So `0.1` → `0.1` but `0.1+0.7` →
+  `0.79999999999999993`, `pi()` → `3.1415926535897931`. The semantics states
+  this on exact rationals; whether `sqlite3Fp2Convert10` is correctly rounded
+  is a property to test, then prove.
+- `Sql/Syntax.lean`, `Sql/Lex.lean`, `Sql/Parse.lean`: the theorem is about
+  script *text*, so the semantics parses, including the error outcomes
+  (`near "X": syntax error`, `incomplete input`).
+- `Sql/Db.lean`: schema (tables, columns with declared type/affinity, constraints,
+  indexes as uniqueness and ordering facts, views, triggers) and contents (rowid →
+  record); `Sql/Eval.lean`: expressions; `Sql/Select.lean`: the relational core;
+  `Sql/Exec.lean`: statements, transactions, the driver's output format.
+- `Sql.run (fuel) : script → output` executable; `Sql.Derives` defined from it.
+- `scripts/difftest_sem.sh`: `Sql.run` vs `driver-gcc` on `tests/sql` and
+  sqllogictest; `coverage/status.tsv` records per feature `diff` when its tests pass.
+- Running cost of the Clight export for the larger corpus: 280 MB and ~1 M
+  steps/s per `sqlite_run` process, so a sqllogictest file runs in parallel
+  processes, not in one.
+
 ## Phase 3: refinement
 
 Decomposition (to be tested by a pilot before it is adopted): SQLite compiles
