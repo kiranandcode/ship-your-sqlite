@@ -1420,19 +1420,61 @@ def evalFromWhere (fuel : Nat) (q : QEnv) (f : FromItem) (where_ : Option Expr) 
               | none => s.cols.any (fun (n, _, _) => nameEq n c) || (s.hasRowid && isRowidName c)
             if hit then lv := max lv leafOf[si]!
         return lv
-      let byLevel := conds.map fun e => (level e, e)
-      let check (cur : Array Cur) (lv : Nat) : M Bool := do
+      -- the leaf a conjunct refers to when it refers to one leaf's sources
+      -- only (every name it uses is a column of that leaf)
+      let localTo (e : Expr) : Option Nat := Id.run do
+        let mut leaf : Option Nat := none
+        for (t, c) in exprRefs e do
+          let mut hits : List Nat := []
+          for h : si in [0:srcs.size] do
+            let s := srcs[si]
+            let hit := match t with
+              | some tn => nameEq s.alias tn
+              | none => s.cols.any (fun (n, _, _) => nameEq n c) || (s.hasRowid && isRowidName c)
+            if hit then hits := leafOf[si]! :: hits
+          match hits with
+          | [] => return none
+          | l :: ls =>
+            if ls.any (· != l) then return none
+            if leaf.any (· != l) then return none
+            leaf := some l
+        return leaf
+      -- (level, local leaf, conjunct)
+      let byLevel := conds.map fun e => (level e, localTo e, e)
+      let check (cur : Array Cur) (lv : Nat) (skipLocal : Bool) : M Bool := do
         let qr := { q with env := { q.env with frames := { srcs := srcs.extract 0 cur.size, cur, aliases } :: q.env.frames, group := none } }
-        for (l, e) in byLevel do
-          if l == lv then
+        for (l, loc, e) in byLevel do
+          if l == lv && !(skipLocal && loc == some lv) then
             if hasAgg e then err "misuse of aggregate function"
             if truth (← evalExpr fuel qr e) != some true then return false
         return true
+      -- a leaf's own conjuncts filter its rows once, before the nested loop
+      -- (as SQLite's plan applies a table's constraints in its loop); only
+      -- when some row reaches the leaf, so that they are evaluated only then
+      let localFilter (k : Nat) (rs : Array (Array Cur)) : M (Array (Array Cur)) := do
+        let mine := byLevel.filter fun (l, loc, _) => l == k && loc == some k
+        if mine.isEmpty then return rs
+        let offset := (leafSrcs.extract 0 k).foldl (· + ·.size) 0
+        let mut out := #[]
+        for r in rs do
+          -- the frame has the earlier positions empty, so that names resolve
+          -- to the same source positions as in the nested loop
+          let cur := Array.replicate offset none ++ r
+          let qr := { q with env := { q.env with frames := { srcs := srcs.extract 0 cur.size, cur, aliases } :: q.env.frames, group := none } }
+          let mut ok := true
+          for (_, _, e) in mine do
+            if hasAgg e then err "misuse of aggregate function"
+            if truth (← evalExpr fuel qr e) != some true then ok := false; break
+          if ok then out := out.push r
+        return out
       let mut partial_ : Array (Array Cur) := #[#[]]
       for h : k in [0:leaves.size] do
         let mut next := #[]
+        let own ← match leafRows[k]! with
+          | some rs => if partial_.isEmpty then pure none else some <$> localFilter k rs
+          | none => pure none
         for pre in partial_ do
-          let rows ← match leafRows[k]! with
+          let rows ← match own with
             | some rs => pure rs
             | none =>
               match leaves[k]! with
@@ -1445,7 +1487,7 @@ def evalFromWhere (fuel : Nat) (q : QEnv) (f : FromItem) (where_ : Option Expr) 
               | _ => pure #[]
           for r in rows do
             let cur := pre ++ r
-            if ← check cur k then next := next.push cur
+            if ← check cur k own.isSome then next := next.push cur
         partial_ := next
       return (srcs, partial_)
 
