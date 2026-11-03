@@ -102,7 +102,7 @@ def resolveCol (env : Env) (tbl : Option Name) (col : Name) : Except String Reso
       let mut hits : Array Resolved := #[]
       for h : si in [0:f.srcs.size] do
         let s := f.srcs[si]
-        if tbl.isNone || nameEq s.alias tbl.get! then
+        if (tbl.isNone && !s.qualOnly) || (tbl.isSome && nameEq s.alias tbl.get!) then
           match (s.cols.toList.findIdx? fun (n, _, _) => nameEq n col) with
           | some ci =>
             -- a USING/NATURAL duplicate is not a second match

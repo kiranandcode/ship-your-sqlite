@@ -1,0 +1,18 @@
+select 1 + 2 * 3, (1 + 2) * 3, 7 / 2, -7 / 2, 7 % 3, -7 % 3, 2 << 3, -16 >> 2, 5 & 3, 5 | 3, ~5;
+select 1 = 1, 1 == 1, 1 != 2, 1 <> 1, 1 < 2, 2 <= 2, 3 > 2, 3 >= 4;
+select null + 1, null || 'a', 'a' || 1 || 2.5, 'x' || x'41';
+select 1 is 1, 1 is null, null is null, 1 is not null, 1 is distinct from 2, null is not distinct from null;
+select 5 between 1 and 10, 5 not between 1 and 4, null between 1 and 2, 'b' between 'a' and 'c';
+select 3 in (1, 2, 3), 4 in (1, 2), 4 not in (1, 2), null in (1), 1 in (null, 1), 2 in (null, 1), 2 not in (null, 1), 1 in ();
+select case 1 when 1 then 'one' when 2 then 'two' end, case when 0 then 'a' when null then 'b' else 'c' end, case 3 when 1 then 'x' end;
+select cast(3.7 as integer), cast(-3.7 as integer), cast('3.7' as real), cast(5 as text), cast('abc' as numeric), cast('12.0' as numeric), cast('  -4  ' as numeric), cast(x'3132' as integer), cast(null as text);
+select typeof(1), typeof(1.0), typeof('1'), typeof(x'01'), typeof(null), typeof(1 + 1.0), typeof('1' + 1), typeof('1.0' + 1);
+select 9223372036854775807 * 2, -9223372036854775808 / -1, 9223372036854775807 + 0.0, abs(-1.5), -(-9223372036854775808);
+select 'abc' < 'abd', 'abc' < 'ABC', 'abc' = 'ABC' collate nocase, 'a  ' = 'a' collate rtrim, x'01' < x'0102', 1 < 1.5, 2 > 1.99999;
+select not 1, not 0, not null, 1 and null, 0 and null, 1 or null, 0 or null, null and null;
+select coalesce(null, 2, 3), ifnull(null, 'x'), nullif(1, 1), nullif(1, 2), iif(1, 'y', 'n'), iif(null, 'y', 'n');
+select (select 1), (select null), (select 1 where 0), exists (select 1), not exists (select 1 where 0);
+select (1, 2) = (1, 2), (1, 2) < (1, 3), (1, null) = (1, 2), (2, 1) > (1, 9);
+select 0x10, 0XFF, 1e2, .5, 5., 1_000_000, 0x1_F;
+select +'5', -'5', +'abc', -'abc', -'1e2';
+select 10.0 / 4, 10 / 4.0, 1 / 3.0, 2.0 * 3, 0.1 * 3, 1e308 + 1e308, -0.0, 0.0 = -0.0;

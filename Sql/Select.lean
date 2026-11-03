@@ -1,6 +1,8 @@
 /-
   The evaluator: expressions, subqueries and SELECT (mutually recursive).
 -/
+import Std.Data.HashMap
+import Std.Data.HashSet
 import Sql.Query
 import Sql.Printf
 import Sql.DateTime
@@ -52,10 +54,36 @@ def lexCompare (colls : List Coll) (dirs : List (SortDir × NullsOrder)) (a b : 
 def rowsEq (colls : List Coll) (a b : Array Value) : Bool :=
   lexCompare colls [] a b == .eq
 
+/-- A key equal for two rows exactly when `rowsEq` holds: numbers by value (an
+    integral REAL as the integer), text folded by its collation. -/
+def canonKey (colls : List Coll) (r : Array Value) : String := Id.run do
+  let mut out := ""
+  for h : i in [0:r.size] do
+    let c := colls[i]?.getD .binary
+    let piece := match r[i] with
+      | .null => "N"
+      | .int n => s!"I{n}"
+      | .real x => match realAsInt x with
+        | some n => if intToReal n == x then s!"I{n}" else s!"R{Real.bits x}"
+        | none => s!"R{Real.bits (if x == 0.0 then 0.0 else x)}"
+      | .text t =>
+        let bs := match c with
+          | .binary => t.toList
+          | .nocase => t.toList.map lowerB
+          | .rtrim => (t.toList.reverse.dropWhile (· == 32)).reverse
+        "T" ++ hexOf ⟨bs.toArray⟩
+      | .blob b => "B" ++ hexOf b
+    out := out ++ piece ++ ","
+  return out
+
 def dedupe (colls : List Coll) (rows : Array (Array Value)) : Array (Array Value) := Id.run do
   let mut out := #[]
+  let mut seen : Std.HashSet String := {}
   for r in rows do
-    if !(out.any (rowsEq colls r)) then out := out.push r
+    let k := canonKey colls r
+    if !seen.contains k then
+      seen := seen.insert k
+      out := out.push r
   return out
 
 /-- The integer value of a LIMIT/OFFSET expression. -/
@@ -75,6 +103,87 @@ def limitValue (v : Value) : M Int := do
 structure AggArg where
   vals : List Value
   deriving Inhabited
+
+/-- The inner-join chain of a FROM item: leaves joined by INNER/CROSS joins
+    without USING/NATURAL, and the ON conditions of those joins. Any other join
+    is a single leaf. -/
+partial def innerChain : FromItem → List FromItem × List Expr
+  | .join l k false r on [] =>
+    if k == .inner || k == .cross then
+      let (ls, lc) := innerChain l
+      let (rs, rc) := innerChain r
+      (ls ++ rs, lc ++ rc ++ on.toList)
+    else ([.join l k false r on []], [])
+  | f => ([f], [])
+
+/-- The conjuncts of a WHERE clause. -/
+partial def conjuncts : Expr → List Expr
+  | .binop .and a b => conjuncts a ++ conjuncts b
+  | e => [e]
+
+mutual
+/-- Column names referred to anywhere in an expression, subqueries included
+    (qualifier, name). Conservative: used only to delay a conjunct. -/
+partial def exprRefs : Expr → List (Option Name × Name)
+  | .col _ t c => [(t, c)]
+  | .dqcol c => [(none, c)]
+  | .unop _ e | .collate e _ | .cast e _ | .isNull _ e => exprRefs e
+  | .binop _ a b => exprRefs a ++ exprRefs b
+  | .between _ a b c => exprRefs a ++ exprRefs b ++ exprRefs c
+  | .inList _ e l => exprRefs e ++ l.flatMap exprRefs
+  | .inSelect _ e q => exprRefs e ++ selectRefs q
+  | .inTable _ e _ _ a => exprRefs e ++ a.flatMap exprRefs
+  | .like _ _ a b c => exprRefs a ++ exprRefs b ++ (c.map exprRefs).getD []
+  | .case_ b ws e => (b.map exprRefs).getD [] ++ ws.flatMap (fun (x, y) => exprRefs x ++ exprRefs y) ++ (e.map exprRefs).getD []
+  | .exists_ q | .subquery q => selectRefs q
+  | .row l => l.flatMap exprRefs
+  | .call _ _ args _ ob f _ => args.flatMap exprRefs ++ ob.flatMap (fun (.mk e _ _) => exprRefs e) ++ (f.map exprRefs).getD []
+  | .raise _ m => (m.map exprRefs).getD []
+  | _ => []
+
+partial def selectRefs : Select → List (Option Name × Name)
+  | .mk ctes _ first rest ob lim off =>
+    ctes.flatMap (fun (.mk _ _ _ q) => selectRefs q) ++ coreRefs first ++ rest.flatMap (fun (_, c) => coreRefs c) ++
+    ob.flatMap (fun (.mk e _ _) => exprRefs e) ++ (lim.map exprRefs).getD [] ++ (off.map exprRefs).getD []
+
+partial def coreRefs : SelectCore → List (Option Name × Name)
+  | .values rows => rows.flatten.flatMap exprRefs
+  | .select _ cols f w g h _ =>
+    cols.flatMap (fun | .expr e _ _ => exprRefs e | _ => []) ++ (f.map fromRefs).getD [] ++
+    (w.map exprRefs).getD [] ++ g.flatMap exprRefs ++ (h.map exprRefs).getD []
+
+partial def fromRefs : FromItem → List (Option Name × Name)
+  | .tableFn _ _ args _ => args.flatMap exprRefs
+  | .subquery q _ => selectRefs q
+  | .join l _ _ r on _ => fromRefs l ++ fromRefs r ++ (on.map exprRefs).getD []
+  | _ => []
+end
+
+def windowParamBase : Nat := 1000000000
+
+/-- Replace each window-function call (outside subqueries) by a numbered
+    parameter; returns the rewritten expressions and the calls in order. -/
+partial def replaceWindows (es : List Expr) : List Expr × List Expr :=
+  let rec go (e : Expr) : StateM (Array Expr) Expr := do
+    match e with
+    | .call n d args st ob f (some w) =>
+      let k := (← get).size
+      modify (·.push (.call n d args st ob f (some w)))
+      return .param "__window" (windowParamBase + k)
+    | .call n d args st ob f none => return .call n d (← args.mapM go) st ob f none
+    | .unop o a => return .unop o (← go a)
+    | .binop o a b => return .binop o (← go a) (← go b)
+    | .collate a c => return .collate (← go a) c
+    | .cast a t => return .cast (← go a) t
+    | .isNull ng a => return .isNull ng (← go a)
+    | .between ng a b c => return .between ng (← go a) (← go b) (← go c)
+    | .inList ng a l => return .inList ng (← go a) (← l.mapM go)
+    | .like o ng a b c => return .like o ng (← go a) (← go b) (← c.mapM go)
+    | .case_ b ws el => return .case_ (← b.mapM go) (← ws.mapM fun (x, y) => do pure (← go x, ← go y)) (← el.mapM go)
+    | .row l => return .row (← l.mapM go)
+    | x => return x
+  let (es', calls) := (es.mapM go).run #[]
+  (es', calls.toList)
 
 def iifPick : List Value → Value
   | c :: v :: rest => if truth c == some true then v else iifPick rest
@@ -269,8 +378,7 @@ partial def evalExpr (q : QEnv) (e : Expr) : M Value := do
   | .row _ => err "row value misused"
   | .call n distinct args star ob filter over =>
     if over.isSome then
-      match env.windowVals.find? (fun _ => false) with
-      | _ => err s!"misuse of window function {n}()"
+      err s!"misuse of window function {n}()"
     else if isAggCall n args.length star false then
       evalAgg q n distinct args star ob filter
     else
@@ -282,8 +390,8 @@ partial def evalExpr (q : QEnv) (e : Expr) : M Value := do
       | some x => pure (String.fromUTF8! (textOf (← evalExpr q x)))
       | none => pure ""
     match kind with
-    | .ignore => throw ⟨0, "RAISE(IGNORE)"⟩
-    | _ => throw ⟨SQLITE_CONSTRAINT_TRIGGER, m⟩
+    | .ignore => throw { code := 0, msg := "RAISE(IGNORE)" }
+    | _ => throw { code := SQLITE_CONSTRAINT_TRIGGER, msg := m }
 
 partial def compareRows (q : QEnv) (op : BinOp) (xs ys : List Expr) : M Value := do
   if xs.length != ys.length then err "row value misused"
@@ -328,6 +436,7 @@ partial def valueOf (q : QEnv) : Resolved → M Value
 /-- An aggregate call over the current group. -/
 partial def evalAgg (q : QEnv) (n : Name) (distinct : Bool) (args : List Expr) (star : Bool)
     (ob : List OrderTerm) (filter : Option Expr) : M Value := do
+  if distinct && args.length != 1 then err "DISTINCT aggregates must have exactly one argument"
   let some grp := q.env.group | err s!"misuse of aggregate function {n}()"
   let name := n.toLower
   -- evaluate arguments per row of the group, in the context of that row
@@ -349,9 +458,14 @@ partial def evalAgg (q : QEnv) (n : Name) (distinct : Bool) (args : List Expr) (
     for (vs, _) in rows do
       if !(seen.any fun s => rowsEq [coll] s.toArray vs.toArray) then seen := seen.push vs
     rows := seen.map (·, #[])
-  let vals := rows.map (·.1)
-  let arg1 := vals.map fun vs => vs.head?.getD .null
   let coll := ((args.head?.bind (exprColl q.env)).map (·.1)).getD .binary
+  aggFinish q n star args coll (rows.map (·.1))
+
+/-- An aggregate over the argument lists of its rows (after FILTER, ORDER BY, DISTINCT). -/
+partial def aggFinish (q : QEnv) (n : Name) (star : Bool) (args : List Expr) (coll : Coll)
+    (vals : Array (List Value)) : M Value := do
+  let name := n.toLower
+  let arg1 := vals.map fun vs => vs.head?.getD .null
   match name with
   | "count" =>
     if star || args.isEmpty then return .int vals.size
@@ -365,7 +479,13 @@ partial def evalAgg (q : QEnv) (n : Name) (distinct : Bool) (args : List Expr) (
     let mut overflow := false
     let mut rsum : Float := 0.0
     for v in nn do
-      match v.numeric with
+      -- sqlite3_value_numeric_type: a text is an integer only if all of it reads as one
+      let nv : Value := match v with
+        | .text t | .blob t => match numericOfText t false with
+          | some (.int i) => .int i
+          | _ => .real v.toReal
+        | w => w
+      match nv with
       | .int i =>
         if allInt then
           isum := isum + i
@@ -652,6 +772,249 @@ partial def setCur (q : QEnv) (cur : Array Cur) : QEnv :=
   | f :: rest => { q with env := { q.env with frames := { f with cur } :: rest } }
   | [] => q
 
+/-- A window definition with its base window (named in the WINDOW clause) merged in. -/
+partial def resolveWindow (windows : List (Name × Window)) (w : Window) : M Window := do
+  let .mk base part ord frame := w
+  match base with
+  | none => return w
+  | some b =>
+    match windows.find? (fun (n, _) => nameEq n b) with
+    | none => err s!"no such window: {b}"
+    | some (_, bw) =>
+      let .mk _ bpart bord bframe ← resolveWindow windows bw
+      if !part.isEmpty then err s!"cannot override PARTITION clause of window: {b}"
+      if !ord.isEmpty && !bord.isEmpty then err s!"cannot override ORDER BY clause of window: {b}"
+      return .mk none bpart (if ord.isEmpty then bord else ord) (frame.orElse fun _ => bframe)
+
+/-- Values of one window function call for each row context, and the sorted order of the rows. -/
+partial def computeWindow (ctxs : Array QEnv) (windows : List (Name × Window)) (call : Expr) :
+    M (Array Value × Array Nat) := do
+  let .call n _ args star _ filter (some w0) := call | err "internal: window"
+  let .mk _ part ord frame ← resolveWindow windows w0
+  let name := n.toLower
+  let nrows := ctxs.size
+  let pkeys ← ctxs.mapM fun c => part.toArray.mapM (evalExpr c)
+  let okeys ← ctxs.mapM fun c => ord.toArray.mapM fun (.mk e _ _) => evalExpr c e
+  let pcolls := part.map fun e => ((ctxs[0]?.bind (fun c => exprColl c.env e)).map (·.1)).getD .binary
+  let ocolls := ord.map fun (.mk e _ _) => ((ctxs[0]?.bind (fun c => exprColl c.env e)).map (·.1)).getD .binary
+  let odirs := ord.map fun (.mk _ d nl) => (d, nl)
+  let order := stableSort (fun i j =>
+      match lexCompare pcolls [] pkeys[i]! pkeys[j]! with
+      | .eq => lexCompare ocolls odirs okeys[i]! okeys[j]!
+      | o => o) (Array.range nrows)
+  -- partitions: runs of equal partition keys in sorted order
+  let mut parts : Array (Array Nat) := #[]
+  for i in order do
+    match parts.back? with
+    | some p => if lexCompare pcolls [] pkeys[p[0]!]! pkeys[i]! == .eq then parts := parts.pop.push (p.push i) else parts := parts.push #[i]
+    | none => parts := parts.push #[i]
+  -- per-row argument values
+  let argv ← ctxs.mapM fun c => args.mapM (evalExpr c)
+  let pass ← ctxs.mapM fun c => match filter with
+    | some f => do pure (truth (← evalExpr c f) == some true)
+    | none => pure true
+  let constArg (k : Nat) (dflt : Int) : M Int := do
+    match args[k]? with
+    | none => return dflt
+    | some e => match ← evalExpr (ctxs[0]?.getD {}) e with
+      | .int i => return i
+      | v => match realAsInt v.numeric.toReal with
+        | some i => return i
+        | none => return (if v.isNull then dflt else v.numeric.toInt)
+  let mut result := Array.replicate nrows Value.null
+  let isPeer (a b : Nat) : Bool := lexCompare ocolls odirs okeys[a]! okeys[b]! == .eq
+  for p in parts do
+    let m := p.size
+    let mut firstPeer := Array.replicate m 0
+    let mut lastPeer := Array.replicate m 0
+    let mut groupIdx := Array.replicate m 0
+    let mut g : Nat := 0
+    for j in [0:m] do
+      if j > 0 && isPeer p[j - 1]! p[j]! then
+        firstPeer := firstPeer.set! j firstPeer[j - 1]!
+        groupIdx := groupIdx.set! j groupIdx[j - 1]!
+      else
+        firstPeer := firstPeer.set! j j
+        if j > 0 then g := g + 1
+        groupIdx := groupIdx.set! j g
+    for j' in [0:m] do
+      let j := m - 1 - j'
+      if j + 1 < m && isPeer p[j]! p[j + 1]! then lastPeer := lastPeer.set! j lastPeer[j + 1]!
+      else lastPeer := lastPeer.set! j j
+    let ngroups : Nat := g + 1
+    let gIdx := groupIdx
+    let groupStart (k : Nat) : Nat := ((List.range m).find? (fun x => gIdx[x]! == k)).getD m
+    let groupEnd (k : Nat) : Nat := ((List.range m).reverse.find? (fun x => gIdx[x]! == k)).getD 0
+    let fP := firstPeer
+    let lP := lastPeer
+    let frameOf (j : Nat) : M (List Nat) := do
+      let fr := frame.getD (if ord.isEmpty then .mk .rows .unboundedPreceding .unboundedFollowing .noOthers
+                            else .mk .range .unboundedPreceding .currentRow .noOthers)
+      let .mk unit st en excl := fr
+      let offset (e : Expr) (start : Bool) : M Value := do
+        let v ← evalExpr (ctxs[p[j]!]!) e
+        let bad : Bool := match v with
+          | .int i => decide (i < 0) | .real r => r < 0.0 | _ => true
+        if bad then
+          err (if start then "frame starting offset must be a non-negative number" else "frame ending offset must be a non-negative number")
+        return v
+      let bound (b : FrameBound) (isStart : Bool) : M Int := do
+        match b with
+        | .unboundedPreceding => return 0
+        | .unboundedFollowing => return (m : Int) - 1
+        | .currentRow =>
+          match unit with
+          | .rows => return j
+          | _ => return (if isStart then fP[j]! else lP[j]!)
+        | .preceding e | .following e =>
+          let v ← offset e isStart
+          let prec := match b with | .preceding _ => true | _ => false
+          match unit with
+          | .rows =>
+            let k := v.numeric.toInt
+            return (if prec then (j : Int) - k else j + k)
+          | .groups =>
+            let k := v.numeric.toInt
+            let tg : Int := if prec then (gIdx[j]! : Int) - k else gIdx[j]! + k
+            if tg < 0 then return (if isStart then 0 else -1)
+            if tg ≥ ngroups then return (if isStart then m else (m : Int) - 1)
+            return (if isStart then groupStart tg.toNat else groupEnd tg.toNat)
+          | .range =>
+            let key := okeys[p[j]!]![0]?.getD .null
+            if key.isNull then return (if isStart then fP[j]! else lP[j]!)
+            let desc := match ord.head? with | some (.mk _ d _) => d == .desc | none => false
+            let x := key.toReal
+            let d := v.toReal
+            let target := if prec != desc then x - d else x + d
+            let inside (k : Nat) : Bool :=
+              let kv := okeys[p[k]!]![0]?.getD .null
+              if kv.isNull then false else
+              let y := kv.toReal
+              if isStart then (if desc then y ≤ target else y ≥ target)
+              else (if desc then y ≥ target else y ≤ target)
+            if isStart then return (((List.range m).find? inside).getD m : Nat)
+            else return (match (List.range m).reverse.find? inside with | some k => (k : Int) | none => -1)
+      let lo ← bound st true
+      let hi ← bound en false
+      let mut out := []
+      let mut k := lo
+      while k ≤ hi do
+        if k ≥ 0 && k < m then
+          let kk := k.toNat
+          let excluded := match excl with
+            | .noOthers => false
+            | .currentRow => kk == j
+            | .group => isPeer p[kk]! p[j]!
+            | .ties => kk != j && isPeer p[kk]! p[j]!
+          if !excluded then out := kk :: out
+        k := k + 1
+      return out.reverse
+    for j in [0:m] do
+      let row := p[j]!
+      let v ← match name with
+        | "row_number" => pure (Value.int (j + 1))
+        | "rank" => pure (.int (fP[j]! + 1))
+        | "dense_rank" => pure (.int (gIdx[j]! + 1))
+        | "percent_rank" => pure (.real (if m ≤ 1 then 0.0 else intToReal fP[j]! / intToReal ((m : Int) - 1)))
+        | "cume_dist" => pure (.real (intToReal (lP[j]! + 1) / intToReal m))
+        | "ntile" =>
+          let nt ← constArg 0 1
+          if nt ≤ 0 then err "argument of ntile must be a positive integer"
+          let nt := nt.toNat
+          let base := m / nt
+          let extra := m % nt
+          let bucket := if j < extra * (base + 1) then j / (base + 1) else extra + (j - extra * (base + 1)) / (max base 1)
+          pure (.int (bucket + 1))
+        | "lag" | "lead" =>
+          let off ← constArg 1 1
+          let k : Int := if name == "lag" then (j : Int) - off else j + off
+          if k ≥ 0 && k < m then pure ((argv[p[k.toNat]!]!)[0]?.getD .null)
+          else match args[2]? with
+            | some e => evalExpr ctxs[row]! e
+            | none => pure .null
+        | "first_value" | "last_value" | "nth_value" =>
+          let fr ← frameOf j
+          let nth ← constArg 1 1
+          if name == "nth_value" && nth ≤ 0 then err "second argument to nth_value must be a positive integer"
+          let pick := if name == "first_value" then fr.head?
+            else if name == "last_value" then fr.getLast?
+            else fr[(nth - 1).toNat]?
+          pure ((pick.bind fun k => (argv[p[k]!]!)[0]?).getD .null)
+        | _ =>
+          if !(isAggCall n args.length star false) then err s!"no such window function: {n}"
+          let fr ← frameOf j
+          let vals := (fr.filter fun k => pass[p[k]!]!).toArray.map fun k => argv[p[k]!]!
+          let coll := ((args.head?.bind fun e => (ctxs[0]?.bind fun c => exprColl c.env e)).map (·.1)).getD .binary
+          aggFinish ctxs[row]! n star args coll vals
+      result := result.set! row v
+  return (result, order)
+
+/-- FROM with WHERE: a chain of inner joins is evaluated as nested loops, each
+    conjunct of WHERE and of the ON clauses applied as soon as every source it
+    may refer to is bound. Equal to evaluating the joins and then filtering. -/
+partial def evalFromWhere (q : QEnv) (f : FromItem) (where_ : Option Expr) (aliases : List (Name × Expr)) :
+    M (Array Src × Array (Array Cur)) := do
+  let (leavesL, onConds) := innerChain f
+  let leaves := leavesL.toArray
+  -- leaves whose rows do not depend on earlier leaves are evaluated once;
+  -- table-valued functions are evaluated per partial row (their arguments may
+  -- refer to earlier sources)
+  let mut leafSrcs : Array (Array Src) := #[]
+  let mut leafRows : Array (Option (Array (Array Cur))) := #[]
+  for lf in leaves do
+    match lf with
+    | .tableFn _ n _ alias =>
+      let (cols, _) ← tableFunction n []
+      leafSrcs := leafSrcs.push #[metaSrc (alias.getD n) cols]
+      leafRows := leafRows.push none
+    | _ =>
+      let (ss, rs) ← evalFrom q lf
+      leafSrcs := leafSrcs.push ss
+      leafRows := leafRows.push (some rs)
+  let srcs := leafSrcs.foldl (· ++ ·) #[]
+  -- the leaf of each source position
+  let leafOf : Array Nat := (leafSrcs.mapIdx fun i ss => Array.replicate ss.size i).foldl (· ++ ·) #[]
+  let conds := onConds ++ (where_.map conjuncts).getD []
+  -- the last leaf a conjunct may refer to
+  let level (e : Expr) : Nat := Id.run do
+    let mut lv := 0
+    for (t, c) in exprRefs e do
+      for h : si in [0:srcs.size] do
+        let s := srcs[si]
+        let hit := match t with
+          | some tn => nameEq s.alias tn
+          | none => s.cols.any (fun (n, _, _) => nameEq n c) || (s.hasRowid && isRowidName c)
+        if hit then lv := max lv leafOf[si]!
+    return lv
+  let byLevel := conds.map fun e => (level e, e)
+  let check (cur : Array Cur) (lv : Nat) : M Bool := do
+    let qr := { q with env := { q.env with frames := { srcs := srcs.extract 0 cur.size, cur, aliases } :: q.env.frames, group := none } }
+    for (l, e) in byLevel do
+      if l == lv then
+        if hasAgg e then err "misuse of aggregate function"
+        if truth (← evalExpr qr e) != some true then return false
+    return true
+  let mut partial_ : Array (Array Cur) := #[#[]]
+  for h : k in [0:leaves.size] do
+    let mut next := #[]
+    for pre in partial_ do
+      let rows ← match leafRows[k]! with
+        | some rs => pure rs
+        | none =>
+          match leaves[k]! with
+          | .tableFn _ n args alias =>
+            let qp := { q with env := { q.env with frames := { srcs := srcs.extract 0 pre.size, cur := pre } :: q.env.frames } }
+            let vs ← args.mapM (evalExpr qp)
+            let (cols, rs) ← tableFunction n (vs.zip (args.map Json.exprIsJson))
+            let _ := (cols, alias)
+            pure (rs.mapIdx fun i r => #[some (⟨i + 1, r⟩ : Row)])
+          | _ => pure #[]
+      for r in rows do
+        let cur := pre ++ r
+        if ← check cur k then next := next.push cur
+    partial_ := next
+  return (srcs, partial_)
+
 -- FROM
 
 /-- The rows of a named table, view or CTE, with its source description. -/
@@ -661,32 +1024,47 @@ partial def namedSource (q : QEnv) (sch : Option Name) (n : Name) (alias : Name)
       let (cols, rows) ← cteRows q n cv
       return (metaSrc alias cols, rows.mapIdx fun i r => ⟨i + 1, r⟩)
   let db ← getDb
-  if let some sch := sch then
-    if !(nameEq sch "main") then err s!"unknown database {sch}"
-  if let some t := db.main.findTable n then
+  let tbl ← match sch with
+    | none => pure (db.main.findTable n)
+    | some s =>
+      if nameEq s "main" then pure (db.main.findTableIn false n)
+      else if nameEq s "temp" then pure (db.main.findTableIn true n)
+      else err s!"no such table: {s}.{n}"
+  if let some t := tbl then
     return (tableSrc alias t, t.rows)
   if let some v := db.main.findView n then
     let (cols, rows) ← runSelect { q with ctes := [] } v.q
     let cols := if v.cols.isEmpty then cols else
       (cols.zip v.cols.toArray).map fun (c, nm) => { c with name := nm }
     return (metaSrc alias cols, rows.mapIdx fun i r => ⟨i + 1, r⟩)
-  if nameEq n "sqlite_schema" || nameEq n "sqlite_master" then
-    let rows := schemaRows db
+  if nameEq n "sqlite_schema" || nameEq n "sqlite_master" || nameEq n "sqlite_temp_schema" || nameEq n "sqlite_temp_master" then
+    let rows := schemaRows db (nameEq n "sqlite_temp_schema" || nameEq n "sqlite_temp_master")
     let cols : Array ColMeta := #["type", "name", "tbl_name", "rootpage", "sql"].map fun c => ⟨c, none, .binary⟩
     return (metaSrc alias cols, rows.mapIdx fun i r => ⟨i + 1, r⟩)
   err s!"no such table: {n}"
 
-/-- Rows of `sqlite_schema`. -/
-partial def schemaRows (db : Db) : Array (Array Value) :=
-  let objs := db.main.objs
-  objs.mapIdx fun i o =>
-    let root : Value := .int (i + 2)
+/-- Rows of `sqlite_schema` (or `sqlite_temp_schema`): tables and indexes take
+    root pages 2, 3, … in creation order; views and triggers have 0. -/
+partial def schemaRows (db : Db) (temp : Bool := false) : Array (Array Value) := Id.run do
+  let mut out := #[]
+  let mut page : Int := 1
+  for o in db.main.objs do
+    let isTemp := match o with
+      | .table t => t.temp | .view v => v.temp
+      | .index ix => ((db.main.findTable ix.table).map (·.temp)).getD false
+      | .trigger tr => ((db.main.findTable tr.table).map (·.temp)).getD false
+    if isTemp != temp then continue
     match o with
-    | .table t => #[.ofString "table", .ofString t.name, .ofString t.name, root, .ofString t.sql]
-    | .index ix => #[.ofString "index", .ofString ix.name, .ofString ix.table,
-        root, match ix.sql with | some s => .ofString s | none => .null]
-    | .view v => #[.ofString "view", .ofString v.name, .ofString v.name, .int 0, .ofString v.sql]
-    | .trigger tr => #[.ofString "trigger", .ofString tr.name, .ofString tr.table, .int 0, .ofString tr.sql]
+    | .table t =>
+      page := page + 1
+      out := out.push #[.ofString "table", .ofString t.name, .ofString t.name, .int page, .ofString t.sql]
+    | .index ix =>
+      page := page + 1
+      out := out.push #[.ofString "index", .ofString ix.name, .ofString ix.table, .int page,
+        match ix.sql with | some s => .ofString s | none => .null]
+    | .view v => out := out.push #[.ofString "view", .ofString v.name, .ofString v.name, .int 0, .ofString v.sql]
+    | .trigger tr => out := out.push #[.ofString "trigger", .ofString tr.name, .ofString tr.table, .int 0, .ofString tr.sql]
+  return out
 
 partial def cteRows (q : QEnv) (n : Name) : CteVal → M (Array ColMeta × Array (Array Value))
   | .rows cols rows => return (cols, rows)
@@ -899,8 +1277,10 @@ partial def runCore (q : QEnv) (core : SelectCore) (orderBy : List OrderTerm) :
     return (cols, out)
   | .select distinct cols from_ where_ groupBy having windows =>
     let _ := windows
+    -- result-column aliases usable in WHERE (`*` columns resolve as columns anyway)
+    let aliases0 := cols.filterMap fun | .expr e (some a) _ => some (a, e) | _ => none
     let (srcs, rows) ← match from_ with
-      | some f => evalFrom q f
+      | some f => evalFromWhere q f where_ aliases0
       | none => pure (#[], #[#[]])
     let rcols ← expandCols srcs cols
     let frameOf (cur : Array Cur) : Scope := { srcs, cur }
@@ -908,14 +1288,14 @@ partial def runCore (q : QEnv) (core : SelectCore) (orderBy : List OrderTerm) :
       { q with env := { q.env with frames := { frameOf cur with aliases } :: q.env.frames, group := none } }
     let exprs := rcols.filterMap fun | .expr e _ _ => some e | _ => none
     let aliases := rcols.filterMap fun | .expr e (some a) _ => some (a, e) | _ => none
-    -- WHERE
+    -- WHERE (with a FROM clause it was applied while joining)
     let mut kept := #[]
     for cur in rows do
-      match where_ with
-      | some w =>
+      match where_, from_ with
+      | some w, none =>
         if hasAgg w then err "misuse of aggregate function"
         if truth (← evalExpr (withFrame cur aliases) w) == some true then kept := kept.push cur
-      | none => kept := kept.push cur
+      | _, _ => kept := kept.push cur
     let qm := withFrame (Array.replicate srcs.size none)
     let cmeta : Array ColMeta := rcols.toArray.map fun rc =>
       match rc with
@@ -936,10 +1316,16 @@ partial def runCore (q : QEnv) (core : SelectCore) (orderBy : List OrderTerm) :
       | _ => return e
     let obExprs ← orderBy.mapM obExpr
     let isAgg := !groupBy.isEmpty || exprs.any hasAgg || (having.map hasAgg).getD false || obExprs.any hasAgg
+    -- window calls become numbered placeholders, computed over the row contexts
+    let (wexprs, wcalls) := replaceWindows (exprs ++ obExprs)
+    let exprs := wexprs.take exprs.length
+    let obExprs := wexprs.drop exprs.length
+    let mut ctxs : Array QEnv := #[]
     let mut out : Array (Array Value × Array Value) := #[]
     if isAgg then
       -- groups, in order of their key
       let mut groups : Array (Array Value × Array (Array Cur)) := #[]
+      let mut gindex : Std.HashMap String Nat := {}
       for cur in kept do
         let key ← groupBy.toArray.mapM fun g => do
           let g' := match g with
@@ -948,9 +1334,12 @@ partial def runCore (q : QEnv) (core : SelectCore) (orderBy : List OrderTerm) :
           if hasAgg g' then err "aggregate functions are not allowed in the GROUP BY clause"
           evalExpr (withFrame cur aliases) g'
         let gcolls := groupBy.map fun g => ((exprColl qm.env g).map (·.1)).getD .binary
-        match groups.findIdx? (fun (k, _) => rowsEq gcolls k key) with
+        let ck := canonKey gcolls key
+        match gindex.get? ck with
         | some i => groups := groups.modify i fun (k, rs) => (k, rs.push cur)
-        | none => groups := groups.push (key, #[cur])
+        | none =>
+          gindex := gindex.insert ck groups.size
+          groups := groups.push (key, #[cur])
       if groupBy.isEmpty && groups.isEmpty then groups := #[(#[], #[])]
       let gcolls := groupBy.map fun g => ((exprColl qm.env g).map (·.1)).getD .binary
       if !groupBy.isEmpty then groups := stableSort (fun a b => lexCompare gcolls [] a.1 b.1) groups
@@ -978,21 +1367,33 @@ partial def runCore (q : QEnv) (core : SelectCore) (orderBy : List OrderTerm) :
         let qg := { withFrame rep aliases with env := { (withFrame rep aliases).env with group := some grp } }
         if let some h := having then
           if truth (← evalExpr qg h) != some true then continue
-        let vals ← exprs.toArray.mapM (evalExpr qg)
-        let keys ← obExprs.toArray.mapM (evalExpr qg)
-        out := out.push (vals, keys)
+        ctxs := ctxs.push qg
     else
       if having.isSome then err "HAVING clause on a non-aggregate query"
       for cur in kept do
-        let qr := withFrame cur aliases
-        let vals ← exprs.toArray.mapM (evalExpr qr)
-        let keys ← obExprs.toArray.mapM (evalExpr qr)
-        out := out.push (vals, keys)
+        ctxs := ctxs.push (withFrame cur aliases)
+    -- window functions: each call's values; rows come out in the windows' sort order
+    let mut order := Array.range ctxs.size
+    let mut wvals : Array (Array Value) := #[]
+    for c in wcalls do
+      let (vs, ord) ← computeWindow ctxs windows c
+      wvals := wvals.push vs
+      if !(match c with | .call _ _ _ _ _ _ (some (.mk none [] [] _)) => true | _ => false) then order := ord
+    for i in order do
+      let base := ctxs[i]!
+      let qi := { base with env := { base.env with params := (wvals.toList.zipIdx.map fun (vs, k) => (windowParamBase + k, vs[i]!)) ++ base.env.params } }
+      let vals ← exprs.toArray.mapM (evalExpr qi)
+      let keys ← obExprs.toArray.mapM (evalExpr qi)
+      out := out.push (vals, keys)
     if distinct then
       let colls := cmeta.toList.map (·.coll)
       let mut d := #[]
+      let mut seen : Std.HashSet String := {}
       for r in out do
-        if !(d.any fun x => rowsEq colls x.1 r.1) then d := d.push r
+        let k := canonKey colls r.1
+        if !seen.contains k then
+          seen := seen.insert k
+          d := d.push r
       out := d
     return (cmeta, out)
 
@@ -1028,8 +1429,12 @@ partial def runSelect (q : QEnv) (sel : Select) : M (Array ColMeta × Array (Arr
         match op with
         | .unionAll => acc := acc ++ rs
         | .union => acc := stableSort (lexCompare colls []) (dedupe colls (acc ++ rs))
-        | .intersect => acc := stableSort (lexCompare colls []) (dedupe colls (acc.filter fun r => rs.any (rowsEq colls r)))
-        | .except => acc := stableSort (lexCompare colls []) (dedupe colls (acc.filter fun r => !(rs.any (rowsEq colls r))))
+        | .intersect =>
+          let rk : Std.HashSet String := rs.foldl (fun st r => st.insert (canonKey colls r)) {}
+          acc := stableSort (lexCompare colls []) (dedupe colls (acc.filter fun r => rk.contains (canonKey colls r)))
+        | .except =>
+          let rk : Std.HashSet String := rs.foldl (fun st r => st.insert (canonKey colls r)) {}
+          acc := stableSort (lexCompare colls []) (dedupe colls (acc.filter fun r => !rk.contains (canonKey colls r)))
       -- ORDER BY of a compound refers to result columns
       if orderBy.isEmpty then pure (cols, acc) else
       let mut idx := #[]

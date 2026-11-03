@@ -1,0 +1,1 @@
+create table t(a unique); insert into t values(1); select changes(), total_changes(); insert into t values(2),(3),(1); select changes(), total_changes(); insert or fail into t values(4),(1); select changes(), total_changes(), count(*) from t; update t set a=1 where a=4; select changes(), total_changes(); select 1/0; select changes();
