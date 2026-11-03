@@ -224,7 +224,10 @@ def allUniques (db : Db) (t : Table) : List (UniqueKey × Option Name) :=
         | _ => none
       if cols.length == ix.cols.length then some ({ cols, onConflict := none }, some ix.name) else none
     else none
-  (t.uniques.map (·, none)) ++ fromIdx
+  -- constraints are checked in `pTab->pIndex` order (as `Pragma.indexList`):
+  -- each new index is put first, REPLACE indexes after all the others
+  let all := ((t.uniques.map (·, none)) ++ fromIdx).reverse
+  all.filter (fun (k, _) => k.onConflict != some .replace) ++ all.filter (fun (k, _) => k.onConflict == some .replace)
 
 def keyOf (r : Row) (k : UniqueKey) : Array Value := k.cols.toArray.map fun (i, _) => r.vals[i]?.getD .null
 
