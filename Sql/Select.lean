@@ -2,6 +2,9 @@
   The evaluator: expressions, subqueries and SELECT (mutually recursive).
 -/
 import Sql.Query
+import Sql.Printf
+import Sql.DateTime
+import Sql.Json
 
 namespace Sql
 
@@ -399,15 +402,30 @@ partial def evalAgg (q : QEnv) (n : Name) (distinct : Bool) (args : List Expr) (
         | none => textOf v
         | some acc => acc ++ sep ++ textOf v)
     return match out with | some b => .text b | none => .null
-  | _ => callAgg q name vals
+  | _ => callAgg q name vals (args.map Json.exprIsJson)
 
 /-- Aggregates implemented elsewhere (JSON). -/
-partial def callAgg (_q : QEnv) (name : String) (_vals : Array (List Value)) : M Value :=
-  err s!"no such function: {name}"
+partial def callAgg (_q : QEnv) (name : String) (vals : Array (List Value)) (flags : List Bool) : M Value :=
+  match Json.aggregate? name (vals.toList.map fun vs => vs.zip flags) with
+  | some (.ok v) => pure v
+  | some (.error e) => throw e
+  | none => err s!"no such function: {name}"
 
 partial def callFn (q : QEnv) (n : Name) (args : List Expr) (_distinct : Bool) : M Value := do
   let vs ← args.mapM (evalExpr q)
-  scalarFn n vs (args.map fun a => exprColl q.env a)
+  -- the library modules (JSON first: it needs the subtype of each argument)
+  let lift (r : Except Err Value) : M Value := match r with
+    | .ok v => pure v
+    | .error e => throw e
+  match Json.scalar? n.toLower (vs.zip (args.map Json.exprIsJson)) with
+  | some r => lift r
+  | none =>
+  match Printf.scalar? n.toLower vs with
+  | some r => lift r
+  | none =>
+  match DateTime.scalar? {} n.toLower vs with
+  | some r => lift r
+  | none => scalarFn n vs (args.map fun a => exprColl q.env a)
 
 /-- Scalar functions. -/
 partial def scalarFn (n : Name) (vs : List Value) (colls : List (Option (Coll × Bool))) : M Value := do
@@ -460,7 +478,9 @@ partial def scalarFn (n : Name) (vs : List Value) (colls : List (Option (Coll ×
     return iifPick vs
   | "quote" =>
     if nargs != 1 then wrong
-    return .ofString (quoteValue a0)
+    match a0 with
+    | .real r => return .ofString ((Printf.quoteReal? r).getD (quoteValue a0))
+    | _ => return .ofString (quoteValue a0)
   | "hex" =>
     if nargs != 1 then wrong
     return .ofString (hexOf (textOf a0))
@@ -549,7 +569,7 @@ partial def scalarFn (n : Name) (vs : List Value) (colls : List (Option (Coll ×
     if nargs == 2 && a1.isNull then return .null
     let digits : Int := if nargs == 2 then a1.numeric.toInt else 0
     let digits := if digits > 30 then 30 else if digits < 0 then 0 else digits
-    return .real (roundTo a0.toReal digits)
+    return .real ((Printf.round? a0.toReal digits).getD (roundTo a0.toReal digits))
   | "sign" =>
     if nargs != 1 then wrong
     match mathArg a0 with
@@ -759,7 +779,7 @@ partial def evalFrom (q : QEnv) : FromItem → M (Array Src × Array (Array Cur)
   | .tableFn sch n args alias => do
     let _ := sch
     let vs ← args.mapM (evalExpr q)
-    let (cols, rows) ← tableFunction n vs
+    let (cols, rows) ← tableFunction n (vs.zip (args.map Json.exprIsJson))
     return (#[metaSrc (alias.getD n) cols], rows.mapIdx fun i r => #[some ⟨i + 1, r⟩])
   | .join l kind natural r on usingCols => do
     let (ls, lrows) ← evalFrom q l
@@ -806,7 +826,8 @@ partial def evalFrom (q : QEnv) : FromItem → M (Array Src × Array (Array Cur)
     return (srcs'', out)
 
 /-- Table-valued functions. -/
-partial def tableFunction (n : Name) (args : List Value) : M (Array ColMeta × Array (Array Value)) := do
+partial def tableFunction (n : Name) (argsJ : List (Value × Bool)) : M (Array ColMeta × Array (Array Value)) := do
+  let args := argsJ.map (·.1)
   match n.toLower with
   | "generate_series" =>
     let start := (args[0]?.getD (Value.int 0)).numeric.toInt
@@ -821,7 +842,12 @@ partial def tableFunction (n : Name) (args : List Value) : M (Array ColMeta × A
       v := v + step; fuel := fuel - 1
     let cols : Array ColMeta := #["value", "start", "stop", "step"].map fun c => ⟨c, none, .binary⟩
     return (cols, rows)
-  | _ => err s!"no such table: {n}"
+  | _ =>
+    match Json.tableFn? n.toLower argsJ with
+    | some (.ok (cols, rows)) =>
+      return (cols.toArray.map fun c => ⟨c, none, .binary⟩, rows.toArray.map (·.toArray))
+    | some (.error e) => throw e
+    | none => err s!"no such table: {n}"
 
 -- SELECT
 
