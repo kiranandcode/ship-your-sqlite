@@ -43,6 +43,8 @@ structure World where
   clock : Nat := 0
   /-- `exit` was called with this status -/
   exited : Option Int := none
+  /-- the static `struct tm` `localtime` returns (allocated on first use) -/
+  tmBlock : Option Block := none
   /-- variadic activations: the block of one of the callee's locals ↦ the block
       holding its variadic arguments (8-byte slots), see `Run.Runner` -/
   va : List (Block × Block) := []
@@ -199,6 +201,30 @@ def binaryMath : String → Option (_root_.Float → _root_.Float → _root_.Flo
   | "pow" => some Float.pow | "atan2" => some Float.atan2 | "fmod" => some fmod
   | _ => none
 
+/-- The broken-down UTC time of `t` seconds since the epoch, as glibc's
+    `struct tm` fields (sec, min, hour, mday, mon, year-1900, wday, yday, isdst);
+    `none` when the year does not fit in an `int` (glibc returns NULL). -/
+def utcBrokenDown (t : Int) : Option (List Int) :=
+  let days := t / 86400
+  let secs := t % 86400
+  -- civil_from_days (H. Hinnant)
+  let z := days + 719468
+  let era := (if z ≥ 0 then z else z - 146096) / 146097
+  let doe := z - era * 146097
+  let yoe := (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+  let y := yoe + era * 400
+  let doy := doe - (365 * yoe + yoe / 4 - yoe / 100)
+  let mp := (5 * doy + 2) / 153
+  let d := doy - (153 * mp + 2) / 5 + 1
+  let m := if mp < 10 then mp + 3 else mp - 9
+  let y := if m ≤ 2 then y + 1 else y
+  let leap := (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+  let cum : List Int := [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334]
+  let yday := cum[(m - 1).toNat]! + d - 1 + (if leap && m > 2 then 1 else 0)
+  let wday := ((days + 4) % 7 + 7) % 7
+  if y - 1900 > 2147483647 || y - 1900 < -2147483648 then none
+  else some [secs % 60, (secs / 60) % 60, secs / 3600, d, m - 1, y - 1900, wday, yday, 0]
+
 /-- The external functions, by name. `none`: not modelled. -/
 def callExternal (w : World) (name : String) (args : List Val) (m : Mem) :
     Option (ExtM ExtOut) :=
@@ -320,6 +346,27 @@ def callExternal (w : World) (name : String) (args : List Val) (m : Mem) :
       let (b, o) ← argPtr buf; let n ← argNat n
       if n < 2 then pure (failWith w m 34 (sizeV 0)) else
       ok buf (← storeBytes m b o ['/'.toUInt8, 0])
+  -- localtime: the time zone is UTC (as in the semantics, Sql/DateTime.lean);
+  -- glibc's x86-64 struct tm: nine ints, then tm_gmtoff and tm_zone (56 bytes)
+  | "localtime", [tp] => some do
+      let (b, o) ← argPtr tp
+      let t ← match Mem.load .Mint64 m b o with
+        | some (.Vlong n) => pure (Integers.Int64.signed n)
+        | _ => throw (.ub "localtime: bad time_t")
+      match utcBrokenDown t with
+      | none => ok (sizeV 0)
+      | some fields =>
+        let (w1, tb, m1) := match w.tmBlock with
+          | some tb => (w, tb, m)
+          | none => let (m1, tb) := Mem.alloc m 0 56; ({ w with tmBlock := some tb }, tb, m1)
+        let mut mm := m1
+        for (v, i) in fields.zipIdx do
+          match Mem.store .Mint32 mm tb (4 * i) (int32 v) with
+          | some m' => mm := m'
+          | none => throw (.ub "localtime: store")
+        let some m2 := Mem.store .Mint64 mm tb 40 (int64 0) | throw (.ub "localtime: store")
+        let some m3 := Mem.store .Mint64 m2 tb 48 (int64 0) | throw (.ub "localtime: store")
+        ok (.Vptr tb Integers.Ptrofs.zero) m3 w1
   | "exit", [c] => some do
       ok .Vundef (w' := { w with exited := some (← argInt c) })
   -- libm: delegated to the host's libm through Lean's `Float` (the same glibc the native

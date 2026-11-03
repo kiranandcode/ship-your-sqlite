@@ -160,10 +160,102 @@ partial def fromRefs : FromItem → List (Option Name × Name)
   | _ => []
 end
 
+/-! ### sum(), total(), avg(): SQLite's SumCtx (integer sum until a REAL or an
+overflow, then Kahan-Babuska-Neumaier compensated summation; sqlite3.c sumStep) -/
+
+structure SumCtx where
+  rSum : Float := 0.0
+  rErr : Float := 0.0
+  iSum : Int := 0
+  cnt : Int := 0
+  approx : Bool := false
+  ovrfl : Bool := false
+
+def SumCtx.kbn (p : SumCtx) (r : Float) : SumCtx :=
+  let s := p.rSum
+  let t := s + r
+  let e := if s.abs > r.abs then p.rErr + ((s - t) + r) else p.rErr + ((r - t) + s)
+  { p with rSum := t, rErr := e }
+
+def big52 : Int := 4503599627370496
+
+def SumCtx.kbnInt (p : SumCtx) (i : Int) : SumCtx :=
+  if i ≤ -big52 || i ≥ big52 then
+    let sm := i.tmod 16384
+    (p.kbn (intToReal (i - sm))).kbn (intToReal sm)
+  else p.kbn (intToReal i)
+
+def SumCtx.init (p : SumCtx) (i : Int) : SumCtx :=
+  if i ≤ -big52 || i ≥ big52 then
+    let sm := i.tmod 16384
+    { p with rSum := intToReal (i - sm), rErr := intToReal sm }
+  else { p with rSum := intToReal i, rErr := 0.0 }
+
+/-- sqlite3_value_numeric_type: a text is an integer only if all of it reads as one. -/
+def numericForSum (v : Value) : Value :=
+  match v with
+  | .text t | .blob t => match numericOfText t false with
+    | some (.int i) => .int i
+    | _ => .real v.toReal
+  | w => w
+
+def SumCtx.step (p : SumCtx) (v : Value) : SumCtx :=
+  match numericForSum v with
+  | .null => p
+  | nv =>
+    let p := { p with cnt := p.cnt + 1 }
+    if !p.approx then
+      match nv with
+      | .int i =>
+        if inI64 (p.iSum + i) then { p with iSum := p.iSum + i }
+        else ({ (p.init p.iSum) with ovrfl := true, approx := true }).kbnInt i
+      | w => ({ (p.init p.iSum) with approx := true }).kbn w.toReal
+    else
+      match nv with
+      | .int i => p.kbnInt i
+      | w => ({ p with ovrfl := false }).kbn w.toReal
+
+/-- `sumInverse`: a row leaves a window frame. -/
+def SumCtx.inverse (p : SumCtx) (v : Value) : SumCtx :=
+  match numericForSum v with
+  | .null => p
+  | nv =>
+    let p := { p with cnt := p.cnt - 1 }
+    let (p, done) := if !p.approx then
+        match nv with
+        | .int i => if inI64 (p.iSum - i) then ({ p with iSum := p.iSum - i }, true)
+                    else ({ (p.init p.iSum) with ovrfl := true, approx := true }, false)
+        | _ => ({ (p.init p.iSum) with ovrfl := true, approx := true }, false)
+      else (p, false)
+    if done then p else
+    match nv with
+    | .int i => if i != minI64 then p.kbnInt (-i) else (p.kbnInt maxI64).kbnInt 1
+    | w => p.kbn (-w.toReal)
+
+def isOverflow (x : Float) : Bool := x.isInf || x.isNaN
+
+/-- The REAL result (sum with approx, total, avg's numerator). -/
+def SumCtx.real (p : SumCtx) : Float := if isOverflow p.rErr then p.rSum else p.rSum + p.rErr
+
+def SumCtx.finish (p : SumCtx) : Float := if p.approx then p.real else intToReal p.iSum
+
 /-- SQLITE_LIMIT_LENGTH (SQLITE_MAX_LENGTH of the default build) -/
 def maxLength : Int := 1000000000
 
+/-- A TEXT read through `sqlite3_value_text` as a C string: up to its first NUL. -/
+def cstrOf (b : ByteArray) : ByteArray := ⟨(b.data.toList.takeWhile (· != 0)).toArray⟩
+
+/-- quote() of a text: single quotes doubled. -/
+def quoteText (b : ByteArray) : ByteArray :=
+  ByteArray.mk (#[39] ++ (b.data.foldl (fun acc c => if c == 39 then (acc.push 39).push 39 else acc.push c) #[]) ++ #[39])
+
 def windowParamBase : Nat := 1000000000
+
+/-- The arity rules of `pragma function_list` for the lazy built-ins. -/
+def checkArity (n : Name) (k : Nat) : M Unit := do
+  let low := n.toLower
+  let ok := if low == "ifnull" then k == 2 else k ≥ 2
+  if !ok then err s!"wrong number of arguments to function {n}()"
 
 /-- Replace each window-function call (outside subqueries) by a numbered
     parameter; returns the rewritten expressions and the calls in order. -/
@@ -349,8 +441,12 @@ partial def evalExpr (q : QEnv) (e : Expr) : M Value := do
       | none => pure none
     if s.isNull || p.isNull then return .null
     if let some ev := es then if ev.isNull then return .null
+    -- patternCompare reads NUL-terminated strings
+    let cstr (b : ByteArray) : ByteArray := ⟨(b.data.toList.takeWhile (· != 0)).toArray⟩
+    let ptxt := cstr (textOf p)
+    let stxt := cstr (textOf s)
     let r ← match op with
-      | .glob => pure (globMatch (utf8Chars (textOf p)) (utf8Chars (textOf s)))
+      | .glob => pure (globMatch (utf8Chars ptxt) (utf8Chars stxt))
       | .like =>
         let escC ← match es with
           | some ev =>
@@ -358,7 +454,7 @@ partial def evalExpr (q : QEnv) (e : Expr) : M Value := do
             if c.length != 1 then err "ESCAPE expression must be a single character"
             pure c.head?
           | none => pure none
-        pure (likeMatch (utf8Chars (textOf p)) (utf8Chars (textOf s)) escC
+        pure (likeMatch (utf8Chars ptxt) (utf8Chars stxt) escC
           (!(← getDb).pragmas.caseSensitiveLike))
       | .regexp => err "no such function: regexp"
       | .match_ => err "unable to use function MATCH in the requested context"
@@ -470,35 +566,16 @@ partial def aggFinish (q : QEnv) (n : Name) (star : Bool) (args : List Expr) (co
     return .int (arg1.filter (!·.isNull)).size
   | "sum" | "total" | "avg" =>
     if args.length != 1 then err s!"wrong number of arguments to function {n}()"
-    let nn := arg1.filter (!·.isNull)
-    -- integer sum while all are integers and no overflow
-    let mut isum : Int := 0
-    let mut allInt := true
-    let mut overflow := false
-    let mut rsum : Float := 0.0
-    for v in nn do
-      -- sqlite3_value_numeric_type: a text is an integer only if all of it reads as one
-      let nv : Value := match v with
-        | .text t | .blob t => match numericOfText t false with
-          | some (.int i) => .int i
-          | _ => .real v.toReal
-        | w => w
-      match nv with
-      | .int i =>
-        if allInt then
-          isum := isum + i
-          if !inI64 isum then overflow := true
-        rsum := rsum + intToReal i
-      | w => allInt := false; rsum := rsum + w.toReal
+    let st := arg1.foldl SumCtx.step {}
     if name == "sum" then
-      if nn.isEmpty then return .null
-      if allInt then
-        if overflow then err "integer overflow"
-        return .int isum
-      return .real rsum
-    if name == "total" then return .real (if allInt then intToReal isum else rsum)
-    if nn.isEmpty then return .null
-    return .real ((if allInt then intToReal isum else rsum) / intToReal nn.size)
+      if st.cnt == 0 then return .null
+      if st.approx then
+        if st.ovrfl then err "integer overflow"
+        return .real st.real
+      return .int st.iSum
+    if name == "total" then return .real st.finish
+    if st.cnt == 0 then return .null
+    return .real (st.finish / intToReal st.cnt)
   | "min" | "max" =>
     let nn := arg1.filter (!·.isNull)
     if nn.isEmpty then return .null
@@ -557,6 +634,23 @@ partial def callFn (q : QEnv) (n : Name) (args : List Expr) (distinct : Bool) : 
     two-or-more-argument min/max pass on the subtype of the argument they
     return (checked against SQLite by the JSON lane, tests/sem/json_subtype.sql). -/
 partial def callFnST (q : QEnv) (n : Name) (args : List Expr) (_distinct : Bool) : M (Value × Bool) := do
+  -- coalesce/ifnull/iif are compiled to jumps: later arguments are evaluated
+  -- only if needed
+  let low := n.toLower
+  if low == "coalesce" || low == "ifnull" then
+    checkArity n args.length
+    for a in args do
+      let (v, f) ← evalExprST q a
+      if !v.isNull then return (v, f)
+    return (.null, false)
+  if low == "iif" || low == "if" then
+    checkArity n args.length
+    let rec goIif : List Expr → M (Value × Bool)
+      | c :: v :: rest => do
+        if truth (← evalExpr q c) == some true then evalExprST q v else goIif rest
+      | [e] => evalExprST q e
+      | [] => pure (.null, false)
+    return ← goIif args
   let evs ← args.mapM (evalExprST q)
   let vs := evs.map (·.1)
   let flags := evs.map (·.2)
@@ -643,7 +737,8 @@ partial def scalarFn (n : Name) (vs : List Value) (colls : List (Option (Coll ×
     match a0 with
     | .null => return .null
     | .blob b => return .int b.size
-    | .text s => return .int (utf8Len s)
+    -- a TEXT is read as a C string (up to its first NUL)
+    | .text s => return .int (utf8Len (cstrOf s))
     | v => return .int (utf8Len (textOf v))
   | "octet_length" =>
     if nargs != 1 then wrong
@@ -676,6 +771,7 @@ partial def scalarFn (n : Name) (vs : List Value) (colls : List (Option (Coll ×
     if nargs != 1 then wrong
     match a0 with
     | .real r => return .ofString ((Printf.quoteReal? r).getD (quoteValue a0))
+    | .text t => return .text (quoteText (cstrOf t))
     | _ => return .ofString (quoteValue a0)
   | "hex" =>
     if nargs != 1 then wrong
@@ -705,10 +801,10 @@ partial def scalarFn (n : Name) (vs : List Value) (colls : List (Option (Coll ×
     return .text (String.ofList cs).toUTF8
   | "unicode" =>
     if nargs != 1 then wrong
-    if a0.isNull then return .null
-    match (String.fromUTF8? (textOf a0)).bind (·.toList.head?) with
-    | some c => return .int c.toNat
-    | none => return .null
+    -- the first code point of the text (read up to its first NUL), as sqlite3Utf8Read
+    let bs := (textOf a0).toList.takeWhile (· != 0)
+    if a0.isNull || bs.isEmpty then return .null
+    return .int (utf8Read bs).1
   | "instr" =>
     if nargs != 2 then wrong
     if a0.isNull || a1.isNull then return .null
@@ -735,7 +831,7 @@ partial def scalarFn (n : Name) (vs : List Value) (colls : List (Option (Coll ×
       let units := b.toList.map ([·])
       return .blob ⟨((substrOf units y z).flatten).toArray⟩
     | _ =>
-      let units := utf8Chars (textOf a0)
+      let units := utf8Chars (cstrOf (textOf a0))
       return .text ⟨((substrOf units y z).flatten).toArray⟩
   | "trim" | "ltrim" | "rtrim" =>
     if nargs < 1 || nargs > 2 then wrong
@@ -831,8 +927,9 @@ partial def scalarFn (n : Name) (vs : List Value) (colls : List (Option (Coll ×
   | "glob" | "like" =>
     if nargs < 2 || nargs > 3 then wrong
     if a0.isNull || a1.isNull then return .null
-    let r := if name == "glob" then globMatch (utf8Chars (textOf a0)) (utf8Chars (textOf a1))
-      else likeMatch (utf8Chars (textOf a0)) (utf8Chars (textOf a1))
+    let cstr (b : ByteArray) : ByteArray := ⟨(b.data.toList.takeWhile (· != 0)).toArray⟩
+    let r := if name == "glob" then globMatch (utf8Chars (cstr (textOf a0))) (utf8Chars (cstr (textOf a1)))
+      else likeMatch (utf8Chars (cstr (textOf a0))) (utf8Chars (cstr (textOf a1)))
         (if nargs == 3 then (utf8Chars (textOf vs[2]!)).head? else none) true
     return .int (if r then 1 else 0)
   | "pi" => if nargs != 0 then wrong else return .real 3.141592653589793
@@ -1483,13 +1580,13 @@ partial def runCore (q : QEnv) (core : SelectCore) (orderBy : List OrderTerm) :
       let gcolls := groupBy.map fun g => ((exprColl qm.env g).map (·.1)).getD .binary
       if !groupBy.isEmpty then groups := stableSort (fun a b => lexCompare gcolls [] a.1 b.1) groups
       -- the row bare columns are read from: the min/max row if there is exactly one
-      -- min()/max() aggregate, else the last row of the group
+      -- min()/max() aggregate, else the first row of the group (SQLite 3.54)
       let minmax := exprs.filterMap fun e => match e with
         | .call n false [a] false [] none none =>
           if nameEq n "min" || nameEq n "max" then some (nameEq n "min", a) else none
         | _ => none
       for (_, grp) in groups do
-        let mut rep : Array Cur := grp.back?.getD (Array.replicate srcs.size none)
+        let mut rep : Array Cur := grp[0]?.getD (Array.replicate srcs.size none)
         if minmax.length == 1 && !grp.isEmpty then
           let (isMin, a) := minmax[0]!
           let coll := ((exprColl qm.env a).map (·.1)).getD .binary
@@ -1558,16 +1655,40 @@ partial def runSelect (q : QEnv) (sel : Select) : M (Array ColMeta × Array (Arr
       pure (cols, rows.map (·.1))
     else do
       let (cols, rows0) ← runCore q first []
-      let colls := cols.toList.map (·.coll)
-      let mut acc := rows0.map (·.1)
-      for (op, core) in rest do
+      -- multiSelectCollSeq: each column's collation is that of the leftmost
+      -- SELECT that has one for it
+      let mutable_cores ← rest.mapM fun (op, core) => do
         let (cs, rs) ← runCore q core []
+        pure (op, cs, rs)
+      let colls := (List.range cols.size).map fun i =>
+        let all := (cols :: mutable_cores.map (·.2.1)).filterMap fun cs => cs[i]?.map (·.coll)
+        (all.find? (· != .binary)).getD .binary
+      let cols := cols.mapIdx fun i c => { c with coll := colls[i]! }
+      let mut acc := rows0.map (·.1)
+      for (op, cs, rs) in mutable_cores do
         if cs.size != cols.size then
           err s!"SELECTs to the left and right of {match op with | .union => "UNION" | .unionAll => "UNION ALL" | .intersect => "INTERSECT" | .except => "EXCEPT"} do not have the same number of result columns"
         let rs := rs.map (·.1)
         match op with
         | .unionAll => acc := acc ++ rs
-        | .union => acc := stableSort (lexCompare colls []) (dedupe colls (acc ++ rs))
+        | .union =>
+          -- SQLite's union index: the left side's duplicates keep the first row;
+          -- a row of the right side replaces an equal row already there
+          let mut idx : Std.HashMap String Nat := {}
+          let mut out : Array (Array Value) := #[]
+          for r in acc do
+            let k := canonKey colls r
+            if !idx.contains k then
+              idx := idx.insert k out.size
+              out := out.push r
+          for r in rs do
+            let k := canonKey colls r
+            match idx.get? k with
+            | some i => out := out.set! i r
+            | none =>
+              idx := idx.insert k out.size
+              out := out.push r
+          acc := stableSort (lexCompare colls []) out
         | .intersect =>
           let rk : Std.HashSet String := rs.foldl (fun st r => st.insert (canonKey colls r)) {}
           acc := stableSort (lexCompare colls []) (dedupe colls (acc.filter fun r => rk.contains (canonKey colls r)))

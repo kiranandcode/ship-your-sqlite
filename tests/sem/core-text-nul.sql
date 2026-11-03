@@ -1,0 +1,2 @@
+create table t(v); insert into t values(cast(x'61006263' as text));
+select length(v), hex(substr(v,1)), hex(substr(v,2)), instr(v,'b'), hex(trim(v,'a')), hex(ltrim(v,'a')), hex(replace(v,'b','X')), hex(upper(v)), hex(lower(v)), quote(v), hex(v||'z'), octet_length(v), hex(printf('%s', v)), unicode(v), v like 'a', hex(concat(v, 'z')), hex(rtrim(v)), hex(trim(v)), char(97,0,98)=v, typeof(v), hex(quote(v)), hex(substring(v, 1, 3)), json_quote(v), length(v||'x') from t;

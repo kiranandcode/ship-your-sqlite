@@ -84,18 +84,20 @@ def boolV : Option Bool → Value
 
 /-! ## LIKE and GLOB (patternCompare) -/
 
-/-- UTF-8 characters of a byte string (as SQLite reads them: a lead byte and its
-    continuation bytes). -/
-def utf8Chars (b : ByteArray) : List (List UInt8) := Id.run do
-  let mut out := #[]
-  let mut cur : Array UInt8 := #[]
-  for c in b.toList do
-    if c &&& 0xC0 == 0x80 && !cur.isEmpty then cur := cur.push c
-    else
-      if !cur.isEmpty then out := out.push cur.toList
-      cur := #[c]
-  if !cur.isEmpty then out := out.push cur.toList
-  return out.toList
+/-- The characters of a byte string as SQLite steps over them
+    (`SQLITE_SKIP_UTF8`): a byte ≥ 0xC0 takes the continuation bytes after it;
+    any other byte is one character. -/
+def utf8Chars (b : ByteArray) : List (List UInt8) :=
+  let rec go : List UInt8 → List (List UInt8)
+    | [] => []
+    | c :: rest =>
+      if c ≥ 0xC0 then
+        let cont := rest.takeWhile (· &&& 0xC0 == 0x80)
+        (c :: cont) :: go (rest.drop cont.length)
+      else [c] :: go rest
+  termination_by l => l.length
+  decreasing_by all_goals simp_wf; all_goals (try simp [List.length_drop]); all_goals omega
+  go b.toList
 
 def charLower (c : List UInt8) : List UInt8 := c.map lowerB
 

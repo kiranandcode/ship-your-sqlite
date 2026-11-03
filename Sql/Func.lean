@@ -9,7 +9,7 @@ namespace Sql
 
 def textOf (v : Value) : ByteArray := v.toText?.getD .empty
 
-def utf8Len (b : ByteArray) : Nat := (b.toList.filter fun c => c &&& 0xC0 != 0x80).length
+def utf8Len (b : ByteArray) : Nat := (utf8Chars b).length
 
 def hexOf (b : ByteArray) : String :=
   let d := "0123456789ABCDEF".toList

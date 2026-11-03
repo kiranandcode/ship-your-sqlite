@@ -3,9 +3,11 @@
 output differs, with the schema statements and both outputs.
     experiments/fuzz/triage.py [N]"""
 import glob, os, subprocess, sys
+sys.stdout.reconfigure(line_buffering=True)
 os.environ['TZ'] = 'UTC'
 n = int(sys.argv[1]) if len(sys.argv) > 1 else 10
-for f in sorted(glob.glob('build/fuzz/s*.sql'))[:n]:
+D = sys.argv[2] if len(sys.argv) > 2 else 'build/fuzz'
+for f in sorted(glob.glob(D + '/s*.sql'))[:n]:
     stmts = [l for l in open(f, encoding='utf-8', errors='replace').read().split('\n') if l]
     setup = [s for s in stmts if not s.startswith('SELECT')]
     qs = [s for s in stmts if s.startswith('SELECT')]

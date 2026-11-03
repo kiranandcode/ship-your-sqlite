@@ -1,0 +1,1 @@
+select length(cast(x'80c3416180e282' as text)), hex(substr(cast(x'80c3416180e282' as text), 2, 2)), instr(cast(x'80c3416180' as text), 'a'), hex(trim(cast(x'2080c320' as text))), length(cast(x'610062' as text)), hex(substr(cast(x'610062' as text),3)), length(x'610062'), hex(upper(cast(x'e282ac61' as text))), hex(cast(x'ff' as text) || 'a'), quote(cast(x'c3a9' as text));

@@ -10,10 +10,6 @@ namespace Sql
 
 /-! ## Output in the driver's format -/
 
-def quoteText (b : ByteArray) : ByteArray :=
-  let q : UInt8 := 39
-  ByteArray.mk (#[q] ++ (b.data.foldl (fun acc c => if c == q then acc.push q |>.push q else acc.push c) #[]) ++ #[q])
-
 def renderValue : Value → ByteArray
   | .null => "NULL".toUTF8
   | .int i => intText i
@@ -263,7 +259,22 @@ def insertRow (tname : Name) (vals : Array Value) (rowidV : Option Value) (oc : 
         | some (Value.text n), some v => if nameEq (String.fromUTF8! n) t.name then some v.numeric.toInt else none
         | _, _ => none).getD 0
     | none => 0
-  let rid := if t.autoinc && rowidV.all (·.isNull) then max (maxRowid + 1) (seqOf db.main + 1) else rid
+  let auto := rowidV.all (·.isNull)
+  let rid := if t.autoinc && auto then max (maxRowid + 1) (seqOf db.main + 1) else rid
+  -- the next rowid does not fit: AUTOINCREMENT fails; otherwise SQLite picks a
+  -- random unused rowid (an unspecified choice; the executable takes one)
+  let rid ← if auto && rid > maxI64 then do
+      if t.autoinc then err "database or disk is full" 13
+      let c ← get
+      let mut k := c.db.prng
+      let mut cand : Int := 0
+      for _ in [0:100] do
+        k := k + 1
+        cand := ((k * 2862933555777941757 + 3037000493) % 2 ^ 63 : Nat)
+        if cand > 0 && !(t.rows.any (·.rowid == cand)) then break
+      set { c with db := { c.db with prng := k } }
+      pure cand
+    else pure rid
   if let some ci := t.rowidCol then vals := vals.set! ci (.int rid)
   let mut row ← withGenerated t { rowid := rid, vals }
   -- NOT NULL with conflict resolution
@@ -687,7 +698,6 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
     countChanges q n
     resultRows q (← currentTable tname) tname inserted ret
   | .update _ orC _ tname alias sets from_ wh ret _ _ _ =>
-    let _ := orC
     if ← viewWithTriggers tname then
       return ← updateView q tname sets wh
     let t ← currentTable tname
@@ -733,13 +743,29 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
       runTriggers q .before (.update (sets.flatMap (·.1))) tname (some old) (some newRow)
       let t ← currentTable tname
       checkRow t newRow
-      let others := t.rows.filter (·.rowid != old.rowid)
+      -- conflicts, resolved by UPDATE OR <oc> (or the constraint's own ON CONFLICT)
+      let oc := orC.getD .abort
+      let mut others := t.rows.filter (·.rowid != old.rowid)
+      let mut skip := false
+      let conflictErr (m : String) (code : Nat) : M Unit := do
+        if oc == .fail then
+          countChanges q updated.size
+          throw { code, msg := m, keep := true }
+        err m code
       if others.any (·.rowid == newRowid) && !t.withoutRowid then
         let cname := match t.rowidCol with | some ci => t.cols[ci]!.name | none => "rowid"
-        err s!"UNIQUE constraint failed: {t.name}.{cname}" SQLITE_CONSTRAINT_PRIMARYKEY
-      for (k, _) in allUniques (← getDb) t do
-        if others.any (fun r => keyEq k (keyOf r k) (keyOf newRow k)) then
-          err (uniqueMsg t k) (if k.isPk then SQLITE_CONSTRAINT_PRIMARYKEY else SQLITE_CONSTRAINT_UNIQUE)
+        match oc with
+        | .replace => others := others.filter (·.rowid != newRowid)
+        | .ignore => skip := true
+        | _ => conflictErr s!"UNIQUE constraint failed: {t.name}.{cname}" SQLITE_CONSTRAINT_PRIMARYKEY
+      if !skip then
+        for (k, _) in allUniques (← getDb) t do
+          if others.any (fun r => keyEq k (keyOf r k) (keyOf newRow k)) then
+            match k.onConflict.getD oc with
+            | .replace => others := others.filter (fun r => !keyEq k (keyOf r k) (keyOf newRow k))
+            | .ignore => skip := true
+            | _ => conflictErr (uniqueMsg t k) (if k.isPk then SQLITE_CONSTRAINT_PRIMARYKEY else SQLITE_CONSTRAINT_UNIQUE)
+      if skip then continue
       modifyMain fun s => s.setTable { t with rows := sortRows t (others.push newRow) }
       fkOnParentUpdate tname old newRow
       updated := updated.push newRow
