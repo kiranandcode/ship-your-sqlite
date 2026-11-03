@@ -87,16 +87,18 @@ def ofDigits (ds : List Nat) : Nat := ds.foldl (fun a d => a * 10 + d) 0
 
 /-- Add one at position `j` (0-based) of a digit list, carrying left.
     Returns the digits and whether a new leading digit appeared. -/
-def incAt (z : Array Nat) (j : Nat) : Array Nat × Bool := Id.run do
-  let mut z := z
-  let mut j := j
-  repeat
-    let d := z[j]! + 1
-    if d ≤ 9 then return (z.set! j d, false)
-    z := z.set! j 0
-    if j == 0 then return (#[1] ++ z, true)
-    j := j - 1
-  return (z, false)
+def incAt (z : Array Nat) (j : Nat) : Array Nat × Bool :=
+  let d := z[j]! + 1
+  if d ≤ 9 then (z.set! j d, false) else
+  let z := z.set! j 0
+  match j with
+  | 0 => (#[1] ++ z, true)
+  | j + 1 => incAt z j
+
+/-- The length of the prefix `z[0..j)` without its trailing run of digit `d`. -/
+def trimBack (z : Array Nat) (d : Nat) : Nat → Nat
+  | 0 => 0
+  | j + 1 => if z[j]! == d then trimBack z d j else j + 1
 
 /-- SQLite's text of a REAL (`%!.17g`): `"Inf"`, `"-Inf"`, `"0.0"`, `"1.5"`,
     `"1.0e-05"`, `"1.2345678901234568e+17"`. NaN never reaches here (SQLite
@@ -117,13 +119,11 @@ def render (r : Float) : String :=
     let iRound : Nat := Id.run do
       let mut iRound := 17
       if z0[15]! == 9 && z0[14]! == 9 then
-        let mut jj := 14
-        while jj > 0 && z0[jj - 1]! == 9 do jj := jj - 1
+        let jj := trimBack z0 9 14
         let v2 := if jj == 0 then 1 else ofDigits (z0.toList.take jj) + 1
         if ar == ofDecimal v2 (exp + n - jj) then iRound := jj + 1
       else if iDP0 ≥ n || (z0[15]! == 0 && z0[14]! == 0 && z0[13]! == 0) then
-        let mut jj := 13
-        while jj > 0 && z0[jj - 1]! == 0 do jj := jj - 1
+        let jj := trimBack z0 0 13
         let v2 := ofDigits (z0.toList.take jj)
         if ar == ofDecimal v2 (exp + n - jj) then iRound := jj + 1
       return iRound
