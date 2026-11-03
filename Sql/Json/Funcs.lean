@@ -29,7 +29,10 @@ structure Cache where
 
 abbrev FM := StateT Cache (Except Err)
 
-def fail {α} (msg : String) : FM α := throw ⟨SQLITE_ERROR, msg⟩
+/-- An SQLITE_ERROR with a message. -/
+def mkErr (m : String) : Err := { code := SQLITE_ERROR, msg := m }
+
+def fail {α} (msg : String) : FM α := throw (mkErr msg)
 
 def lossy (b : ByteArray) : String :=
   match String.fromUTF8? b with
@@ -223,13 +226,13 @@ def unescapeText (z : ByteArray) : ByteArray := Id.run do
 /-- `jsonReturnFromBlob`: the SQL value of node `i`; containers as JSON
     text (`mode` 1) or JSONB (`mode` 2). -/
 def returnFromBlob (p : JP) (i : Nat) (mode : Nat) : Except Err Value := do
-  let mal : Except Err Value := throw ⟨SQLITE_ERROR, "malformed JSON"⟩
+  let mal : Except Err Value := throw (mkErr "malformed JSON")
   let (n, sz) := p.psize i
   if n == 0 then return ← mal
   let toDouble (s : ByteArray) : Except Err Value :=
     match atofWhole (cstr s) with
     | some r => pure (.real r)
-    | none => throw ⟨SQLITE_ERROR, "malformed JSON"⟩
+    | none => throw (mkErr "malformed JSON")
   match (p.typ i).toNat with
   | 0 => if sz != 0 then mal else pure .null
   | 1 => if sz != 0 then mal else pure (.int 1)
@@ -256,7 +259,7 @@ def returnFromBlob (p : JP) (i : Nat) (mode : Nat) : Except Err Value := do
     else
       let (_, s, _) := blobToText { b := sub p.b i (n+sz) } 0 {}
       if s.err == 0 then pure (.text s.buf)
-      else if s.err &&& eTOODEEP != 0 then throw ⟨SQLITE_ERROR, "JSON nested too deep"⟩
+      else if s.err &&& eTOODEEP != 0 then throw (mkErr "JSON nested too deep")
       else mal
   | _ => mal
 where
@@ -644,7 +647,7 @@ def Cur.pathName (c : Cur) : ByteArray :=
 
 def Cur.next (c : Cur) : Except Err Cur := do
   let mut c := c
-  let mal : Except Err Cur := throw ⟨SQLITE_ERROR, "malformed JSON"⟩
+  let mal : Except Err Cur := throw (mkErr "malformed JSON")
   if c.recursive then
     let i := c.skipLabel
     let x := c.p.typ i
@@ -718,7 +721,7 @@ def eachColumns : List String := ["key", "value", "type", "atom", "id", "parent"
 /-- `jsonEachFilter` and the scan. Rows of all ten columns, with the
     subtype of `value`. -/
 def eachRows (name : String) (args : Args) : Except Err (List (List Value × Bool)) := do
-  let err {α} (m : String) : Except Err α := throw ⟨SQLITE_ERROR, m⟩
+  let err {α} (m : String) : Except Err α := throw (mkErr m)
   let rec_ := name.endsWith "_tree"
   let mode := if name.startsWith "jsonb" then 2 else 1
   if args.length > 2 then err s!"too many arguments on {name}() - max 2"
@@ -766,6 +769,6 @@ where
   parseText (z : ByteArray) : Except Err (JP × Option ByteArray) :=
     match convertText (cstr z) with
     | .ok st => pure ({ b := st.out, nonstd := st.nonstd }, some z)
-    | .error _ => throw ⟨SQLITE_ERROR, "malformed JSON"⟩
+    | .error _ => throw (mkErr "malformed JSON")
 
 end Sql.Json
