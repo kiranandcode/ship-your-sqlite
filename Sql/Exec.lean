@@ -254,7 +254,22 @@ def insertRow (tname : Name) (vals : Array Value) (rowidV : Option Value) (oc : 
         | some (Value.text n), some v => if nameEq (String.fromUTF8! n) t.name then some v.numeric.toInt else none
         | _, _ => none).getD 0
     | none => 0
-  let rid := if t.autoinc && rowidV.all (·.isNull) then max (maxRowid + 1) (seqOf db.main + 1) else rid
+  let auto := rowidV.all (·.isNull)
+  let rid := if t.autoinc && auto then max (maxRowid + 1) (seqOf db.main + 1) else rid
+  -- the next rowid does not fit: AUTOINCREMENT fails; otherwise SQLite picks a
+  -- random unused rowid (an unspecified choice; the executable takes one)
+  let rid ← if auto && rid > maxI64 then do
+      if t.autoinc then err "database or disk is full" 13
+      let c ← get
+      let mut k := c.db.prng
+      let mut cand : Int := 0
+      for _ in [0:100] do
+        k := k + 1
+        cand := ((k * 2862933555777941757 + 3037000493) % 2 ^ 63 : Nat)
+        if cand > 0 && !(t.rows.any (·.rowid == cand)) then break
+      set { c with db := { c.db with prng := k } }
+      pure cand
+    else pure rid
   if let some ci := t.rowidCol then vals := vals.set! ci (.int rid)
   let mut row ← withGenerated t { rowid := rid, vals }
   -- NOT NULL with conflict resolution

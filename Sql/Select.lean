@@ -159,6 +159,85 @@ partial def fromRefs : FromItem → List (Option Name × Name)
   | _ => []
 end
 
+/-! ### sum(), total(), avg(): SQLite's SumCtx (integer sum until a REAL or an
+overflow, then Kahan-Babuska-Neumaier compensated summation; sqlite3.c sumStep) -/
+
+structure SumCtx where
+  rSum : Float := 0.0
+  rErr : Float := 0.0
+  iSum : Int := 0
+  cnt : Int := 0
+  approx : Bool := false
+  ovrfl : Bool := false
+
+def SumCtx.kbn (p : SumCtx) (r : Float) : SumCtx :=
+  let s := p.rSum
+  let t := s + r
+  let e := if s.abs > r.abs then p.rErr + ((s - t) + r) else p.rErr + ((r - t) + s)
+  { p with rSum := t, rErr := e }
+
+def big52 : Int := 4503599627370496
+
+def SumCtx.kbnInt (p : SumCtx) (i : Int) : SumCtx :=
+  if i ≤ -big52 || i ≥ big52 then
+    let sm := i.tmod 16384
+    (p.kbn (intToReal (i - sm))).kbn (intToReal sm)
+  else p.kbn (intToReal i)
+
+def SumCtx.init (p : SumCtx) (i : Int) : SumCtx :=
+  if i ≤ -big52 || i ≥ big52 then
+    let sm := i.tmod 16384
+    { p with rSum := intToReal (i - sm), rErr := intToReal sm }
+  else { p with rSum := intToReal i, rErr := 0.0 }
+
+/-- sqlite3_value_numeric_type: a text is an integer only if all of it reads as one. -/
+def numericForSum (v : Value) : Value :=
+  match v with
+  | .text t | .blob t => match numericOfText t false with
+    | some (.int i) => .int i
+    | _ => .real v.toReal
+  | w => w
+
+def SumCtx.step (p : SumCtx) (v : Value) : SumCtx :=
+  match numericForSum v with
+  | .null => p
+  | nv =>
+    let p := { p with cnt := p.cnt + 1 }
+    if !p.approx then
+      match nv with
+      | .int i =>
+        if inI64 (p.iSum + i) then { p with iSum := p.iSum + i }
+        else ({ (p.init p.iSum) with ovrfl := true, approx := true }).kbnInt i
+      | w => ({ (p.init p.iSum) with approx := true }).kbn w.toReal
+    else
+      match nv with
+      | .int i => p.kbnInt i
+      | w => ({ p with ovrfl := false }).kbn w.toReal
+
+/-- `sumInverse`: a row leaves a window frame. -/
+def SumCtx.inverse (p : SumCtx) (v : Value) : SumCtx :=
+  match numericForSum v with
+  | .null => p
+  | nv =>
+    let p := { p with cnt := p.cnt - 1 }
+    let (p, done) := if !p.approx then
+        match nv with
+        | .int i => if inI64 (p.iSum - i) then ({ p with iSum := p.iSum - i }, true)
+                    else ({ (p.init p.iSum) with ovrfl := true, approx := true }, false)
+        | _ => ({ (p.init p.iSum) with ovrfl := true, approx := true }, false)
+      else (p, false)
+    if done then p else
+    match nv with
+    | .int i => if i != minI64 then p.kbnInt (-i) else (p.kbnInt maxI64).kbnInt 1
+    | w => p.kbn (-w.toReal)
+
+def isOverflow (x : Float) : Bool := x.isInf || x.isNaN
+
+/-- The REAL result (sum with approx, total, avg's numerator). -/
+def SumCtx.real (p : SumCtx) : Float := if isOverflow p.rErr then p.rSum else p.rSum + p.rErr
+
+def SumCtx.finish (p : SumCtx) : Float := if p.approx then p.real else intToReal p.iSum
+
 /-- SQLITE_LIMIT_LENGTH (SQLITE_MAX_LENGTH of the default build) -/
 def maxLength : Int := 1000000000
 
@@ -469,35 +548,16 @@ partial def aggFinish (q : QEnv) (n : Name) (star : Bool) (args : List Expr) (co
     return .int (arg1.filter (!·.isNull)).size
   | "sum" | "total" | "avg" =>
     if args.length != 1 then err s!"wrong number of arguments to function {n}()"
-    let nn := arg1.filter (!·.isNull)
-    -- integer sum while all are integers and no overflow
-    let mut isum : Int := 0
-    let mut allInt := true
-    let mut overflow := false
-    let mut rsum : Float := 0.0
-    for v in nn do
-      -- sqlite3_value_numeric_type: a text is an integer only if all of it reads as one
-      let nv : Value := match v with
-        | .text t | .blob t => match numericOfText t false with
-          | some (.int i) => .int i
-          | _ => .real v.toReal
-        | w => w
-      match nv with
-      | .int i =>
-        if allInt then
-          isum := isum + i
-          if !inI64 isum then overflow := true
-        rsum := rsum + intToReal i
-      | w => allInt := false; rsum := rsum + w.toReal
+    let st := arg1.foldl SumCtx.step {}
     if name == "sum" then
-      if nn.isEmpty then return .null
-      if allInt then
-        if overflow then err "integer overflow"
-        return .int isum
-      return .real rsum
-    if name == "total" then return .real (if allInt then intToReal isum else rsum)
-    if nn.isEmpty then return .null
-    return .real ((if allInt then intToReal isum else rsum) / intToReal nn.size)
+      if st.cnt == 0 then return .null
+      if st.approx then
+        if st.ovrfl then err "integer overflow"
+        return .real st.real
+      return .int st.iSum
+    if name == "total" then return .real st.finish
+    if st.cnt == 0 then return .null
+    return .real (st.finish / intToReal st.cnt)
   | "min" | "max" =>
     let nn := arg1.filter (!·.isNull)
     if nn.isEmpty then return .null
