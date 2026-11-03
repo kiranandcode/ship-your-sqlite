@@ -1,0 +1,19 @@
+name = "ship-your-sqlite"
+# Lean 4.32.1 = Certora/clean's export/lean-toolchain. CCLib comes from the
+# pinned clean commit (BRIEF.md D2/D4) and is fetched by Lake into
+# .lake/packages; none of it is in this repository.
+defaultTargets = ["Run", "clight_run"]
+
+[[require]]
+name = "compcert-clight-lean"
+git = "https://github.com/Certora/clean.git"
+rev = "123f7f7767e215aceb4821f0d044336d78103ade"
+subDir = "export"
+
+[[lean_lib]]
+name = "Run"
+
+[[lean_exe]]
+name = "clight_run"
+root = "ClightRun"
+supportInterpreter = true
