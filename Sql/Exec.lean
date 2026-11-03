@@ -244,7 +244,10 @@ def insertRow (tname : Name) (vals : Array Value) (rowidV : Option Value) (oc : 
   for h : i in [0:t.cols.size] do
     vals := vals.set! i (← storeValue t i (vals[i]?.getD .null))
   -- rowid
-  let maxRowid : Int := t.rows.foldl (fun m r => max m r.rowid) 0
+  -- OP_NewRowid: one more than the largest rowid (which may be negative); 1 for an empty table
+  let maxRowid : Int := match t.rows.toList.map (·.rowid) with
+    | [] => 0
+    | r :: rs => rs.foldl max r
   let rid ← match rowidV with
     | some v =>
       let v' := applyAffinity .integer v
