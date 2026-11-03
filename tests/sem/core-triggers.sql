@@ -1,0 +1,11 @@
+create table t(a,b); insert into t values(1,2),(3,4);
+delete from t where a=1 limit 1;
+update t set a=5 order by a limit 1;
+create table log(x);
+create trigger bi before insert on t begin insert into log values('bi '||new.a); end;
+create trigger ai after insert on t begin insert into log values('ai '||new.a||' '||new.rowid); end;
+create trigger bu before update on t begin insert into log values('bu '||old.a||'>'||new.a); end;
+create trigger bd before delete on t begin insert into log values('bd '||old.a); end;
+insert into t values(7,8); update t set a=a+1 where a=7; delete from t where a=8; select * from log;
+create view v as select a, b from t; create trigger io instead of insert on v begin insert into t values(new.a*10, new.b); end; insert into v values(2,3); select * from t;
+update t set a=1 from (select 1) where a=20; select * from t;

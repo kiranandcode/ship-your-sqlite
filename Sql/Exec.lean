@@ -568,6 +568,8 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
           | _ => false) }
       return #[]
   | .insert _ orC _ tname _ cols src upserts ret =>
+    if ← viewWithTriggers tname then
+      return ← insertView q tname cols src
     let t ← currentTable tname
     let oc := orC.getD .abort
     let colIdx ← if cols.isEmpty then pure (List.range t.cols.size)
@@ -607,6 +609,14 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
           if let some d := t.cols[i].dflt then vals := vals.set! i (← evalExpr {} d)
       if let some ci := t.rowidCol then
         if given[ci]! then rowidV := some vals[ci]!
+      -- BEFORE INSERT triggers see NEW with the defaults (rowid -1 when it is not given)
+      let hasBefore := (← getDb).main.triggers.any fun tr => nameEq tr.table tname && tr.time == .before &&
+        match tr.event with | .insert => true | _ => false
+      if hasBefore then
+        let mut nvals := vals
+        for h : i in [0:t.cols.size] do nvals := nvals.set! i (← storeValue t i (vals[i]?.getD .null))
+        let rid := match rowidV.map (applyAffinity .integer) with | some (.int i) => i | _ => -1
+        runTriggers q .before .insert tname none (some ⟨rid, nvals⟩)
       -- UPSERT: a conflict on the target runs the DO clause instead
       let r? : Option Row ← try (insertRow tname vals rowidV (if upserts.isEmpty then oc else .abort))
         catch e => do
@@ -662,21 +672,30 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
     countChanges q n
     resultRows q (← currentTable tname) tname inserted ret
   | .update _ orC _ tname alias sets from_ wh ret _ _ _ =>
-    let _ := from_
     let _ := orC
+    if ← viewWithTriggers tname then
+      return ← updateView q tname sets wh
     let t ← currentTable tname
     let alias := alias.getD tname
     let src := tableSrc alias t
-    let mut targets : Array Row := #[]
+    -- with FROM: each target row is joined with the FROM rows; the first match is used
+    let (fsrcs, frows) ← match from_ with
+      | some f => evalFrom q f
+      | none => pure (#[], #[#[]])
+    let mut targets : Array (Row × Array Cur) := #[]
     for r in t.rows do
-      let qr := { q with env := { q.env with frames := { srcs := #[src], cur := #[some r] } :: q.env.frames } }
-      match wh with
-      | some w => if truth (← evalExpr qr w) == some true then targets := targets.push r
-      | none => targets := targets.push r
+      for fr in frows do
+        let qr := { q with env := { q.env with frames := { srcs := #[src] ++ fsrcs, cur := #[some r] ++ fr } :: q.env.frames } }
+        let ok ← match wh with
+          | some w => do pure (truth (← evalExpr qr w) == some true)
+          | none => pure true
+        if ok then targets := targets.push (r, fr); break
     let mut updated := #[]
-    for old in targets do
+    for (old, fr) in targets do
       let t ← currentTable tname
-      let qr := { q with env := { q.env with frames := { srcs := #[src], cur := #[some old] } :: q.env.frames } }
+      -- the row as it is now (an earlier trigger may have changed it)
+      let some old := t.rows.find? (·.rowid == old.rowid) | continue
+      let qr := { q with env := { q.env with frames := { srcs := #[src] ++ fsrcs, cur := #[some old] ++ fr } :: q.env.frames } }
       let mut nv := old.vals
       let mut newRowid := old.rowid
       for (names, ex) in sets do
@@ -696,6 +715,8 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
               | _ => err "datatype mismatch" SQLITE_MISMATCH
             else err s!"no such column: {nm}"
       let newRow ← withGenerated t ⟨newRowid, nv⟩
+      runTriggers q .before (.update (sets.flatMap (·.1))) tname (some old) (some newRow)
+      let t ← currentTable tname
       checkRow t newRow
       let others := t.rows.filter (·.rowid != old.rowid)
       if others.any (·.rowid == newRowid) && !t.withoutRowid then
@@ -712,6 +733,8 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
     countChanges q updated.size
     resultRows q (← currentTable tname) alias updated ret
   | .delete _ _ tname alias wh ret _ _ _ =>
+    if ← viewWithTriggers tname then
+      return ← deleteView q tname wh
     let t ← currentTable tname
     let alias := alias.getD tname
     let src := tableSrc alias t
@@ -881,6 +904,77 @@ partial def fkOnParentUpdate (pname : Name) (old new : Row) : M Unit := do
       modify fun c => { c with db := { c.db with totalChanges := c.db.totalChanges + 1 } }
     | "RESTRICT" => err "FOREIGN KEY constraint failed" SQLITE_CONSTRAINT_FOREIGNKEY
     | _ => pure ()
+
+/-- Is `n` a view (DML on it runs its INSTEAD OF triggers)? -/
+partial def viewWithTriggers (n : Name) : M Bool := do
+  let db ← getDb
+  return (db.main.findTable n).isNone && (db.main.findView n).isSome
+
+partial def viewRows (q : QEnv) (n : Name) : M (Src × Array Row) := namedSource q none n n
+
+partial def insertView (q : QEnv) (vname : Name) (cols : List Name) (src : InsertSource) : M (Array (Array Value)) := do
+  let (vsrc, _) ← viewRows q vname
+  let rows ← match src with
+    | .values rs => rs.toArray.mapM fun r => r.toArray.mapM (evalExpr q)
+    | .select sel => do let (_, rs) ← runSelect q sel; pure rs
+    | .defaults => pure #[#[]]
+  let hasIO := (← getDb).main.triggers.any fun tr => nameEq tr.table vname && tr.time == .insteadOf &&
+    match tr.event with | .insert => true | _ => false
+  if !hasIO then err s!"cannot modify {vname} because it is a view"
+  let n := vsrc.cols.size
+  let idx := if cols.isEmpty then List.range n else cols.filterMap fun c => vsrc.cols.toList.findIdx? fun (m, _, _) => nameEq m c
+  for r in rows do
+    let mut vals := Array.replicate n Value.null
+    for (ci, k) in idx.zipIdx do vals := vals.set! ci (r[k]?.getD .null)
+    runViewTriggers q vname .insert none (some ⟨-1, vals⟩) vsrc
+  return #[]
+
+partial def updateView (q : QEnv) (vname : Name) (sets : List (List Name × Expr)) (wh : Option Expr) : M (Array (Array Value)) := do
+  let (vsrc, rows) ← viewRows q vname
+  let hasIO := (← getDb).main.triggers.any fun tr => nameEq tr.table vname && tr.time == .insteadOf &&
+    match tr.event with | .update _ => true | _ => false
+  if !hasIO then err s!"cannot modify {vname} because it is a view"
+  for r in rows do
+    let qr := { q with env := { q.env with frames := { srcs := #[vsrc], cur := #[some r] } :: q.env.frames } }
+    if let some w := wh then
+      if truth (← evalExpr qr w) != some true then continue
+    let mut nv := r.vals
+    for (names, ex) in sets do
+      let v ← evalExpr qr ex
+      for nm in names do
+        match vsrc.cols.toList.findIdx? (fun (m, _, _) => nameEq m nm) with
+        | some i => nv := nv.set! i v
+        | none => err s!"no such column: {nm}"
+    runViewTriggers q vname (.update (sets.flatMap (·.1))) (some r) (some { r with vals := nv }) vsrc
+  return #[]
+
+partial def deleteView (q : QEnv) (vname : Name) (wh : Option Expr) : M (Array (Array Value)) := do
+  let (vsrc, rows) ← viewRows q vname
+  let hasIO := (← getDb).main.triggers.any fun tr => nameEq tr.table vname && tr.time == .insteadOf &&
+    match tr.event with | .delete => true | _ => false
+  if !hasIO then err s!"cannot modify {vname} because it is a view"
+  for r in rows do
+    let qr := { q with env := { q.env with frames := { srcs := #[vsrc], cur := #[some r] } :: q.env.frames } }
+    if let some w := wh then
+      if truth (← evalExpr qr w) != some true then continue
+    runViewTriggers q vname .delete (some r) none vsrc
+  return #[]
+
+/-- INSTEAD OF triggers of a view. -/
+partial def runViewTriggers (q : QEnv) (vname : Name) (ev : TriggerEvent) (old new : Option Row) (src : Src) : M Unit := do
+  for tr in (← getDb).main.triggers do
+    if !nameEq tr.table vname || tr.time != .insteadOf then continue
+    let fires := match tr.event, ev with
+      | .insert, .insert | .delete, .delete => true
+      | .update cols, .update changed => cols.isEmpty || cols.any fun c => changed.any (nameEq · c)
+      | _, _ => false
+    if !fires then continue
+    let qt := { q with env := { q.env with newRow := new.map (src, ·), oldRow := old.map (src, ·) } }
+    if let some w := tr.when_ then
+      if truth (← evalExpr qt w) != some true then continue
+    for st in tr.body do
+      let r ← try (some <$> execStmt qt st) catch e => if e.code == 0 then pure none else throw e
+      if r.isNone then break
 
 partial def execPragma (q : QEnv) (name : Name) (arg : Option Expr) : M (Array (Array Value)) := do
   let db ← getDb

@@ -320,8 +320,8 @@ partial def parseUpdate (ctes : List Cte) : P Stmt := do
   let from_ ← if ← eatKw "FROM" then some <$> parseFrom else pure none
   let w ← if ← eatKw "WHERE" then some <$> parseExpr else pure none
   let ret ← returningClause
-  let (ob, lim, off) ← orderLimit
-  return .update ctes oc sch t alias sets from_ w ret ob lim off
+  -- ORDER BY/LIMIT on UPDATE needs SQLITE_ENABLE_UPDATE_DELETE_LIMIT, off by default
+  return .update ctes oc sch t alias sets from_ w ret [] none none
 
 partial def parseDelete (ctes : List Cte) : P Stmt := do
   kw "DELETE"; kw "FROM"
@@ -331,8 +331,7 @@ partial def parseDelete (ctes : List Cte) : P Stmt := do
   else if (← isKw "NOT") && (← isKwAt 1 "INDEXED") then advance; advance
   let w ← if ← eatKw "WHERE" then some <$> parseExpr else pure none
   let ret ← returningClause
-  let (ob, lim, off) ← orderLimit
-  return .delete ctes sch t alias w ret ob lim off
+  return .delete ctes sch t alias w ret [] none none
 
 partial def parseCreate (_s0 : Nat) : P Stmt := do
   let temp ← eatKw "TEMP"
