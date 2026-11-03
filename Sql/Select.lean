@@ -159,6 +159,9 @@ partial def fromRefs : FromItem → List (Option Name × Name)
   | _ => []
 end
 
+/-- SQLITE_LIMIT_LENGTH (SQLITE_MAX_LENGTH of the default build) -/
+def maxLength : Int := 1000000000
+
 def windowParamBase : Nat := 1000000000
 
 /-- Replace each window-function call (outside subqueries) by a numbered
@@ -279,7 +282,9 @@ partial def evalExpr (q : QEnv) (e : Expr) : M Value := do
       let x ← evalExpr q a
       let y ← evalExpr q b
       if x.isNull || y.isNull then return .null
-      return .text (textOf x ++ textOf y)
+      let r := textOf x ++ textOf y
+      if r.size > maxLength then err "string or blob too big" SQLITE_TOOBIG
+      return .text r
     | .bitand | .bitor | .shl | .shr =>
       return bitOp op (← evalExpr q a) (← evalExpr q b)
     | .ptr | .ptr2 => callFn q (if op == .ptr then "->" else "->>") [a, b] false
@@ -775,7 +780,9 @@ partial def scalarFn (n : Name) (vs : List Value) (colls : List (Option (Coll ×
     return vs.foldl (fun acc v => if better v acc then v else acc) a0
   | "zeroblob" =>
     if nargs != 1 then wrong
-    return .blob ⟨Array.replicate (max 0 a0.numeric.toInt).toNat 0⟩
+    let n := max 0 a0.numeric.toInt
+    if n > maxLength then err "string or blob too big" SQLITE_TOOBIG
+    return .blob ⟨Array.replicate n.toNat 0⟩
   | "likelihood" | "likely" | "unlikely" => return a0
   | "sqlite_version" => return .ofString "3.54.1"
   | "sqlite_source_id" => return .ofString "2026-10-16 14:45:20 555e07ef33f69a0957d24d8e555b702464a131d6f1607f4c3c1e4551e8e6ca76"
@@ -791,6 +798,7 @@ partial def scalarFn (n : Name) (vs : List Value) (colls : List (Option (Coll ×
   | "randomblob" =>
     if nargs != 1 then wrong
     let n := max 1 a0.numeric.toInt
+    if n > maxLength then err "string or blob too big" SQLITE_TOOBIG
     let c ← get
     let seed := c.db.prng
     set { c with db := { c.db with prng := seed + 1 } }
