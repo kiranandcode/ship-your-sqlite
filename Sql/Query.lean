@@ -43,28 +43,40 @@ def isAggCall (name : Name) (nargs : Nat) (star : Bool) (over : Bool) : Bool :=
 
 mutual
 /-- Does an expression contain an aggregate call (not inside a subquery)? -/
-partial def hasAgg : Expr → Bool
-  | .call n _ args star _ _ over => isAggCall n args.length star over.isSome || args.any hasAgg
-  | .unop _ e | .collate e _ | .cast e _ | .isNull _ e => hasAgg e
-  | .binop _ a b => hasAgg a || hasAgg b
-  | .between _ a b c => hasAgg a || hasAgg b || hasAgg c
-  | .inList _ e l => hasAgg e || l.any hasAgg
-  | .inSelect _ e _ | .inTable _ e _ _ _ => hasAgg e
-  | .like _ _ a b c => hasAgg a || hasAgg b || (c.map hasAgg).getD false
-  | .case_ b ws e => (b.map hasAgg).getD false || ws.any (fun (x, y) => hasAgg x || hasAgg y) || (e.map hasAgg).getD false
-  | .row l => l.any hasAgg
+def hasAgg.go (k : Nat)  (x : Expr) : Bool :=
+  match k with
+  | 0 => false
+  | k + 1 =>
+  match x with
+  | .call n _ args star _ _ over => isAggCall n args.length star over.isSome || args.any (hasAgg.go k)
+  | .unop _ e | .collate e _ | .cast e _ | .isNull _ e => (hasAgg.go k) e
+  | .binop _ a b => (hasAgg.go k) a || (hasAgg.go k) b
+  | .between _ a b c => (hasAgg.go k) a || (hasAgg.go k) b || (hasAgg.go k) c
+  | .inList _ e l => (hasAgg.go k) e || l.any (hasAgg.go k)
+  | .inSelect _ e _ | .inTable _ e _ _ _ => (hasAgg.go k) e
+  | .like _ _ a b c => (hasAgg.go k) a || (hasAgg.go k) b || (c.map (hasAgg.go k)).getD false
+  | .case_ b ws e => (b.map (hasAgg.go k)).getD false || ws.any (fun (x, y) => (hasAgg.go k) x || (hasAgg.go k) y) || (e.map (hasAgg.go k)).getD false
+  | .row l => l.any (hasAgg.go k)
   | _ => false
 
-partial def hasWindow : Expr → Bool
-  | .call _ _ args _ _ _ over => over.isSome || args.any hasWindow
-  | .unop _ e | .collate e _ | .cast e _ | .isNull _ e => hasWindow e
-  | .binop _ a b => hasWindow a || hasWindow b
-  | .between _ a b c => hasWindow a || hasWindow b || hasWindow c
-  | .inList _ e l => hasWindow e || l.any hasWindow
-  | .case_ b ws e => (b.map hasWindow).getD false || ws.any (fun (x, y) => hasWindow x || hasWindow y) || (e.map hasWindow).getD false
-  | .like _ _ a b c => hasWindow a || hasWindow b || (c.map hasWindow).getD false
+def hasWindow.go (k : Nat)  (x : Expr) : Bool :=
+  match k with
+  | 0 => false
+  | k + 1 =>
+  match x with
+  | .call _ _ args _ _ _ over => over.isSome || args.any (hasWindow.go k)
+  | .unop _ e | .collate e _ | .cast e _ | .isNull _ e => (hasWindow.go k) e
+  | .binop _ a b => (hasWindow.go k) a || (hasWindow.go k) b
+  | .between _ a b c => (hasWindow.go k) a || (hasWindow.go k) b || (hasWindow.go k) c
+  | .inList _ e l => (hasWindow.go k) e || l.any (hasWindow.go k)
+  | .case_ b ws e => (b.map (hasWindow.go k)).getD false || ws.any (fun (x, y) => (hasWindow.go k) x || (hasWindow.go k) y) || (e.map (hasWindow.go k)).getD false
+  | .like _ _ a b c => (hasWindow.go k) a || (hasWindow.go k) b || (c.map (hasWindow.go k)).getD false
   | _ => false
 end
+
+def hasWindow (x : Expr) : Bool := hasWindow.go syntaxFuel x
+
+def hasAgg (x : Expr) : Bool := hasAgg.go syntaxFuel x
 
 /-! ## Name resolution -/
 
@@ -141,35 +153,47 @@ def colMetaOf (env : Env) : Resolved → Option (Option Aff × Coll)
   | .alias _ => none
 
 /-- Expression affinity (`sqlite3ExprAffinity`): `none` is "no affinity". -/
-partial def exprAff (env : Env) : Expr → Option Aff
+def exprAff.go (k : Nat) (env : Env) (x : Expr) : Option Aff :=
+  match k with
+  | 0 => none
+  | k + 1 =>
+  match x with
   | .col _ t c => match resolveCol env t c with
     | .ok r => match colMetaOf env r with
       | some (a, _) => a
-      | none => match r with | .alias e => exprAff env e | _ => none
+      | none => match r with | .alias e => (exprAff.go k) env e | _ => none
     | .error _ => none
-  | .dqcol c => exprAff env (.col none none c)
+  | .dqcol c => (exprAff.go k) env (.col none none c)
   | .cast _ ty => some (affinityOfType ty)
-  | .collate e _ => exprAff env e
-  | .unop .pos e => exprAff env e
+  | .collate e _ => (exprAff.go k) env e
+  | .unop .pos e => (exprAff.go k) env e
   | _ => none
 
+def exprAff (env : Env) (x : Expr) : Option Aff := exprAff.go syntaxFuel env x
+
 /-- Collation of an expression: explicit (`COLLATE`) or from a column. -/
-partial def exprColl (env : Env) : Expr → Option (Coll × Bool)
+def exprColl.go (k : Nat) (env : Env) (x : Expr) : Option (Coll × Bool) :=
+  match k with
+  | 0 => none
+  | k + 1 =>
+  match x with
   | .collate _ c => some ((collOfName c).getD .binary, true)
   | .col _ t c => match resolveCol env t c with
     | .ok r => match colMetaOf env r with
       | some (_, coll) => some (coll, false)
-      | none => match r with | .alias e => exprColl env e | _ => none
+      | none => match r with | .alias e => (exprColl.go k) env e | _ => none
     | .error _ => none
-  | .dqcol c => exprColl env (.col none none c)
-  | .unop .pos e | .cast e _ => exprColl env e
+  | .dqcol c => (exprColl.go k) env (.col none none c)
+  | .unop .pos e | .cast e _ => (exprColl.go k) env e
   | .binop _ a b =>
-    match exprColl env a with
+    match (exprColl.go k) env a with
     | some (c, true) => some (c, true)
-    | x => match exprColl env b with
+    | x => match (exprColl.go k) env b with
       | some (c, true) => some (c, true)
       | _ => x
   | _ => none
+
+def exprColl (env : Env) (x : Expr) : Option (Coll × Bool) := exprColl.go syntaxFuel env x
 
 /-- The collation of a binary comparison (`sqlite3BinaryCompareCollSeq`). -/
 def cmpColl (env : Env) (a b : Expr) : Coll :=

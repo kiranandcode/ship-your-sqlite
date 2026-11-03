@@ -662,7 +662,7 @@ def stdType : Aff → String
 /-- The declared types of a view's columns (`sqlite3SubqueryColumnTypes`): the
     declared type of a column the expression names, when its affinity is the
     column's; otherwise the standard type of the affinity. -/
-partial def viewColumns (db : Db) (vc : ViewCols) (v : View) : Except Err (Array (Name × String)) :=
+def viewColumns (db : Db) (vc : ViewCols) (v : View) : Except Err (Array (Name × String)) :=
   match vc v with
   | .error e => .error e
   | .ok cols => .ok <|
@@ -710,8 +710,14 @@ partial def viewColumns (db : Db) (vc : ViewCols) (v : View) : Except Err (Array
       (nm, ty)
 where
   /-- `sqlite3ExprDataType`: 1 numeric, 2 text, 4 blob. -/
-  dataType (tabs : List (Name × Table)) : Expr → Nat
-    | .collate e _ | .unop .pos e => dataType tabs e
+  dataType (tabs : List (Name × Table)) (e : Expr) : Nat := dataTypeK syntaxFuel tabs e
+  /-- `dataType` with a depth bound (`syntaxFuel`, never exhausted by parsed SQL). -/
+  dataTypeK (k : Nat) (tabs : List (Name × Table)) (e0 : Expr) : Nat :=
+    match k with
+    | 0 => 0
+    | k + 1 =>
+    match e0 with
+    | .collate e _ | .unop .pos e => dataTypeK k tabs e
     | .lit .null => 0
     | .lit (.text _) => 2
     | .lit (.blob _) => 4
@@ -727,7 +733,7 @@ where
       | some .blob | none => 7
       | _ => 5
     | .case_ _ whens els =>
-      whens.foldl (fun m (_, r) => m ||| dataType tabs r) (match els with | some e => dataType tabs e | none => 0)
+      whens.foldl (fun m (_, r) => m ||| dataTypeK k tabs r) (match els with | some e => dataTypeK k tabs e | none => 0)
     | _ => 1
   tablesOfFrom : FromItem → List (Name × Table)
     | .table sch n alias _ =>

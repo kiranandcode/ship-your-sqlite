@@ -69,6 +69,17 @@ abbrev M := ExceptT Err (StateM Ctx)
 
 def err {α} (msg : String) (code : Nat := SQLITE_ERROR) : M α := throw { code, msg }
 
+/-- The fuel `runStmt` gives the evaluator: a bound on the depth of its
+    recursion (nested expressions, subqueries, triggers) and on the rounds of a
+    recursive CTE. SQLite bounds the first by SQLITE_MAX_EXPR_DEPTH and
+    SQLITE_MAX_TRIGGER_DEPTH (1000); a recursive CTE that would run longer is
+    reported as out of fuel by the executable (SQLite would run on). -/
+def evalFuel : Nat := 1000000000
+
+/-- The total evaluator ran out of fuel (Phase 2.5): never with the fuel `sql_run`
+    passes, which exceeds every depth SQLite itself allows. -/
+def fuelErr : Err := { code := SQLITE_ERROR, msg := "out of fuel" }
+
 /-! ## Values as SQL booleans -/
 
 /-- Truth of a value: NULL is unknown; numbers by being nonzero; text by its numeric prefix. -/
@@ -101,42 +112,58 @@ def utf8Chars (b : ByteArray) : List (List UInt8) :=
 
 def charLower (c : List UInt8) : List UInt8 := c.map lowerB
 
-partial def likeMatch (pat str : List (List UInt8)) (esc : Option (List UInt8)) (nocase : Bool) : Bool :=
+/-- LIKE matching (patternCompare). Every recursive call consumes at least
+    one pattern element, so `k = pat.length + 1` is never exhausted. -/
+def likeGo (k : Nat) (pat str : List (List UInt8)) (esc : Option (List UInt8)) (nocase : Bool) : Bool :=
+  match k with
+  | 0 => false
+  | k + 1 =>
   let eqc (a b : List UInt8) := if nocase then charLower a == charLower b else a == b
   match pat with
   | [] => str.isEmpty
   | p :: ps =>
     if some p == esc then
       match ps, str with
-      | q :: qs, s :: ss => eqc q s && likeMatch qs ss esc nocase
+      | q :: qs, s :: ss => eqc q s && likeGo k qs ss esc nocase
       | _, _ => false
     else if p == [37] then -- %
-      let rec tryAll : List (List UInt8) → Bool
-        | [] => likeMatch ps [] esc nocase
-        | s :: ss => likeMatch ps (s :: ss) esc nocase || tryAll ss
-      tryAll str
+      (List.range (str.length + 1)).any fun i => likeGo k ps (str.drop i) esc nocase
     else if p == [95] then -- _
       match str with
-      | _ :: ss => likeMatch ps ss esc nocase
+      | _ :: ss => likeGo k ps ss esc nocase
       | [] => false
     else
       match str with
-      | s :: ss => eqc p s && likeMatch ps ss esc nocase
+      | s :: ss => eqc p s && likeGo k ps ss esc nocase
       | [] => false
 
-/-- GLOB: `*`, `?`, `[...]` (with `^` and ranges), case-sensitive. -/
-partial def globMatch (pat str : List (List UInt8)) : Bool :=
+def likeMatch (pat str : List (List UInt8)) (esc : Option (List UInt8)) (nocase : Bool) : Bool :=
+  likeGo (pat.length + 1) pat str esc nocase
+
+/-- The members of a GLOB character class `[...]` (after `[` or `[^`): whether
+    `s` is in it, and the pattern after the closing `]`. -/
+def globClass (s : List UInt8) : List (List UInt8) → Bool → Bool → Option (Bool × List (List UInt8))
+  | [], _, _ => none
+  | [93] :: r, first, acc => if first then globClass s r false (acc || s == [93]) else some (acc, r)
+  | a :: [45] :: b :: r, _, acc =>
+    if b == [93] then globClass s ([45] :: b :: r) false (acc || s == a)
+    else globClass s r false (acc || (decide (a ≤ s) && decide (s ≤ b)))
+  | a :: r, _, acc => globClass s r false (acc || s == a)
+
+/-- GLOB: `*`, `?`, `[...]` (with `^` and ranges), case-sensitive. Every
+    recursive call consumes at least one pattern element. -/
+def globGo (k : Nat) (pat str : List (List UInt8)) : Bool :=
+  match k with
+  | 0 => false
+  | k + 1 =>
   match pat with
   | [] => str.isEmpty
   | p :: ps =>
     if p == [42] then
-      let rec tryAll : List (List UInt8) → Bool
-        | [] => globMatch ps []
-        | s :: ss => globMatch ps (s :: ss) || tryAll ss
-      tryAll str
+      (List.range (str.length + 1)).any fun i => globGo k ps (str.drop i)
     else if p == [63] then
       match str with
-      | _ :: ss => globMatch ps ss
+      | _ :: ss => globGo k ps ss
       | [] => false
     else if p == [91] then
       match str with
@@ -144,21 +171,14 @@ partial def globMatch (pat str : List (List UInt8)) : Bool :=
       | s :: ss =>
         let (neg, body) := match ps with
           | [94] :: r => (true, r) | r => (false, r)
-        -- a ']' right after '[' (or '[^') is a member
-        let rec cls (l : List (List UInt8)) (first : Bool) (acc : Bool) : Option (Bool × List (List UInt8)) :=
-          match l with
-          | [] => none
-          | [93] :: r => if first then cls r false (acc || s == [93]) else some (acc, r)
-          | a :: [45] :: b :: r =>
-            if b == [93] then cls ([45] :: b :: r) false (acc || s == a)
-            else cls r false (acc || (decide (a ≤ s) && decide (s ≤ b)))
-          | a :: r => cls r false (acc || s == a)
-        match cls body true false with
-        | some (hit, rest) => (hit != neg) && globMatch rest ss
+        match globClass s body true false with
+        | some (hit, rest) => (hit != neg) && globGo k rest ss
         | none => false
     else
       match str with
-      | s :: ss => p == s && globMatch ps ss
+      | s :: ss => p == s && globGo k ps ss
       | [] => false
+
+def globMatch (pat str : List (List UInt8)) : Bool := globGo (pat.length + 1) pat str
 
 end Sql
