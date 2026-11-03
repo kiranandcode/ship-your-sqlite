@@ -173,8 +173,30 @@ def unaryMath : String → Option (_root_.Float → _root_.Float)
   | "trunc" => some fun x => if x < 0 then Float.ceil x else Float.floor x
   | _ => none
 
+/-- A finite double as `(negative, mantissa, exponent)`, value `± m · 2^e`. -/
+def decodeFinite (x : _root_.Float) : Bool × Nat × Int :=
+  let b := x.toBits.toNat
+  let neg := b >>> 63 == 1
+  let ex := (b >>> 52) % 2048
+  let frac := b % 2 ^ 52
+  if ex == 0 then (neg, frac, -1074) else (neg, frac + 2 ^ 52, (ex : Int) - 1075)
+
+/-- C `fmod`: `x - n·y` with `n` = `x/y` truncated, computed exactly (the result
+    is always representable). -/
+def fmod (x y : _root_.Float) : _root_.Float :=
+  if x.isNaN || y.isNaN || x.isInf || y == 0 then 0.0 / 0.0
+  else if y.isInf || x == 0 then x
+  else
+    let (nx, mx, ex) := decodeFinite x
+    let (_, my, ey) := decodeFinite y
+    let e := min ex ey
+    let X := mx * 2 ^ (ex - e).toNat
+    let Y := my * 2 ^ (ey - e).toNat
+    let r := Float.ofBinaryScientific (X % Y) e
+    if nx then -r else r
+
 def binaryMath : String → Option (_root_.Float → _root_.Float → _root_.Float)
-  | "pow" => some Float.pow | "atan2" => some Float.atan2
+  | "pow" => some Float.pow | "atan2" => some Float.atan2 | "fmod" => some fmod
   | _ => none
 
 /-- The external functions, by name. `none`: not modelled. -/

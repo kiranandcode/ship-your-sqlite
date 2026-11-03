@@ -44,6 +44,31 @@ def flatCmp (op : Binop) (v1 v2 : Val) : Option Bool := do
     | .Ole => some (a ≤ b) | .Oge => some (a ≥ b)
     | _ => none
 
+/-- The byte a memory cell holds under the flat placement: a fragment of a
+    stored pointer is the corresponding byte of its address (little-endian; the
+    fragment at the lowest address has index 7). An uninitialised byte reads
+    as 0: C gives it an unspecified value, and this is one choice of it. -/
+def flatByte : MemVal → Option Nat
+  | .Byte c => some c.toNat
+  | .Fragment v _ i => (flatAddr v).map fun a => (a.toNat >>> (8 * (7 - i))) % 256
+  | .Undef => some 0
+
+def pointee : Ty → Option Ty
+  | .Tpointer t _ | .Tarray t _ _ => some t
+  | _ => none
+
+def _root_.CC.Val.isPtr : Val → Bool
+  | .Vptr .. => true
+  | _ => false
+
+/-- A pointer-valued operand as the integer constant of its flat address. -/
+def concretize (a : Expr) (v : Val) : Expr :=
+  match v with
+  | .Vptr .. => match flatAddr v with
+    | some n => .Econst_long (Integers.Int64.repr n) (typeof a)
+    | none => a
+  | _ => a
+
 /-- Replace each comparison of `x` that Clean cannot evaluate, and the flat
     placement can, by its value. Returns the expression and whether it changed. -/
 partial def flatRewrite (ge : CGenv) (e : Env) (le : TempEnv) (m : Mem) : Expr → Expr × Bool
@@ -51,19 +76,67 @@ partial def flatRewrite (ge : CGenv) (e : Env) (le : TempEnv) (m : Mem) : Expr �
     let (a1', c1) := flatRewrite ge e le m a1
     let (a2', c2) := flatRewrite ge e le m a2
     let x := Expr.Ebinop op a1' a2' ty
-    if !isCmp op then (x, c1 || c2) else
+    if op == .Osub then
+      -- pointer difference across blocks: on flat addresses, in elements
+      match doEvalExpr ge e le m a1', doEvalExpr ge e le m a2', pointee (typeof a1') with
+      | some v1@(.Vptr b1 _), some v2@(.Vptr b2 _), some t =>
+        if b1 == b2 then (x, c1 || c2) else
+        match flatAddr v1, flatAddr v2 with
+        | some p1, some p2 =>
+          let sz := max 1 (sizeof ge.genv_cenv t)
+          (.Econst_long (Integers.Int64.repr ((p1 - p2) / sz)) ty, true)
+        | _, _ => (x, c1 || c2)
+      | _, _, _ => (x, c1 || c2)
+    else
+    -- any other binop Clean cannot evaluate because an operand is a pointer:
+    -- that operand becomes its flat address, at the same C type
     match doEvalExpr ge e le m a1', doEvalExpr ge e le m a2' with
     | some v1, some v2 =>
       match Cop.semBinaryOperation ge.genv_cenv op v1 (typeof a1') v2 (typeof a2') m with
       | some _ => (x, c1 || c2)
       | none =>
-        match flatCmp op v1 v2 with
-        | some r => (.Econst_int (if r then Integers.Int.one else Integers.Int.zero) ty, true)
-        | none => (x, c1 || c2)
+        let a1'' := concretize a1' v1
+        let a2'' := concretize a2' v2
+        match doEvalExpr ge e le m a1'', doEvalExpr ge e le m a2'' with
+        | some w1, some w2 =>
+          match Cop.semBinaryOperation ge.genv_cenv op w1 (typeof a1'') w2 (typeof a2'') m with
+          | some _ => (.Ebinop op a1'' a2'' ty, true)
+          | none => (x, c1 || c2)
+        | _, _ => (x, c1 || c2)
     | _, _ => (x, c1 || c2)
-  | .Eunop op a ty => let (a', c) := flatRewrite ge e le m a; (.Eunop op a' ty, c)
-  | .Ecast a ty => let (a', c) := flatRewrite ge e le m a; (.Ecast a' ty, c)
-  | .Ederef a ty => let (a', c) := flatRewrite ge e le m a; (.Ederef a' ty, c)
+  | .Eunop op a ty =>
+    let (a', c) := flatRewrite ge e le m a
+    let x := Expr.Eunop op a' ty
+    match doEvalExpr ge e le m a' with
+    | some v =>
+      match Cop.semUnaryOperation op v (typeof a') m with
+      | some _ => (x, c)
+      | none => (.Eunop op (concretize a' v) ty, v.isPtr || c)
+    | none => (x, c)
+  | .Ecast a ty =>
+    let (a', c) := flatRewrite ge e le m a
+    let x := Expr.Ecast a' ty
+    match doEvalExpr ge e le m a' with
+    | some v =>
+      match Cop.semCast v (typeof a') ty m with
+      | some _ => (x, c)
+      | none => (.Ecast (concretize a' v) ty, v.isPtr || c)
+    | none => (x, c)
+  | .Ederef a ty =>
+    let (a', c) := flatRewrite ge e le m a
+    let x := Expr.Ederef a' ty
+    -- a byte load that Clean evaluates to `Vundef`: the flat byte
+    match ty, doEvalExpr ge e le m x, doEvalExpr ge e le m a' with
+    | .Tint .I8 sg _, some .Vundef, some (.Vptr b o) =>
+      match Mem.loadbytes m b (Integers.Ptrofs.unsigned o) 1 with
+      | some [mv] =>
+        match flatByte mv with
+        | some n =>
+          let z : Int := if sg == .Signed && n ≥ 128 then (n : Int) - 256 else n
+          (.Econst_int (Integers.Int.repr z) ty, true)
+        | none => (x, c)
+      | _ => (x, c)
+    | _, _, _ => (x, c)
   | .Efield a i ty => let (a', c) := flatRewrite ge e le m a; (.Efield a' i ty, c)
   | .Eaddrof a ty => let (a', c) := flatRewrite ge e le m a; (.Eaddrof a' ty, c)
   | x => (x, false)

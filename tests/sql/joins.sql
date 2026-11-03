@@ -1,0 +1,15 @@
+create table a(id integer primary key, x text);
+create table b(id integer primary key, aid int references a(id), y real);
+insert into a(x) values ('p'),('q'),('r'),(null);
+insert into b(aid, y) values (1, 1.0),(1, 2.5),(3, -1),(7, 0);
+select a.id, x, y from a join b on b.aid = a.id order by 1, 3;
+select a.id, x, y from a left join b on b.aid = a.id order by 1, 3;
+select a.id, b.id from a right join b on b.aid = a.id order by 2;
+select a.id, b.id from a full join b on b.aid = a.id order by 1 nulls last, 2;
+select count(*) from a, b;
+select x from a natural join (select id, 'z' as w from b);
+select * from a join b using (id);
+select x from a where id in (select aid from b) order by x;
+select x, (select max(y) from b where b.aid = a.id) from a order by id;
+select x from a where exists (select 1 from b where b.aid = a.id and y > 2);
+select x from a where id not in (select aid from b where aid is not null) order by id;

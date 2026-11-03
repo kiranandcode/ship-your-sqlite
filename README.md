@@ -30,8 +30,15 @@ siblings for TinyCC and libtommath.
   functions) is accepted by `clightgen -lean` with `-fstruct-passing` and two
   preprocessor-only flags (`config/sqlite.flags`): 2,642 functions, 47 MB of
   Lean.
-- First obstruction: Clight gives no meaning to calls with variadic
-  arguments, and SQLite's printf family is variadic (PHASES.md, O1).
+- The export **runs**: Clean's interpreter, with an explicit external model
+  and three stated extensions of Clight (variadic calls, and pointers used as
+  integers under a flat placement of blocks; BRIEF.md D8, PHASES.md O1/O2),
+  gives byte-identical output to the gcc and ccomp builds on all six
+  differential scripts of `tests/sql/` (`scripts/difftest.sh`), which cover
+  joins, CTEs, window functions, triggers, constraints, UPSERT, transactions,
+  pragmas and the JSON, date and math functions.
+- Two places where SQLite relies on behaviour CompCert leaves undefined,
+  one of them undefined in ISO C too (BUGS.md).
 
 ## Building
 

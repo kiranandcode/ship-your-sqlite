@@ -19,6 +19,8 @@ inductive Stop where
   | done (r : Integers.Int)
   | stuck (s : State)
   | fuel (s : State)
+  /-- an `Sset` of a byte load stored `Vundef` (state before the step, and Clean's step) -/
+  | undefByte (s s' : State)
 
 instance : Inhabited Stop := ⟨.done 0⟩
 
@@ -30,7 +32,11 @@ partial def runPure (ge : CGenv) (s : State) (n limit : Nat) : Stop × Nat :=
   | _ =>
     if limit != 0 && n ≥ limit then (.fuel s, n) else
     match doStep ge s with
-    | some (_, s') => runPure ge s' (n + 1) limit
+    | some (_, s') =>
+      match s, s' with
+      | .State _ (.Sset id (.Ederef _ (.Tint .I8 _ _))) _ _ _ _, .State _ _ _ _ le' _ =>
+        if le'.get id == some .Vundef then (.undefByte s s', n) else runPure ge s' (n + 1) limit
+      | _, _ => runPure ge s' (n + 1) limit
     | none => (.stuck s, n)
 
 /-- How a run ended. -/
@@ -90,9 +96,54 @@ def functionName (p : Program) (f : Function) : String :=
   | some (i, _) => (identName i).getD "?"
   | none => "?"
 
-def describeStuck (names : Ident → String) (fname : Function → String := fun _ => "?") : State → String
-  | .State f s _ _ _ _ =>
-    s!"stuck at statement {describeStmt s} in {fname f}"
+def callStack (fname : Function → String) : Cont → List String
+  | .Kstop => []
+  | .Kseq _ k | .Kloop1 _ _ k | .Kloop2 _ _ k | .Kswitch k => callStack fname k
+  | .Kcall _ f _ _ k => fname f :: callStack fname k
+
+def showVal : Val → String
+  | .Vundef => "undef" | .Vint n => s!"{Integers.Int.signed n}"
+  | .Vlong n => s!"{Integers.Int64.signed n}L" | .Vptr b o => s!"ptr({b.toNat},{Integers.Ptrofs.unsigned o})"
+  | .Vfloat _ => "float" | .Vsingle _ => "single"
+
+partial def showExpr (names : Ident → String) : Expr → String
+  | .Econst_int n _ => s!"{Integers.Int.signed n}" | .Econst_long n _ => s!"{Integers.Int64.signed n}L"
+  | .Econst_float .. => "float" | .Econst_single .. => "single"
+  | .Evar i _ => names i | .Etempvar i _ => s!"$" ++ names i
+  | .Ederef a _ => s!"*({showExpr names a})" | .Eaddrof a _ => s!"&({showExpr names a})"
+  | .Eunop op a _ => s!"{repr op}({showExpr names a})"
+  | .Ebinop op a b _ => s!"({showExpr names a} {repr op} {showExpr names b})"
+  | .Ecast a _ => s!"cast({showExpr names a})"
+  | .Efield a i _ => s!"{showExpr names a}.{names i}"
+  | .Esizeof .. => "sizeof" | .Ealignof .. => "alignof"
+
+def describeStuck (names : Ident → String) (fname : Function → String := fun _ => "?")
+    (ge? : Option CGenv := none) : State → String
+  | .State f s k e le m =>
+    let detail : String := match ge?, s with
+      | some ge, .Sassign a1 a2 =>
+        let lv := match doEvalLvalue ge e le m a1 with
+          | some (b, o, _) => s!"lvalue ptr({b.toNat},{Integers.Ptrofs.unsigned o})"
+          | none => "lvalue FAILS"
+        let rv := match doEvalExpr ge e le m a2 with
+          | some v => s!"rvalue {showVal v}"
+          | none => s!"rvalue FAILS: {showExpr names a2}; " ++ " ".intercalate (le.elements.filterMap fun (i, v) =>
+              if (showExpr names a2).contains (names i) then some s!"{names i}={showVal v}" else none)
+        s!"\n  {lv}, {rv}"
+      | some ge, .Sset _ a | some ge, .Sreturn (some a) | some ge, .Sifthenelse a _ _ =>
+        match doEvalExpr ge e le m a with
+        | some v => s!"\n  expression value {showVal v}"
+        | none => s!"\n  expression FAILS: {(showExpr names a).take 400}"
+      | _, _ => ""
+    let bytesAt (b : Block) (o : Int) : String :=
+      match Mem.loadbytes m b o 8 with
+      | some vs => " ".intercalate (vs.map fun
+          | .Byte c => s!"{c.toNat}" | .Undef => "U" | .Fragment v _ i => s!"F({showVal v}/{i})")
+      | none => "noperm"
+    let temps := le.elements.map fun (i, v) => match v with
+      | .Vptr b o => s!"{names i}={showVal v}[{bytesAt b (Integers.Ptrofs.unsigned o)}]"
+      | _ => s!"{names i}={showVal v}"
+    s!"stuck at statement {describeStmt s} in {fname f}{detail}\n  called from: {" < ".intercalate ((callStack fname k).take 8)}\n  temps: {" ".intercalate (temps.take 30)}"
   | .Callstate (.External ef _ _ _) _ _ _ =>
     match ef with
     | .EF_external n _ => s!"call to unsupported external function {n}"
@@ -196,7 +247,7 @@ def vaBuiltin (w : World) (name : String) (args : List Val) (k : Cont) (m : Mem)
   | _, _ => none
 
 /-- Run program `p` from `main` with the external model. `args` are main's arguments. -/
-def runProgram (p : Program) (limit : Nat) (w0 : World := {}) : Result := Id.run do
+def runProgram (p : Program) (limit : Nat) (w0 : World := {}) (traceFlat : Bool := false) : Result := Id.run do
   let ge := p.globalenv
   let fail (o : Outcome) (w : World) (n e : Nat) : Result := ⟨o, w, n, e, 0⟩
   let some m0 := p.initMem | return fail (.noinit "global initialisation failed") w0 0 0
@@ -211,13 +262,24 @@ def runProgram (p : Program) (limit : Nat) (w0 : World := {}) : Result := Id.run
   let mut total := 0
   let mut ext := 0
   let mut flat := 0
-  let names : Ident → String := fun i => (identName i).getD "?"
+  let names : Ident → String := fun i => (identName i).getD s!"t'{i.toNat - 127}"
   repeat
     let (stop, n) := runPure ge s 0 (if limit == 0 then 0 else limit - total)
     total := total + n
     match stop with
     | .done r => return ⟨.exit (Integers.Int.signed r), w, total, ext, flat⟩
     | .fuel _ => return ⟨.fuel, w, total, ext, flat⟩
+    | .undefByte st st' =>
+      total := total + 1
+      match st with
+      | .State f stmt k e le m =>
+        match flatStmt ge e le m stmt with
+        | some stmt' =>
+          match doStep ge (.State f stmt' k e le m) with
+          | some (_, s') => flat := flat + 1; s := s'
+          | none => s := st'
+        | none => s := st'
+      | _ => s := st'
     | .stuck st =>
       match st with
       | .Callstate (.External ef _ _ _) vargs k m =>
@@ -230,7 +292,7 @@ def runProgram (p : Program) (limit : Nat) (w0 : World := {}) : Result := Id.run
             | .EF_external .. => callExternal w name vargs m
             | _ => none
         match call with
-        | none => return ⟨.stuck (describeStuck names (functionName p) st), w, total, ext, flat⟩
+        | none => return ⟨.stuck (describeStuck names (functionName p) (some ge) st), w, total, ext, flat⟩
         | some (.error (.ub msg)) => return ⟨.stuck s!"{name}: {msg}", w, total, ext, flat⟩
         | some (.error (.unsupported msg)) => return ⟨.unsupported s!"{name}: {msg}", w, total, ext, flat⟩
         | some (.ok r) =>
@@ -262,7 +324,7 @@ def runProgram (p : Program) (limit : Nat) (w0 : World := {}) : Result := Id.run
         | _ => return ⟨.stuck "volatile store: bad address", w, total, ext, flat⟩
       | .State f (.Scall optid a al) k e le m =>
         match evalVarCall ge e le m a al with
-        | none => return ⟨.stuck (describeStuck names (functionName p) st), w, total, ext, flat⟩
+        | none => return ⟨.stuck (describeStuck names (functionName p) (some ge) st), w, total, ext, flat⟩
         | some (.External (.EF_external name _) _ _ _, fixed, extra) =>
           -- a variadic libc function (fcntl): the model sees all arguments
           match callExternal w name (fixed ++ extra) m with
@@ -282,15 +344,17 @@ def runProgram (p : Program) (limit : Nat) (w0 : World := {}) : Result := Id.run
             total := total + 2
             s := s'
           | _ => return ⟨.stuck "function entry of a variadic function failed", w, total, ext, flat⟩
-        | some _ => return ⟨.stuck (describeStuck names (functionName p) st), w, total, ext, flat⟩
+        | some _ => return ⟨.stuck (describeStuck names (functionName p) (some ge) st), w, total, ext, flat⟩
       | .State f stmt k e le m =>
         match flatStmt ge e le m stmt with
         | some stmt' =>
           match doStep ge (.State f stmt' k e le m) with
-          | some (_, s') => flat := flat + 1; total := total + 1; s := s'
-          | none => return ⟨.stuck (describeStuck names (functionName p) st), w, total, ext, flat⟩
-        | none => return ⟨.stuck (describeStuck names (functionName p) st), w, total, ext, flat⟩
-      | _ => return ⟨.stuck (describeStuck names (functionName p) st), w, total, ext, flat⟩
+          | some (_, s') =>
+            flat := flat + 1; total := total + 1; s := s'
+            if traceFlat then w := { w with err := w.err ++ s!"[flat] {functionName p f} {showExpr names (match stmt' with | .Sifthenelse a _ _ => a | .Sset _ a => a | .Sreturn (some a) => a | _ => .Econst_int 0 Ty.Tvoid)}\n".toUTF8 }
+          | none => return ⟨.stuck (describeStuck names (functionName p) (some ge) st), w, total, ext, flat⟩
+        | none => return ⟨.stuck (describeStuck names (functionName p) (some ge) st), w, total, ext, flat⟩
+      | _ => return ⟨.stuck (describeStuck names (functionName p) (some ge) st), w, total, ext, flat⟩
   return ⟨.fuel, w, total, ext, flat⟩
 
 end Run

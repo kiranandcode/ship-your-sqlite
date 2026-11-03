@@ -1,0 +1,14 @@
+with recursive c(n) as (select 1 union all select n + 1 from c where n < 10) select group_concat(n) from c;
+with recursive fib(a, b) as (select 0, 1 union all select b, a + b from fib where a < 1000) select max(a) from fib;
+create table s(g text, v int);
+insert into s values ('a',3),('a',1),('b',5),('a',2),('b',5),('c',null);
+select g, v, row_number() over (partition by g order by v), rank() over (order by v), dense_rank() over (order by v) from s order by g, v;
+select g, v, sum(v) over (partition by g order by v rows between unbounded preceding and current row) from s order by g, v;
+select v, lag(v) over (order by v), lead(v, 2, -1) over (order by v), first_value(v) over w, last_value(v) over w from s window w as (order by v range between 1 preceding and 1 following) order by v;
+select g, ntile(2) over (order by v), percent_rank() over (order by v), cume_dist() over (order by v) from s order by g, v;
+select g, count(*) filter (where v > 2), total(v) from s group by g having count(*) > 0 order by g;
+select v from s union select 4 order by 1;
+select v from s intersect select 5;
+select v from s except select 5 order by 1;
+select g, v from s order by v desc nulls first limit 3 offset 1;
+select distinct g from s order by g desc;

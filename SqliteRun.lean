@@ -17,16 +17,18 @@ def fail (code : UInt32) (msg : String) : IO UInt32 := do
 def main (args : List String) : IO UInt32 := do
   let mut fuel := 0
   let mut stats := false
+  let mut traceFlat := false
   let mut rest := args
   while !rest.isEmpty do
     match rest with
     | "--fuel" :: n :: r => fuel := n.toNat!; rest := r
     | "--stats" :: r => stats := true; rest := r
+    | "--trace-flat" :: r => traceFlat := true; rest := r
     | _ :: r => rest := r
     | [] => rest := []
   let input ← (← IO.getStdin).readBinToEnd
   let t0 ← IO.monoMsNow
-  let r := Run.runProgram Sqlprog.prog fuel { stdin := input }
+  let r := Run.runProgram Sqlprog.prog fuel { stdin := input } traceFlat
   let stdout ← IO.getStdout
   stdout.write r.world.out
   stdout.flush
