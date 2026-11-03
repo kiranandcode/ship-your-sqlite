@@ -21,3 +21,8 @@ select * from pragma_case_sensitive_like;
 select * from pragma_schema_version; select * from pragma_data_version;
 select * from pragma_function_list where name = 'abs';
 select * from pragma_function_list limit 5;
+select count(*) from pragma_compile_options where compile_options not like 'ATOMIC%' and compile_options not like 'COMPILER%';
+select * from pragma_compile_options where compile_options like 'MAX%' order by 1;
+select sqlite_compileoption_used('THREADSAFE'), sqlite_compileoption_used('sqlite_threadsafe=1'), sqlite_compileoption_used('THREAD'), sqlite_compileoption_used('ENABLE_MATH_FUNCTIONS'), sqlite_compileoption_used(null), sqlite_compileoption_get(-1), sqlite_compileoption_get(1000), sqlite_compileoption_used(5), sqlite_compileoption_used('max_attached'), sqlite_compileoption_used('MAX_ATTACHED=10'), sqlite_compileoption_used('MAX_ATTACHED=1');
+select * from pragma_function_list where name in ('like', 'match', 'abs') order by 1, 5; pragma case_sensitive_like=1; select * from pragma_function_list where name in ('like', 'match') order by 1, 5; select count(*) from pragma_function_list;
+select * from pragma_module_list order by 1;

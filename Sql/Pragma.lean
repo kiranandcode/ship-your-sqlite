@@ -127,6 +127,26 @@ def getSafetyLevel (z : Bytes) (omitFull : Bool) (dflt : Nat) : Nat :=
 /-- `sqlite3GetBoolean` -/
 def getBoolean (z : Bytes) (dflt : Bool) : Bool := getSafetyLevel z true (if dflt then 1 else 0) != 0
 
+/-! ## Compile-time options (the ccomp build, `PragmaData.compileOptions`) -/
+
+/-- `sqlite3IsIdChar` -/
+def isIdChar (c : UInt8) : Bool :=
+  isDigit c || (65 ≤ c && c ≤ 90) || (97 ≤ c && c ≤ 122) || c == 95 || c == 36 || c ≥ 0x80
+
+/-- `sqlite3_compileoption_used`: an option, without its `SQLITE_` prefix, that
+    the name matches up to a non-identifier character (`=` or the end). -/
+def compileOptionUsed (z : Bytes) : Bool :=
+  let z := if z.length ≥ 7 && iEq (z.take 7) (bs "sqlite_") then z.drop 7 else z
+  compileOptions.any fun o =>
+    let o := bs o
+    o.length ≥ z.length && iEq (o.take z.length) z && !((o.drop z.length).head?.map isIdChar |>.getD false)
+
+/-- `sqlite3_compileoption_get(N)` of the 32-bit integer value of the argument. -/
+def compileOptionGet (n : Int) : Option String :=
+  let n := n % 2 ^ 32
+  let n := if n ≥ 2 ^ 31 then n - 2 ^ 32 else n
+  if n < 0 then none else compileOptions[n.toNat]?
+
 /-! ## State -/
 
 def pv (db : Db) (k : String) : Option Value := (db.pragmaVals.find? (·.1 == k)).map (·.2)
@@ -1261,6 +1281,13 @@ def vtabColumns (fname : String) : Option (List String × Nat) := do
   if !lname.startsWith "pragma_" then none
   let (hasArg, hasSchema, cols) ← vtabShape (lname.drop 7).toString
   some (cols ++ (if hasArg then ["arg"] else []) ++ (if hasSchema then ["schema"] else []), cols.length)
+
+/-- The modules registered by a statement that failed stay registered (they
+    belong to the connection, not to the transaction). -/
+def keepModules (failed restored : Db) : Db :=
+  match pv failed "modules" with
+  | some v => setPv restored "modules" v
+  | none => restored
 
 /-- `SELECT … FROM pragma_<name>(args)`: the module is registered, the
     arguments are the pragma's argument and schema (as text), and the rows

@@ -1078,7 +1078,9 @@ def runStmt (s : Stmt) : M (Except Err (Array (Array Value))) := do
   catch e =>
     if !e.keep then
       -- a failed statement changes nothing, and changes() becomes 0
-      set { saved with db := { saved.db with changes := 0 } }
+      -- (the eponymous virtual tables it named stay registered)
+      let failed ← getDb
+      set { saved with db := Pragma.keepModules failed { saved.db with changes := 0 } }
     return .error e
 
 /-- Run a script as the driver does: statement by statement, printing rows and errors. -/
