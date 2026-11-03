@@ -446,6 +446,18 @@ end
 def subqueryAffK (db : Db) (k : Nat) (env : Env) (q : Select) : Option Aff :=
   (selectMetaK db k env q).bind fun m => m[0]?.bind (·.aff)
 
+/-- The key of a value in an automatic index for `=` under collation `coll`
+    (after the comparison's affinity): integers and texts only, which `=`
+    compares exactly by these keys; none for the others. -/
+def eqKey (coll : Coll) (v : Value) : Option String :=
+  match v with
+  | .int _ | .text _ => some (canonKey [coll] #[v])
+  | _ => none
+
+/-- Merge two ascending arrays of indices. -/
+def mergeAsc (a b : Array Nat) : Array Nat :=
+  (a.toList ++ b.toList).mergeSort (· ≤ ·) |>.toArray
+
 /-- The state of a streamed SELECT (`runCore`): its rows so far, the keys
     DISTINCT has seen, the rows OFFSET has skipped, and the result columns
     with their collations once the sources are known. -/
@@ -1561,62 +1573,133 @@ def evalFromWhereS {σ : Type} (fuel : Nat) (q : QEnv) (f : FromItem) (where_ : 
           -- the order the plan scans the leaf in
           leafRows := leafRows.push (some (← chooseOrder rs))
       let srcs := leafSrcs.foldl (· ++ ·) #[]
-      -- the leaf of each source position
+      let nL := leaves.size
+      -- the leaf of each source position, and each leaf's first position
       let leafOf : Array Nat := (leafSrcs.mapIdx fun i ss => Array.replicate ss.size i).foldl (· ++ ·) #[]
+      let offsets : Array Nat := (leafSrcs.foldl (fun (acc : Array Nat × Nat) ss => (acc.1.push acc.2, acc.2 + ss.size)) (#[], 0)).1
       let conds := onConds ++ (where_.map conjuncts).getD []
-      -- the last leaf a conjunct may refer to
-      let level (e : Expr) : Nat := Id.run do
-        let mut lv := 0
+      -- the leaves an expression names (by the sources its names hit)
+      let leavesOf (e : Expr) : List Nat × Bool := Id.run do
+        let mut ls : List Nat := []
+        let mut allHit := true
         for (t, c) in exprRefs e do
+          let mut hit1 := false
           for h : si in [0:srcs.size] do
             let s := srcs[si]
             let hit := match t with
               | some tn => nameEq s.alias tn
               | none => s.cols.any (fun (n, _, _) => nameEq n c) || (s.hasRowid && isRowidName c)
-            if hit then lv := max lv leafOf[si]!
-        return lv
-      -- the leaf a conjunct refers to when it refers to one leaf's sources
-      -- only (every name it uses is a column of that leaf)
-      let localTo (e : Expr) : Option Nat := Id.run do
-        let mut leaf : Option Nat := none
-        for (t, c) in exprRefs e do
-          let mut hits : List Nat := []
-          for h : si in [0:srcs.size] do
-            let s := srcs[si]
-            let hit := match t with
-              | some tn => nameEq s.alias tn
-              | none => s.cols.any (fun (n, _, _) => nameEq n c) || (s.hasRowid && isRowidName c)
-            if hit then hits := leafOf[si]! :: hits
-          match hits with
-          | [] => return none
-          | l :: ls =>
-            if ls.any (· != l) then return none
-            if leaf.any (· != l) then return none
-            leaf := some l
-        return leaf
-      -- (level, local leaf, conjunct)
-      let byLevel := conds.map fun e => (level e, localTo e, e)
-      let check (cur : Array Cur) (lv : Nat) (skipLocal : Bool) : M Bool := do
-        let qr := { q with env := { q.env with frames := { srcs := srcs.extract 0 cur.size, cur, aliases } :: q.env.frames, group := none } }
-        for (l, loc, e) in byLevel do
-          if l == lv && !(skipLocal && loc == some lv) then
+            if hit then
+              hit1 := true
+              if !ls.contains leafOf[si]! then ls := leafOf[si]! :: ls
+          if !hit1 then allHit := false
+        return (ls, allHit)
+      let refs := conds.map fun e => (e, leavesOf e)
+      -- the leaf a conjunct is local to (every name it uses a column of it)
+      let locOf : List (Option Nat × Expr) := refs.map fun (e, ls, allHit) =>
+        (match ls with | [l] => if allHit then some l else none | _ => none, e)
+      let frameQ (cur : Array Cur) : QEnv :=
+        { q with env := { q.env with frames := { srcs, cur, aliases } :: q.env.frames, group := none } }
+      let empty : Array Cur := Array.replicate srcs.size none
+      let place (cur : Array Cur) (k : Nat) (r : Array Cur) : Array Cur := Id.run do
+        let mut c := cur
+        for h : j in [0:r.size] do c := c.set! (offsets[k]! + j) r[j]
+        return c
+      -- a leaf's own conjuncts on one of its rows
+      let localHolds (k : Nat) (r : Array Cur) : M Bool := do
+        let qr := frameQ (place empty k r)
+        for (loc, e) in locOf do
+          if loc == some k then
             if hasAgg e then err "misuse of aggregate function"
             if !(← condHolds fuel qr e) then return false
         return true
-      -- a leaf's own conjuncts (naming only its columns) are evaluated once
-      -- per row of the leaf, when the loop first reaches that row, and
-      -- remembered (as SQLite's plan tests a table's constraints in its loop)
-      let localHolds (k : Nat) (r : Array Cur) : M Bool := do
-        let mine := byLevel.filter fun (l, loc, _) => l == k && loc == some k
-        -- the frame has the earlier positions empty, so that names resolve
-        -- to the same source positions as in the nested loop
-        let offset := (leafSrcs.extract 0 k).foldl (· + ·.size) 0
-        let cur := Array.replicate offset none ++ r
-        let qr := { q with env := { q.env with frames := { srcs := srcs.extract 0 cur.size, cur, aliases } :: q.env.frames, group := none } }
-        for (_, _, e) in mine do
-          if hasAgg e then err "misuse of aggregate function"
-          if !(← condHolds fuel qr e) then return false
+      -- the nesting order of the loops (depth → leaf). It is the plan's choice
+      -- (SQLite reorders inner joins); the executable keeps FROM's order, or,
+      -- when the cross product is large, nests greedily: next the leaf that
+      -- least multiplies the partial rows (one joined by a conjunct to those
+      -- nested, else the one with the fewest rows after its own conjuncts).
+      -- Table-valued functions (whose arguments name earlier leaves) keep it.
+      let hasFn := leafRows.any (·.isNone)
+      let rawSize (k : Nat) : Nat := ((leafRows[k]!).map (·.size)).getD 0
+      let product := (List.range nL).foldl (fun p k => p * max 1 (rawSize k)) 1
+      let reorder := !hasFn && nL > 2 && product > 1000000
+      -- per leaf of a table: its rows' own conjuncts, once evaluated (all of
+      -- them at once when the loops are reordered, to size the leaves)
+      let mut own : Array (Array (Option Bool)) :=
+        leafRows.map fun rs? => Array.replicate ((rs?.map (·.size)).getD 0) none
+      if reorder then
+        for h : k in [0:nL] do
+          if let some rs := leafRows[k]! then
+            let mut flags := #[]
+            for r in rs do flags := flags.push (some (← localHolds k r))
+            own := own.set! k flags
+      let ownNow := own
+      let size (k : Nat) : Nat := (ownNow[k]!.filter (· != some false)).size
+      let nest0 : Array Nat := Id.run do
+        if !reorder then return (Array.range nL)
+        let mut chosen : Array Nat := #[]
+        for _ in [0:nL] do
+          let linked (k : Nat) : Bool := refs.any fun (_, ls, _) =>
+            ls.contains k && ls.any (fun l => l != k && chosen.contains l)
+          let cands := (List.range nL).filter (!chosen.contains ·)
+          -- the growth of the partial rows a leaf brings: about one row per
+          -- partial row when a conjunct joins it to those nested, else its rows
+          let factor (k : Nat) : Nat := if linked k then min 1 (size k) else size k
+          match cands.foldl (fun best k => match best with
+              | none => some k
+              | some b =>
+                if factor k < factor b || (factor k == factor b && size k < size b) then some k else some b) none with
+          | some k => chosen := chosen.push k
+          | none => pure ()
+        return chosen
+      let nest ← if hasFn then pure nest0 else chooseOrder nest0
+      -- the depth of each leaf
+      let depthOf : Array Nat := Id.run do
+        let mut d := Array.replicate nL 0
+        for h : i in [0:nest.size] do d := d.set! nest[i] i
+        return d
+      -- the depth at which a conjunct is tested: when the last leaf it names
+      -- is bound; and the leaf it is local to (every name a column of it)
+      let byLevel := (refs.zip locOf).map fun ((e, ls, _), (loc, _)) =>
+        let lv := ls.foldl (fun m l => max m depthOf[l]!) 0
+        (lv, loc, e)
+      let check (cur : Array Cur) (d : Nat) (skipLocal : Bool) : M Bool := do
+        let qr := frameQ cur
+        for (l, loc, e) in byLevel do
+          if l == d && !(skipLocal && loc == some nest[d]!) then
+            if hasAgg e then err "misuse of aggregate function"
+            if !(← condHolds fuel qr e) then return false
         return true
+      -- an automatic index (SQLite builds one for such joins): a conjunct
+      -- `c = x` at depth d with `c` a column of the leaf nested there and `x`
+      -- a column of a leaf nested before. The index only narrows the rows the
+      -- loop visits to those whose key matches; every conjunct is still tested
+      -- on them, so rows are as with the scan (in scan order).
+      let mut probes : Array (Option (Expr × Expr × Option Aff × Coll)) := #[]
+      for d in [0:nL] do
+        let k := nest[d]!
+        let mut found := none
+        if leafRows[k]!.isSome then
+          for (l, _, e) in byLevel do
+            if found.isSome || l != d then continue
+            if let .binop .eq a b := e then
+              let isCol (x : Expr) := match x with | .col .. => true | _ => false
+              if !(isCol a && isCol b) then continue
+              let (la, ha) := leavesOf a
+              let (lb, hb) := leavesOf b
+              let earlier (ls : List Nat) := !ls.isEmpty && ls.all (fun l => depthOf[l]! < d)
+              let env := (frameQ empty).env
+              let aff := cmpAff (← affOf env a) (← affOf env b)
+              let coll := cmpColl env a b
+              if ha && hb && la == [k] && earlier lb then found := some (a, b, aff, coll)
+              else if ha && hb && lb == [k] && earlier la then found := some (b, a, aff, coll)
+        probes := probes.push found
+      -- per leaf: its index (key → rows, and the rows without a key), once built
+      let mut indexes : Array (Option (Std.HashMap String (Array Nat) × Array Nat)) := Array.replicate nL none
+      -- a leaf's own conjuncts (naming only its columns) are evaluated once
+      -- per row of the leaf, when the loop first reaches that row (unless
+      -- reordered), and remembered, as SQLite's plan tests a table's
+      -- constraints in its loop
       -- the rows of leaf `k` after the partial row `pre`
       let rowsAt (k : Nat) (pre : Array Cur) : M (Array (Array Cur)) := do
         match leafRows[k]! with
@@ -1624,7 +1707,7 @@ def evalFromWhereS {σ : Type} (fuel : Nat) (q : QEnv) (f : FromItem) (where_ : 
         | none =>
           match leaves[k]! with
           | .tableFn _ n args _ =>
-            let qp := { q with env := { q.env with frames := { srcs := srcs.extract 0 pre.size, cur := pre } :: q.env.frames } }
+            let qp := { q with env := { q.env with frames := { srcs, cur := pre } :: q.env.frames } }
             let vs ← args.mapM (evalExpr fuel qp)
             let rs ← tableFunction fuel n (vs.zip (← args.mapM (argIsJson fuel qp)))
             return rs.map fun r => #[some r]
@@ -1632,48 +1715,68 @@ def evalFromWhereS {σ : Type} (fuel : Nat) (q : QEnv) (f : FromItem) (where_ : 
       -- SQLite's nested loops, depth first: each completed row goes to `step`
       -- at once (which may stop the loop), and an error leaves what was done
       -- before it (`step`'s state is returned with the error)
-      let nL := leaves.size
-      -- per leaf of a table: its rows' own conjuncts, once evaluated
-      let mut own : Array (Array (Option Bool)) :=
-        leafRows.map fun rs? => Array.replicate ((rs?.map (·.size)).getD 0) none
       let mut acc := init
-      -- frames: leaf, partial row, the leaf's rows (once computed), next index
-      let mut stack : List (Nat × Array Cur × Option (Array (Array Cur)) × Nat) := [(0, #[], none, 0)]
+      -- frames: depth, partial row, the leaf's rows (once computed), next index
+      let mut stack : List (Nat × Array Cur × Option (Array (Nat × Array Cur)) × Nat) := [(0, empty, none, 0)]
       let mut failure : Option Err := none
       let mut finished := false
       for _ in [0:fuel] do
         match stack with
         | [] => finished := true; break
-        | (k, pre, rowsO, i) :: rest =>
+        | (d, pre, rowsO, i) :: rest =>
+          let k := nest[d]!
           let r ← tryCatch (do
-              let rows ← match rowsO with
-                | some rs => pure rs
-                | none => rowsAt k pre
+              let (rows, indexes') ← match rowsO with
+                | some rs => pure (rs, indexes)
+                | none => do
+                  let all ← rowsAt k pre
+                  match probes[d]!, leafRows[k]! with
+                  | some (kc, xc, aff, coll), some rs =>
+                    if rs.isEmpty then return .ok (some rest, own, acc, indexes)
+                    let (map, loose, ix') ← match indexes[k]! with
+                      | some (m, l) => pure (m, l, indexes)
+                      | none => do
+                        let mut m : Std.HashMap String (Array Nat) := {}
+                        let mut l : Array Nat := #[]
+                        for h : j in [0:rs.size] do
+                          let w := cmpConvert aff (← evalExpr fuel (frameQ (place empty k rs[j])) kc)
+                          match eqKey coll w with
+                          | some key => m := m.insert key ((m.getD key #[]).push j)
+                          | none => if !w.isNull then l := l.push j
+                        pure (m, l, indexes.set! k (some (m, l)))
+                    let v := cmpConvert aff (← evalExpr fuel (frameQ pre) xc)
+                    let sel : Array Nat := match eqKey coll v with
+                      | some key => mergeAsc (map.getD key #[]) loose
+                      | none => if v.isNull then #[] else Array.range rs.size
+                    pure (sel.map fun j => (j, rs[j]!), ix')
+                  | _, _ => pure (all.mapIdx fun j r => (j, r), indexes)
               if h : i < rows.size then
-                let cur := pre ++ rows[i]
-                let next := (k, pre, some rows, i + 1) :: rest
+                let (j, row) := rows[i]
+                let cur := place pre k row
+                let next := (d, pre, some rows, i + 1) :: rest
                 -- the leaf's own conjuncts on this row (a table leaf)
                 let (ownOk, own') ← if leafRows[k]!.isSome then do
-                    match own[k]![i]? with
+                    match own[k]![j]? with
                     | some (some b) => pure (b, own)
                     | _ =>
-                      let b ← localHolds k rows[i]
-                      pure (b, own.modify k (·.set! i (some b)))
+                      let b ← localHolds k row
+                      pure (b, own.modify k (·.set! j (some b)))
                   else pure (true, own)
-                if !ownOk then return .ok (some next, own', acc)
-                if ← check cur k (leafRows[k]!.isSome) then
-                  if k + 1 == nL then
+                if !ownOk then return .ok (some next, own', acc, indexes')
+                if ← check cur d (leafRows[k]!.isSome) then
+                  if d + 1 == nL then
                     let (a, more) ← step acc srcs cur
-                    return Except.ok (if more then some next else none, own', a)
-                  else return .ok (some ((k + 1, cur, none, 0) :: next), own', acc)
-                else return .ok (some next, own', acc)
-              else return .ok (some rest, own, acc))
+                    return Except.ok (if more then some next else none, own', a, indexes')
+                  else return .ok (some ((d + 1, cur, none, 0) :: next), own', acc, indexes')
+                else return .ok (some next, own', acc, indexes')
+              else return .ok (some rest, own, acc, indexes'))
             (fun e => pure (Except.error e))
           match r with
           | .error e => failure := some e; break
-          | .ok (st, own', a) =>
+          | .ok (st, own', a, ix') =>
             own := own'
             acc := a
+            indexes := ix'
             match st with
             | some st => stack := st
             | none => finished := true; break
