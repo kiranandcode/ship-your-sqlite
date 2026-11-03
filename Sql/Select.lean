@@ -76,6 +76,61 @@ structure AggArg where
   vals : List Value
   deriving Inhabited
 
+/-- The inner-join chain of a FROM item: leaves joined by INNER/CROSS joins
+    without USING/NATURAL, and the ON conditions of those joins. Any other join
+    is a single leaf. -/
+partial def innerChain : FromItem → List FromItem × List Expr
+  | .join l k false r on [] =>
+    if k == .inner || k == .cross then
+      let (ls, lc) := innerChain l
+      let (rs, rc) := innerChain r
+      (ls ++ rs, lc ++ rc ++ on.toList)
+    else ([.join l k false r on []], [])
+  | f => ([f], [])
+
+/-- The conjuncts of a WHERE clause. -/
+partial def conjuncts : Expr → List Expr
+  | .binop .and a b => conjuncts a ++ conjuncts b
+  | e => [e]
+
+mutual
+/-- Column names referred to anywhere in an expression, subqueries included
+    (qualifier, name). Conservative: used only to delay a conjunct. -/
+partial def exprRefs : Expr → List (Option Name × Name)
+  | .col _ t c => [(t, c)]
+  | .dqcol c => [(none, c)]
+  | .unop _ e | .collate e _ | .cast e _ | .isNull _ e => exprRefs e
+  | .binop _ a b => exprRefs a ++ exprRefs b
+  | .between _ a b c => exprRefs a ++ exprRefs b ++ exprRefs c
+  | .inList _ e l => exprRefs e ++ l.flatMap exprRefs
+  | .inSelect _ e q => exprRefs e ++ selectRefs q
+  | .inTable _ e _ _ a => exprRefs e ++ a.flatMap exprRefs
+  | .like _ _ a b c => exprRefs a ++ exprRefs b ++ (c.map exprRefs).getD []
+  | .case_ b ws e => (b.map exprRefs).getD [] ++ ws.flatMap (fun (x, y) => exprRefs x ++ exprRefs y) ++ (e.map exprRefs).getD []
+  | .exists_ q | .subquery q => selectRefs q
+  | .row l => l.flatMap exprRefs
+  | .call _ _ args _ ob f _ => args.flatMap exprRefs ++ ob.flatMap (fun (.mk e _ _) => exprRefs e) ++ (f.map exprRefs).getD []
+  | .raise _ m => (m.map exprRefs).getD []
+  | _ => []
+
+partial def selectRefs : Select → List (Option Name × Name)
+  | .mk ctes _ first rest ob lim off =>
+    ctes.flatMap (fun (.mk _ _ _ q) => selectRefs q) ++ coreRefs first ++ rest.flatMap (fun (_, c) => coreRefs c) ++
+    ob.flatMap (fun (.mk e _ _) => exprRefs e) ++ (lim.map exprRefs).getD [] ++ (off.map exprRefs).getD []
+
+partial def coreRefs : SelectCore → List (Option Name × Name)
+  | .values rows => rows.flatten.flatMap exprRefs
+  | .select _ cols f w g h _ =>
+    cols.flatMap (fun | .expr e _ _ => exprRefs e | _ => []) ++ (f.map fromRefs).getD [] ++
+    (w.map exprRefs).getD [] ++ g.flatMap exprRefs ++ (h.map exprRefs).getD []
+
+partial def fromRefs : FromItem → List (Option Name × Name)
+  | .tableFn _ _ args _ => args.flatMap exprRefs
+  | .subquery q _ => selectRefs q
+  | .join l _ _ r on _ => fromRefs l ++ fromRefs r ++ (on.map exprRefs).getD []
+  | _ => []
+end
+
 def windowParamBase : Nat := 1000000000
 
 /-- Replace each window-function call (outside subqueries) by a numbered
@@ -859,6 +914,72 @@ partial def computeWindow (ctxs : Array QEnv) (windows : List (Name × Window)) 
       result := result.set! row v
   return (result, order)
 
+/-- FROM with WHERE: a chain of inner joins is evaluated as nested loops, each
+    conjunct of WHERE and of the ON clauses applied as soon as every source it
+    may refer to is bound. Equal to evaluating the joins and then filtering. -/
+partial def evalFromWhere (q : QEnv) (f : FromItem) (where_ : Option Expr) (aliases : List (Name × Expr)) :
+    M (Array Src × Array (Array Cur)) := do
+  let (leavesL, onConds) := innerChain f
+  let leaves := leavesL.toArray
+  -- leaves whose rows do not depend on earlier leaves are evaluated once;
+  -- table-valued functions are evaluated per partial row (their arguments may
+  -- refer to earlier sources)
+  let mut leafSrcs : Array (Array Src) := #[]
+  let mut leafRows : Array (Option (Array (Array Cur))) := #[]
+  for lf in leaves do
+    match lf with
+    | .tableFn _ n _ alias =>
+      let (cols, _) ← tableFunction n []
+      leafSrcs := leafSrcs.push #[metaSrc (alias.getD n) cols]
+      leafRows := leafRows.push none
+    | _ =>
+      let (ss, rs) ← evalFrom q lf
+      leafSrcs := leafSrcs.push ss
+      leafRows := leafRows.push (some rs)
+  let srcs := leafSrcs.foldl (· ++ ·) #[]
+  -- the leaf of each source position
+  let leafOf : Array Nat := (leafSrcs.mapIdx fun i ss => Array.replicate ss.size i).foldl (· ++ ·) #[]
+  let conds := onConds ++ (where_.map conjuncts).getD []
+  -- the last leaf a conjunct may refer to
+  let level (e : Expr) : Nat := Id.run do
+    let mut lv := 0
+    for (t, c) in exprRefs e do
+      for h : si in [0:srcs.size] do
+        let s := srcs[si]
+        let hit := match t with
+          | some tn => nameEq s.alias tn
+          | none => s.cols.any (fun (n, _, _) => nameEq n c) || (s.hasRowid && isRowidName c)
+        if hit then lv := max lv leafOf[si]!
+    return lv
+  let byLevel := conds.map fun e => (level e, e)
+  let check (cur : Array Cur) (lv : Nat) : M Bool := do
+    let qr := { q with env := { q.env with frames := { srcs := srcs.extract 0 cur.size, cur, aliases } :: q.env.frames, group := none } }
+    for (l, e) in byLevel do
+      if l == lv then
+        if hasAgg e then err "misuse of aggregate function"
+        if truth (← evalExpr qr e) != some true then return false
+    return true
+  let mut partial_ : Array (Array Cur) := #[#[]]
+  for h : k in [0:leaves.size] do
+    let mut next := #[]
+    for pre in partial_ do
+      let rows ← match leafRows[k]! with
+        | some rs => pure rs
+        | none =>
+          match leaves[k]! with
+          | .tableFn _ n args alias =>
+            let qp := { q with env := { q.env with frames := { srcs := srcs.extract 0 pre.size, cur := pre } :: q.env.frames } }
+            let vs ← args.mapM (evalExpr qp)
+            let (cols, rs) ← tableFunction n (vs.zip (args.map Json.exprIsJson))
+            let _ := (cols, alias)
+            pure (rs.mapIdx fun i r => #[some (⟨i + 1, r⟩ : Row)])
+          | _ => pure #[]
+      for r in rows do
+        let cur := pre ++ r
+        if ← check cur k then next := next.push cur
+    partial_ := next
+  return (srcs, partial_)
+
 -- FROM
 
 /-- The rows of a named table, view or CTE, with its source description. -/
@@ -1106,8 +1227,10 @@ partial def runCore (q : QEnv) (core : SelectCore) (orderBy : List OrderTerm) :
     return (cols, out)
   | .select distinct cols from_ where_ groupBy having windows =>
     let _ := windows
+    -- result-column aliases usable in WHERE (`*` columns resolve as columns anyway)
+    let aliases0 := cols.filterMap fun | .expr e (some a) _ => some (a, e) | _ => none
     let (srcs, rows) ← match from_ with
-      | some f => evalFrom q f
+      | some f => evalFromWhere q f where_ aliases0
       | none => pure (#[], #[#[]])
     let rcols ← expandCols srcs cols
     let frameOf (cur : Array Cur) : Scope := { srcs, cur }
@@ -1115,14 +1238,14 @@ partial def runCore (q : QEnv) (core : SelectCore) (orderBy : List OrderTerm) :
       { q with env := { q.env with frames := { frameOf cur with aliases } :: q.env.frames, group := none } }
     let exprs := rcols.filterMap fun | .expr e _ _ => some e | _ => none
     let aliases := rcols.filterMap fun | .expr e (some a) _ => some (a, e) | _ => none
-    -- WHERE
+    -- WHERE (with a FROM clause it was applied while joining)
     let mut kept := #[]
     for cur in rows do
-      match where_ with
-      | some w =>
+      match where_, from_ with
+      | some w, none =>
         if hasAgg w then err "misuse of aggregate function"
         if truth (← evalExpr (withFrame cur aliases) w) == some true then kept := kept.push cur
-      | none => kept := kept.push cur
+      | _, _ => kept := kept.push cur
     let qm := withFrame (Array.replicate srcs.size none)
     let cmeta : Array ColMeta := rcols.toArray.map fun rc =>
       match rc with
