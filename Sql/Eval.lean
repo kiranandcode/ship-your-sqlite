@@ -27,6 +27,8 @@ structure Src where
   rowidCol : Option Nat := none
   /-- columns hidden from `*` (USING/NATURAL duplicates) -/
   hidden : List Nat := []
+  /-- HIDDEN columns: resolvable by name, not part of `*` -/
+  hiddenStar : List Nat := []
   /-- only reachable by qualified names (`excluded.` of an UPSERT) -/
   qualOnly : Bool := false
   deriving Inhabited
