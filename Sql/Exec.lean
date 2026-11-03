@@ -817,6 +817,13 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
                        rows := t.rows.map fun r => { r with vals := r.vals.eraseIdx! ci } }
     modifyMain fun s => s.setTable t'
     return #[]
+  | .reindex none => return #[]
+  | .reindex (some n) =>
+    let db ← getDb
+    if (collOfName n).isSome || (db.main.findTable n).isSome || db.main.indexes.any (nameEq ·.name n) then return #[]
+    err "unable to identify the object to be reindexed"
+  | .analyze _ => return #[]
+  | .vacuum _ none => return #[]
   | _ => err "statement not modelled yet"
 
 /-- ON DELETE actions for the children of a deleted parent row. -/

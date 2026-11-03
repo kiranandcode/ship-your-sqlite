@@ -408,6 +408,7 @@ partial def valueOf (q : QEnv) : Resolved → M Value
 /-- An aggregate call over the current group. -/
 partial def evalAgg (q : QEnv) (n : Name) (distinct : Bool) (args : List Expr) (star : Bool)
     (ob : List OrderTerm) (filter : Option Expr) : M Value := do
+  if distinct && args.length != 1 then err "DISTINCT aggregates must have exactly one argument"
   let some grp := q.env.group | err s!"misuse of aggregate function {n}()"
   let name := n.toLower
   -- evaluate arguments per row of the group, in the context of that row
@@ -450,7 +451,13 @@ partial def aggFinish (q : QEnv) (n : Name) (star : Bool) (args : List Expr) (co
     let mut overflow := false
     let mut rsum : Float := 0.0
     for v in nn do
-      match v.numeric with
+      -- sqlite3_value_numeric_type: a text is an integer only if all of it reads as one
+      let nv : Value := match v with
+        | .text t | .blob t => match numericOfText t false with
+          | some (.int i) => .int i
+          | _ => .real v.toReal
+        | w => w
+      match nv with
       | .int i =>
         if allInt then
           isum := isum + i
