@@ -18,6 +18,7 @@ siblings for TinyCC and libtommath.
 - Plan, scope and decisions: [BRIEF.md](BRIEF.md) (and Kiran's scope note,
   [SCOPE-FROM-KIRAN.md](SCOPE-FROM-KIRAN.md): all of SQLite, not a subset)
 - Phases, coverage, obligations, gaps and obstructions: [PHASES.md](PHASES.md)
+- What the theorem's semantics adds to CompCert's Clight: [TRUST.md](TRUST.md)
 - Discipline: [CLAUDE.md](CLAUDE.md)
 - Provenance: [ATTRIBUTION.md](ATTRIBUTION.md)
 
