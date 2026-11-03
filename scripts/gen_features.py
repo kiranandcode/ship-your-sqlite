@@ -29,7 +29,7 @@ ORDER BY|ORDER BY COLLATE|NULLS FIRST/LAST|LIMIT|OFFSET|DISTINCT|ALL|UNION|UNION
 VALUES clause|WINDOW clause|OVER partition|OVER order|frame ROWS|frame RANGE|frame GROUPS|frame EXCLUDE|
 FILTER clause|aggregate ORDER BY|INDEXED BY|NOT INDEXED|AS alias"""
 EXPRS = """literal integer|literal real|literal hex integer|literal string|literal blob|NULL|TRUE/FALSE|
-bound parameter|column reference|unary -|unary +|~|NOT|||(concat)|* / %|+ -|<< >> & ||(bitwise)|< <= > >=|= == != <>|
+bound parameter|column reference|unary -|unary +|~|NOT|concat operator|* / %|+ -|<< >> &|bitwise or|< <= > >=|= == != <>|
 IS|IS NOT|IS DISTINCT FROM|IN list|IN subquery|NOT IN|BETWEEN|LIKE|LIKE ESCAPE|GLOB|REGEXP|MATCH|AND|OR|
 CASE simple|CASE searched|CAST|COLLATE|EXISTS|scalar subquery|correlated subquery|row value|-> ->>|
 function call|DISTINCT aggregate|RAISE|ISNULL/NOTNULL"""

@@ -233,6 +233,9 @@ inductive Stmt where
   | explain (queryPlan : Bool) (s : Stmt)
   | createVirtualTable (ifNotExists : Bool) (schema : Option Name) (name : Name) (module : Name)
       (args : List String)
+      -- prepare's tail for "already exists", a parse-time error (the end of
+      -- the token after the module name)
+      (tailAt : Nat)
 
 instance : Inhabited Stmt := ⟨.commit⟩
 instance : Inhabited TriggerEvent := ⟨.delete⟩

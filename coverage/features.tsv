@@ -110,11 +110,11 @@ F0108	expression	unary -	lang.html
 F0109	expression	unary +	lang.html
 F0110	expression	~	lang.html
 F0111	expression	NOT	lang.html
-F0112	expression	(concat)	lang.html
+F0112	expression	concat operator	lang.html
 F0113	expression	* / %	lang.html
 F0114	expression	+ -	lang.html
 F0115	expression	<< >> &	lang.html
-F0116	expression	(bitwise)	lang.html
+F0116	expression	bitwise or	lang.html
 F0117	expression	< <= > >=	lang.html
 F0118	expression	= == != <>	lang.html
 F0119	expression	IS	lang.html

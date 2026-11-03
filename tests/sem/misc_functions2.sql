@@ -1,0 +1,16 @@
+select load_extension('x');
+select load_extension('x', 'y');
+select match('a', 'b');
+select sqlite_log(1, 'hello'), typeof(sqlite_log(1, 'x'));
+create virtual table v using json_each;
+create virtual table v2 using nosuch(x, y);
+create table t(a);
+create virtual table t using fts5(x);
+create virtual table if not exists t using fts5(x);
+create virtual table t using m2;
+create virtual table if not exists v3 using rtree(id, a, b);
+pragma incremental_vacuum;
+pragma incremental_vacuum(5);
+vacuum;
+vacuum main;
+select * from t;

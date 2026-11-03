@@ -267,6 +267,57 @@ def currentTable (n : Name) : M Table := do
     if (← getDb).main.findView n |>.isSome then err s!"cannot modify {n} because it is a view"
     err s!"no such table: {n}"
 
+/-! ## ANALYZE (analyze.c) -/
+
+/-- The `sqlite_stat1` rows of one table (`analyzeOneTable`), as (idx, stat):
+    for each index in `pTab->pIndex` order (only `only` if given), "nRow
+    avg1 … avgN" with avgᵢ the rows per distinct prefix of i+1 key columns
+    (rounded up; 1 when it would be 2 with nRow·10 ≤ distinct·11), NULLs
+    equal; an empty index has no row unless partial. Then, when the table
+    has no non-partial index, (NULL, row count) if it has rows. -/
+def analyzeRows (fuel : Nat) (t : Table) (only : Option Name) : M (List (Option String × Value)) := do
+  let db ← getDb
+  let mut out : List (Option String × Value) := []
+  let mut needTableCnt := true
+  for ix in (Pragma.indexList db t).toList do
+    if let some o := only then
+      if !nameEq ix.name o then continue
+    if !ix.partial_ then needTableCnt := false
+    let decl := db.main.indexes.find? (nameEq ·.name ix.name)
+    -- the index's entries: the rows its WHERE admits, keyed by its key columns
+    let mut keys : Array (Array Value) := #[]
+    for r in t.rows do
+      let q := qOfRow t r
+      if let some w := decl.bind (·.where_) then
+        if !(← condHolds fuel q w) then continue
+      let mut k := #[]
+      for h : j in [0:ix.keys.size] do
+        let c := ix.keys[j]
+        let v ← if c.cid == -1 then pure (Value.int r.rowid)
+          else if c.cid ≥ 0 then pure (r.vals[c.cid.toNat]?.getD .null)
+          else match decl.bind (·.cols[j]?) with
+            | some (.mk e _ _) => evalExpr fuel q (match e with | .collate x _ => x | x => x)
+            | none => pure .null
+        k := k.push v
+      keys := keys.push k
+    let nRow := keys.size
+    if nRow == 0 && !ix.partial_ then continue
+    let colls := ix.keys.toList.map fun c => (collOfName c.coll).getD .binary
+    let mut stat := toString nRow
+    for i in [0:ix.keys.size] do
+      let distinct := (keys.foldl (fun (st : Std.HashSet String) k => st.insert (canonKey colls (k.extract 0 (i + 1)))) {}).size
+      let nD := max distinct 1
+      let v := (nRow + nD - 1) / nD
+      let v := if v == 2 && nRow * 10 ≤ nD * 11 then 1 else v
+      stat := stat ++ s!" {v}"
+    -- a WITHOUT ROWID table's primary key is listed under the table's name
+    let name := if t.withoutRowid && ix.origin == "pk" then t.name else ix.name
+    out := out ++ [(some name, .ofString stat)]
+  if only.isNone && needTableCnt && !t.rows.isEmpty then
+    -- the record has TEXT affinity ("BBB"): the count is stored as text
+    out := out ++ [(none, .ofString (toString t.rows.size))]
+  return out
+
 /-- Insert one row (values for every column, rowid value or none), applying
     conflict resolution. Returns the inserted row, or none if ignored. -/
 def insertRow (fuel : Nat) (tname : Name) (vals : Array Value) (rowidV : Option Value) (ovr : Option ConflictRes) :
@@ -998,8 +1049,55 @@ def execStmt (fuel : Nat) (q : QEnv) (s : Stmt) : M (Array (Array Value)) :=
         let db ← getDb
         if (collOfName n).isSome || (db.main.findTable n).isSome || db.main.indexes.any (nameEq ·.name n) then return #[]
         err "unable to identify the object to be reindexed"
-      | .analyze _ => return #[]
+      | .analyze target =>
+        let db ← getDb
+        -- what to analyze: everything, a database, an index or a table
+        -- (sqlite3Analyze); the stat rows deleted first (openStatTable)
+        let isDb (n : Name) := nameEq n "main" || db.attached.any (nameEq · n)
+        let inHashOrder : List Table :=
+          let ts := Pragma.tablesIn db "main"
+          let keys := (Pragma.hashOf db "main").keys
+          keys.filterMap fun k => ts.find? (nameEq ·.name k)
+        let (targets, del) : List (Table × Option Name) × (Row → Bool) ← match target with
+          | none => pure (inHashOrder.map (·, none), fun _ => true)
+          | some n =>
+            if isDb n then pure (inHashOrder.map (·, none), fun _ => true)
+            else match db.main.indexes.find? (nameEq ·.name n) with
+              | some ix => match db.main.findTable ix.table with
+                | some t => pure ([(t, some ix.name)], fun (r : Row) => match r.vals[1]? with
+                    | some (Value.text b) => nameEq (String.fromUTF8! b) ix.name | _ => false)
+                | none => err s!"no such table: {ix.table}"
+              | none => match db.main.findTable n with
+                | some t => pure ([(t, none)], fun (r : Row) => match r.vals[0]? with
+                    | some (Value.text b) => nameEq (String.fromUTF8! b) t.name | _ => false)
+                | none =>
+                  if (db.main.findView n).isSome then pure ([], fun _ => false)
+                  else err s!"no such table: {n}"
+        if (db.main.findTable "sqlite_stat1").isNone then
+          let st ← mkTable "sqlite_stat1" [{ name := "tbl", type := "", constraints := [] },
+            { name := "idx", type := "", constraints := [] }, { name := "stat", type := "", constraints := [] }]
+            [] false false "CREATE TABLE sqlite_stat1(tbl,idx,stat)"
+          modifyMain fun s => { s with objs := s.objs.push (.table st) }
+        let some st := (← getDb).main.findTable "sqlite_stat1" | err "internal: sqlite_stat1"
+        let mut rows := st.rows.filter (!del ·)
+        for (t, only) in targets do
+          if t.name.toLower.startsWith "sqlite_" then continue
+          for (idx, stat) in ← analyzeRows fuel t only do
+            let rid := rows.foldl (fun m r => max m r.rowid) 0 + 1
+            rows := rows.push { rowid := rid, vals := #[.ofString t.name, (idx.map Value.ofString).getD .null, stat] }
+        modifyMain fun s => s.setTable { st with rows }
+        return #[]
       | .vacuum _ none => return #[]
+      | .createVirtualTable ine _ name m _ tailAt =>
+        -- this build registers no module that CREATE VIRTUAL TABLE can use
+        -- (json_each and the pragma tables are eponymous only); the name is
+        -- checked first (sqlite3StartTable)
+        let db ← getDb
+        if objExists db name || (db.main.findView name).isSome then
+          if ine then return #[]
+          -- an error of the parser (sqlite3StartTable): prepare stops there
+          throw { code := SQLITE_ERROR, msg := s!"table {name} already exists", tail := some tailAt }
+        err s!"no such module: {m}"
       | _ => err "statement not modelled yet"
 
 /-- ON DELETE actions for the children of a deleted parent row. -/

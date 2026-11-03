@@ -3,7 +3,7 @@ F0001	diff	ALTER TABLE RENAME
 F0002	diff	ALTER TABLE RENAME COLUMN
 F0003	diff	ALTER TABLE ADD COLUMN
 F0004	diff	ALTER TABLE DROP COLUMN
-F0005	open	ANALYZE
+F0005	diff	ANALYZE
 F0006	diff	ATTACH
 F0007	diff	DETACH
 F0008	diff	BEGIN
@@ -25,7 +25,7 @@ F0023	diff	CREATE TRIGGER BEFORE
 F0024	diff	CREATE TRIGGER AFTER
 F0025	diff	CREATE TRIGGER INSTEAD OF
 F0026	diff	CREATE TRIGGER FOR EACH ROW WHEN
-F0027	open	CREATE VIRTUAL TABLE
+F0027	diff	CREATE VIRTUAL TABLE
 F0028	diff	DELETE
 F0029	diff	DELETE LIMIT
 F0030	diff	DROP INDEX
@@ -52,7 +52,7 @@ F0050	diff	SELECT
 F0051	diff	UPDATE
 F0052	diff	UPDATE FROM
 F0053	diff	UPDATE LIMIT
-F0054	open	VACUUM
+F0054	diff	VACUUM
 F0055	open	VACUUM INTO
 F0056	diff	WITH
 F0057	diff	WITH RECURSIVE
@@ -110,11 +110,11 @@ F0108	diff	unary -
 F0109	diff	unary +
 F0110	diff	~
 F0111	diff	NOT
-F0112	open	(concat)
+F0112	diff	concat operator
 F0113	diff	* / %
 F0114	diff	+ -
-F0115	open	<< >> &
-F0116	open	(bitwise)
+F0115	diff	<< >> &
+F0116	diff	bitwise or
 F0117	diff	< <= > >=
 F0118	diff	= == != <>
 F0119	diff	IS
@@ -204,9 +204,9 @@ F0202	diff	cos
 F0203	diff	cosh
 F0204	diff	count
 F0205	diff	cume_dist
-F0206	open	current_date
-F0207	open	current_time
-F0208	open	current_timestamp
+F0206	diff	current_date
+F0207	diff	current_time
+F0208	diff	current_timestamp
 F0209	diff	date
 F0210	diff	datetime
 F0211	diff	degrees
@@ -262,13 +262,13 @@ F0260	diff	like
 F0261	diff	likelihood
 F0262	diff	likely
 F0263	diff	ln
-F0264	open	load_extension
+F0264	diff	load_extension
 F0265	diff	log
 F0266	diff	log10
 F0267	diff	log2
 F0268	diff	lower
 F0269	diff	ltrim
-F0270	open	match
+F0270	diff	match
 F0271	diff	max
 F0272	diff	min
 F0273	diff	mod
@@ -295,7 +295,7 @@ F0293	diff	sin
 F0294	diff	sinh
 F0295	diff	sqlite_compileoption_get
 F0296	diff	sqlite_compileoption_used
-F0297	open	sqlite_log
+F0297	diff	sqlite_log
 F0298	diff	sqlite_source_id
 F0299	diff	sqlite_version
 F0300	diff	sqrt
@@ -350,7 +350,7 @@ F0348	diff	fullfsync
 F0349	diff	function_list
 F0350	diff	hard_heap_limit
 F0351	diff	ignore_check_constraints
-F0352	open	incremental_vacuum
+F0352	diff	incremental_vacuum
 F0353	diff	index_info
 F0354	diff	index_list
 F0355	diff	index_xinfo
@@ -392,4 +392,4 @@ F0390	diff	json_each
 F0391	diff	json_tree
 F0392	diff	jsonb_each
 F0393	diff	jsonb_tree
-F0394	open	pragma_* table-valued functions
+F0394	diff	pragma_* table-valued functions

@@ -1199,6 +1199,18 @@ def scalarFn (fuel : Nat) (n : Name) (vs : List Value) (colls : List (Option (Co
         if nargs < 2 then wrong
         -- iif(c1, v1, c2, v2, …, else)
         return iifPick vs
+      -- extension loading is off by default (SQLITE_LoadExtFunc)
+      | "load_extension" =>
+        if nargs < 1 || nargs > 2 then wrong
+        err "not authorized"
+      -- the MATCH operator's function form: only virtual tables provide it
+      | "match" =>
+        if nargs != 2 then wrong
+        err "unable to use function MATCH in the requested context"
+      -- sqlite_log(code, msg) writes to the error log and returns NULL
+      | "sqlite_log" =>
+        if nargs != 2 then wrong
+        return .null
       | "unistr" =>
         if nargs != 1 then wrong
         if a0.isNull then return .null

@@ -44,8 +44,8 @@ PAT = {
  'aggregate ORDER BY': r'\w\s*\([^()]*\border\s+by[^()]*\)', 'INDEXED BY': r'indexed\s+by', 'NOT INDEXED': r'not\s+indexed', 'AS alias': r'\bas\s+\w+',
  'literal integer': r'\b\d+\b', 'literal real': r'\d\.\d|\de\d', 'literal hex integer': r'0x[0-9a-f]', 'literal string': r"'", 'literal blob': r"x'",
  'NULL': r'\bnull\b', 'TRUE/FALSE': r'\b(true|false)\b', 'bound parameter': r'\?\d*|:\w+', 'column reference': r'select\s+[a-z_]\w*\s+from',
- 'unary -': r'[(,=\s]-\w', 'unary +': r'[(,=\s]\+\w', '~': r'~', 'NOT': r'\bnot\b', '||(concat)': r'\|\|', '* / %': r'\*|/|%', '+ -': r'\+',
- '<< >> & ||(bitwise)': r'<<|>>', '< <= > >=': r'<=|>=', '= == != <>': r'!=|<>', 'IS': r'\bis\b', 'IS NOT': r'is\s+not', 'IS DISTINCT FROM': r'is\s+(not\s+)?distinct\s+from',
+ 'unary -': r'[(,=\s]-\w', 'unary +': r'[(,=\s]\+\w', '~': r'~', 'NOT': r'\bnot\b', 'concat operator': r'\|\|', '* / %': r'\*|/|%', '+ -': r'\+',
+ '<< >> &': r'<<|>>|[^&]&[^&]', 'bitwise or': r'[^|]\|[^|]', '< <= > >=': r'<=|>=', '= == != <>': r'!=|<>', 'IS': r'\bis\b', 'IS NOT': r'is\s+not', 'IS DISTINCT FROM': r'is\s+(not\s+)?distinct\s+from',
  'IN list': r'\bin\s*\(\s*[^s(]', 'IN subquery': r'\bin\s*\(\s*select', 'NOT IN': r'not\s+in', 'BETWEEN': r'\bbetween\b', 'LIKE': r'\blike\b',
  'LIKE ESCAPE': r'\bescape\b', 'GLOB': r'\bglob\b', 'REGEXP': r'\bregexp\b', 'MATCH': r'\bmatch\b', 'AND': r'\band\b', 'OR': r'\bor\b',
  'CASE simple': r'case\s+\w+\s+when', 'CASE searched': r'case\s+when', 'CAST': r'\bcast\s*\(', 'COLLATE': r'\bcollate\b', 'EXISTS': r'\bexists\s*\(',
@@ -86,10 +86,13 @@ def main():
     for fid, area, name, _ in feats:
         if area == 'function':
             pat = r'(?<![\w.])' + re.escape(name.lower()) + r'\s*\(' if name not in ('->', '->>') else re.escape(name)
+            # current_date, current_time, current_timestamp are also keywords
+            if name.startswith('current_'): pat = r'\b' + name.lower() + r'\b'
+
         elif area == 'pragma':
             pat = r'pragma\s+(\w+\.)?' + re.escape(name.lower()) + r'\b|pragma_' + re.escape(name.lower())
         elif area == 'module':
-            pat = re.escape(name.split()[0].lower().replace('*', '')) + r'\s*\('
+            pat = re.escape(name.split()[0].lower()).replace(r'\*', r'\w+') + r'\s*\('
         elif area == 'semantics':
             pat = re.escape(SEM.get(name, '\x00').lower())
         else:

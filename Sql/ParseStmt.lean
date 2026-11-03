@@ -472,6 +472,9 @@ def parseCreate : Nat → Nat → P Stmt
     let (sch, nm) ← qualifiedName
     kw "USING"
     let m ← name
+    let tailAt ← (do match ← peek with
+      | some t => pure t.stop
+      | none => pure (← get).src.size)
     let args ← if ← eatOp "LP" then do
         -- module arguments are kept as text
         let mut depth := 1
@@ -486,7 +489,7 @@ def parseCreate : Nat → Nat → P Stmt
         op "RP"
         pure ((txt.splitOn ",").map (·.trimAscii.toString))
       else pure []
-    return .createVirtualTable ine sch nm m args
+    return .createVirtualTable ine sch nm m args tailAt
   failHere
 end
 
