@@ -13,6 +13,7 @@
   CTEs, SQLite's own depth limits) is Phase 2.5 (PHASES.md).
 -/
 import Sql.Db
+import Sql.Json.Funcs
 
 namespace Sql
 
@@ -60,6 +61,8 @@ structure Env where
 
 structure Ctx where
   db : Db
+  /-- json.c's cache of parsed JSON texts, per statement (`Sql.Json`) -/
+  jsonCache : Json.Cache := {}
   deriving Inhabited
 
 abbrev M := ExceptT Err (StateM Ctx)

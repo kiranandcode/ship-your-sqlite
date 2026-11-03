@@ -185,6 +185,14 @@ partial def replaceWindows (es : List Expr) : List Expr × List Expr :=
   let (es', calls) := (es.mapM go).run #[]
   (es', calls.toList)
 
+/-- The index of the argument iif(c1, v1, c2, v2, …, else) returns. -/
+def iifIndex (vs : List Value) : Option Nat :=
+  let rec go (i : Nat) : List Value → Option Nat
+    | c :: _ :: rest => if truth c == some true then some (i + 1) else go (i + 2) rest
+    | [_] => some i
+    | [] => none
+  go 0 vs
+
 def iifPick : List Value → Value
   | c :: v :: rest => if truth c == some true then v else iifPick rest
   | [e] => e
@@ -351,23 +359,7 @@ partial def evalExpr (q : QEnv) (e : Expr) : M Value := do
       | .regexp => err "no such function: regexp"
       | .match_ => err "unable to use function MATCH in the requested context"
     return .int (if r != neg then 1 else 0)
-  | .case_ base whens els =>
-    match base with
-    | some b =>
-      let bv ← evalExpr q b
-      for (w, t) in whens do
-        let wv ← evalExpr q w
-        let c := compareOp .eq (cmpAff (exprAff env b) (exprAff env w)) (cmpColl env b w) bv wv
-        if truth c == some true then return ← evalExpr q t
-      match els with
-      | some x => evalExpr q x
-      | none => return .null
-    | none =>
-      for (w, t) in whens do
-        if truth (← evalExpr q w) == some true then return ← evalExpr q t
-      match els with
-      | some x => evalExpr q x
-      | none => return .null
+  | .case_ .. => return (← evalExprST q e).1
   | .exists_ sub =>
     let (_, rows) ← runSelect q sub
     return .int (if rows.isEmpty then 0 else 1)
@@ -553,21 +545,79 @@ partial def argIsJson (q : QEnv) (a : Expr) : M Bool := do
     | _ => return false
   | _ => return false
 
-partial def callFn (q : QEnv) (n : Name) (args : List Expr) (_distinct : Bool) : M Value := do
-  let vs ← args.mapM (evalExpr q)
-  -- the library modules (JSON first: it needs the subtype of each argument)
-  let lift (r : Except Err Value) : M Value := match r with
-    | .ok v => pure v
-    | .error e => throw e
-  match Json.scalar? n.toLower (vs.zip (← args.mapM (argIsJson q))) with
-  | some r => lift r
+partial def callFn (q : QEnv) (n : Name) (args : List Expr) (distinct : Bool) : M Value :=
+  return (← callFnST q n args distinct).1
+
+/-- A scalar call, with whether its result carries the JSON subtype: a JSON
+    function says so; coalesce/ifnull/iif/nullif/likely/unlikely/likelihood and
+    two-or-more-argument min/max pass on the subtype of the argument they
+    return (checked against SQLite by the JSON lane, tests/sem/json_subtype.sql). -/
+partial def callFnST (q : QEnv) (n : Name) (args : List Expr) (_distinct : Bool) : M (Value × Bool) := do
+  let evs ← args.mapM (evalExprST q)
+  let vs := evs.map (·.1)
+  let flags := evs.map (·.2)
+  -- an arity error names the function as written
+  let fixName (e : Err) : Err :=
+    let low := s!"wrong number of arguments to function {n.toLower}()"
+    if e.msg == low then { e with msg := s!"wrong number of arguments to function {n}()" } else e
+  let lift (r : Except Err Value) : M (Value × Bool) := match r with
+    | .ok v => pure (v, false)
+    | .error e => throw (fixName e)
+  match Json.scalarCached (← get).jsonCache n.toLower evs with
+  | some (.ok (vf, cache')) =>
+    modify fun c => { c with jsonCache := cache' }
+    return vf
+  | some (.error e) => throw (fixName e)
   | none =>
   match Printf.scalar? n.toLower vs with
   | some r => lift r
   | none =>
   match DateTime.scalar? {} n.toLower vs with
   | some r => lift r
-  | none => scalarFn n vs (args.map fun a => exprColl q.env a)
+  | none =>
+    let v ← (try scalarFn n vs (args.map fun a => exprColl q.env a) catch e => throw (fixName e))
+    -- the argument whose value is returned passes its subtype on
+    let pick : Option Nat := match n.toLower with
+      | "coalesce" | "ifnull" => vs.findIdx? (!·.isNull)
+      | "nullif" | "likely" | "unlikely" | "likelihood" => if v.isNull then none else some 0
+      | "iif" | "if" => iifIndex vs
+      | "min" | "max" => if vs.length ≥ 2 then vs.findIdx? (fun x => compareValues .binary x v == .eq && x.rank == v.rank) else none
+      | _ => none
+    return (v, (pick.bind (flags[·]?)).getD false)
+
+/-- An expression's value and whether it carries the JSON subtype. -/
+partial def evalExprST (q : QEnv) (e : Expr) : M (Value × Bool) := do
+  match e with
+  | .call n distinct args star ob filter none =>
+    if isAggCall n args.length star false then
+      return (← evalExpr q e, Json.jsonProducers.contains n.toLower)
+    if filter.isSome || star || !ob.isEmpty then return (← evalExpr q e, false)
+    callFnST q n args distinct
+  | .binop .ptr a b => callFnST q "->" [a, b] false
+  | .unop .pos a => evalExprST q a
+  | .collate a _ => evalExprST q a
+  | .cast a ty =>
+    let (v, f) ← evalExprST q a
+    return (castValue v ty, f && affinityOfType ty == .text)
+  | .case_ base whens els =>
+    match base with
+    | some b =>
+      let bv ← evalExpr q b
+      for (w, t) in whens do
+        let wv ← evalExpr q w
+        let c := compareOp .eq (cmpAff (exprAff q.env b) (exprAff q.env w)) (cmpColl q.env b w) bv wv
+        if truth c == some true then return ← evalExprST q t
+      match els with
+      | some x => evalExprST q x
+      | none => return (.null, false)
+    | none =>
+      for (w, t) in whens do
+        if truth (← evalExpr q w) == some true then return ← evalExprST q t
+      match els with
+      | some x => evalExprST q x
+      | none => return (.null, false)
+  | .col _ _ _ => return (← evalExpr q e, ← argIsJson q e)
+  | _ => return (← evalExpr q e, false)
 
 /-- Scalar functions. -/
 partial def scalarFn (n : Name) (vs : List Value) (colls : List (Option (Coll × Bool))) : M Value := do
