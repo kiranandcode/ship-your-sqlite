@@ -73,6 +73,24 @@ interface, merged when its own randomized differential reaches 0 mismatches:
 `Sql.Printf` (printf/format/round/quote: merged), `Sql.DateTime`, `Sql.Json`,
 `Sql.Pragma`.
 
+### Unspecified choices (become nondeterminism in `Sql.Derives`, 2.5)
+
+Where SQLite's output depends on its query plan, not on SQL. The executable
+semantics makes SQLite's choice in the simple cases (rowid-order scans); the
+relational semantics must allow every choice, and the differential tests
+compare modulo these choices:
+
+| choice | example | what SQLite does |
+|---|---|---|
+| row order without ORDER BY, and the order of ORDER BY ties | `select a from t` | scan order of the chosen plan (rowid, or an index) |
+| which of several equal-comparing values represents a group, a DISTINCT or a compound row | `0` vs `0.0`, `'a'` vs `'A'` under NOCASE | the first one in the plan's scan order (with rules for UNION: a later SELECT's row replaces an equal earlier one; tested) |
+| input order of an aggregate without ORDER BY | `group_concat(x)` over a join | the plan's loop order |
+| `random()`, `randomblob()`, the rowid after 2^63−1 | | SQLite's PRNG (deterministic in the Clight model: fixed clock and pid) |
+| `page_count`, `freelist_count` beyond the root pages | | the B-tree's page layout (Sql.Pragma models root pages only) |
+
+The random differential (`experiments/fuzz/`) checks ties as multisets and
+keeps the rest out of its generated queries.
+
 ### Phase 2 debts
 
 - `partial def` throughout the evaluator (2.5).
