@@ -14,7 +14,16 @@
   * `afterStmt` is the executor's hook: after every successful statement it
     bumps the schema cookie of each database whose schema changed (one bump
     per statement, as `sqlite3ChangeCookie` does), allocates and frees pages,
-    and keeps the table hash order.
+    and keeps the table hash order. Checked against the oracle
+    (tests/sem/pragma-ddl.sql, pragma-cookies.sql): CREATE/DROP of a table,
+    index, view or trigger and every ALTER TABLE bump the cookie of the
+    database the object is in (temp objects: `temp.schema_version`), once per
+    statement (CREATE TABLE … AS SELECT, AUTOINCREMENT with its
+    sqlite_sequence, DROP TABLE with its indexes and triggers: one bump);
+    `IF [NOT] EXISTS` no-ops, DML, REINDEX, ATTACH/DETACH and pragmas other
+    than `schema_version=N` do not; VACUUM bumps by one; ROLLBACK (TO)
+    restores the cookie with the schema. ANALYZE bumps when it creates
+    sqlite_stat1, which the executor does not model.
   * Pages: an in-memory database has 0 pages until its first write
     transaction, then page 1; each b-tree (rowid table, index, WITHOUT ROWID
     table) has a root page, freed b-trees go to the freelist and are reused
