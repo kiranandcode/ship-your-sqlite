@@ -101,6 +101,8 @@ structure Trigger where
   when_ : Option Expr
   body : List Stmt
   sql : String
+  /-- CREATE TEMP TRIGGER: in the `temp` database whatever its table's -/
+  temp : Bool := false
   deriving Inhabited
 
 /-- An object of the schema, in creation order (`sqlite_schema` rows). -/

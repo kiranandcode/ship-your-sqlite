@@ -225,7 +225,7 @@ def objsWithDb (db : Db) : List (SchemaObj × String) := Id.run do
       | .index ix =>
         if ix.sql.isNone then ((seen.find? (nameEq ·.1 ix.table)).map (·.2)).getD "main"
         else byOrder order seen ix.table
-      | .trigger tr => byOrder order seen tr.table
+      | .trigger tr => if tr.temp then "temp" else byOrder order seen tr.table
     if let .table t := o then seen := (t.name, d) :: seen
     out := out.push (o, d)
   return out.toList

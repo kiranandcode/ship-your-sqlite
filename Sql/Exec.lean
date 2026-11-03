@@ -658,7 +658,7 @@ def execStmt (fuel : Nat) (q : QEnv) (s : Stmt) : M (Array (Array Value)) :=
         let _ ← runSelect fuel q sel
         modifyMain fun s => { s with objs := s.objs.push (.view { name, cols, q := sel, sql, temp }) }
         return #[]
-      | .createTrigger _ ine _ name time ev tname _ w body sql tailBegin =>
+      | .createTrigger temp ine _ name time ev tname _ w body sql tailBegin =>
         let db ← getDb
         let errAt {α} (m : String) : M α := throw { code := SQLITE_ERROR, msg := m, tail := some tailBegin }
         if objExists db name then
@@ -666,7 +666,7 @@ def execStmt (fuel : Nat) (q : QEnv) (s : Stmt) : M (Array (Array Value)) :=
           errAt s!"trigger {name} already exists"
         if (db.main.findTable tname).isNone && (db.main.findView tname).isNone then
           errAt s!"no such table: main.{tname}"
-        modifyMain fun s => { s with objs := s.objs.push (.trigger { name, table := tname, time, event := ev, when_ := w, body, sql }) }
+        modifyMain fun s => { s with objs := s.objs.push (.trigger { name, table := tname, time, event := ev, when_ := w, body, sql, temp }) }
         return #[]
       | .drop kind ie _ name =>
         let db ← getDb

@@ -334,7 +334,7 @@ def schemaRows (db : Db) (which : Name := "main") : Array (Array Value) := Id.ru
       | .table t => t.dbName
       | .view v => v.attachedTo.getD (if v.temp then "temp" else "main")
       | .index ix => ((db.main.findTable ix.table db.attached).map (·.dbName)).getD "main"
-      | .trigger tr => ((db.main.findTable tr.table db.attached).map (·.dbName)).getD "main"
+      | .trigger tr => if tr.temp then "temp" else ((db.main.findTable tr.table db.attached).map (·.dbName)).getD "main"
     if !nameEq dbn which then continue
     match o with
     | .table t =>
