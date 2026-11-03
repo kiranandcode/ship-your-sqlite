@@ -1599,7 +1599,7 @@ partial def runCore (q : QEnv) (core : SelectCore) (orderBy : List OrderTerm) :
       -- the row bare columns are read from: the min/max row if there is exactly one
       -- min()/max() aggregate, else the first row of the group (SQLite 3.54)
       let minmax := exprs.filterMap fun e => match e with
-        | .call n false [a] false [] none none =>
+        | .call n _ [a] false [] none none =>
           if nameEq n "min" || nameEq n "max" then some (nameEq n "min", a) else none
         | _ => none
       for (_, grp) in groups do

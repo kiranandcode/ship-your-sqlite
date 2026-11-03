@@ -1,0 +1,1 @@
+create table a(x, y); insert into a values(1,'p'),(2,'z'),(3,'q'); select x, max(y) from a; select x, max(distinct y) from a; select x, min(y) from a; select x, max(y), count(*) from a; select x, max(y) from a group by 'k'; select x, max(y), min(y) from a;
