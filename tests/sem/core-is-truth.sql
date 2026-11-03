@@ -1,0 +1,1 @@
+select 2 is true, 0 is true, null is true, null is not true, 2 is not false, 0 is false, 'x' is false, 0.5 is true, null is false; create table t(true); insert into t values(5); select 5 is true from t;

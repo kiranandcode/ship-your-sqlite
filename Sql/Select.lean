@@ -356,6 +356,16 @@ partial def evalExpr (q : QEnv) (e : Expr) : M Value := do
         let y ← evalExpr q b
         return compareOp op (cmpAff (exprAff env a) (exprAff env b)) (cmpColl env a b) x y
     | .is | .isNot =>
+      -- `x IS [NOT] TRUE/FALSE` (true/false not a column) is a truth test (TK_TRUTH)
+      let truthConst : Option Bool := match b with
+        | .col none none c =>
+          if (nameEq c "true" || nameEq c "false") && (resolveCol env none c).toOption.isNone
+          then some (nameEq c "true") else none
+        | _ => none
+      if let some tv := truthConst then
+        let x ← evalExpr q a
+        let holds := truth x == some tv
+        return .int (if holds == (op == .is) then 1 else 0)
       let x ← evalExpr q a
       let y ← evalExpr q b
       let same := match x.isNull, y.isNull with
