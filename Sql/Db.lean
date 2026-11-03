@@ -7,6 +7,11 @@ import Sql.Ast
 
 namespace Sql
 
+/-- Bound on the depth of walks over syntax: SQLite parses no deeper than
+    SQLITE_MAX_EXPR_DEPTH (1000) per expression, and its parser stack bounds
+    the nesting of queries; this bound is far above both. -/
+def syntaxFuel : Nat := 1000000
+
 structure Column where
   name : Name
   /-- declared type, as written -/

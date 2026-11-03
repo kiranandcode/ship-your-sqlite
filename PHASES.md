@@ -64,7 +64,7 @@ and the library lanes `Printf`, `DateTime`, `Json`, `Pragma`. The executable
 | 2.2 core | CREATE TABLE, INSERT, SELECT with WHERE / ORDER BY / GROUP BY / aggregates, LIMIT/OFFSET | done |
 | 2.3 the rest of the dialect | joins, subqueries, compound selects, CTEs incl. recursive, window functions, views, triggers, indexes, constraints and ON CONFLICT, UPSERT, RETURNING, transactions/savepoints, ALTER TABLE, pragmas, the function library, JSON, date/time | most done (see coverage); lanes: printf **merged** (0 mismatches on 1.8M random calls), date/time, JSON and pragmas running; open: ATTACH, EXPLAIN (see Gaps), VACUUM INTO, virtual tables beyond the built-in table-valued functions |
 | 2.4 differential | `scripts/difftest_sem.sh` (tests/sem, tests/sql) and `scripts/difftest_slt.py` (sqllogictest) | tests/sem+tests/sql: 17/20 (the 3 others need date/JSON); sqllogictest: select1 1001/1001, select2 and select3 all agree, evidence/ 330/330 after fixes |
-| 2.5 total and relational | make `Sql` total (fuel = SQLite's own limits: recursion depth of triggers, a fuel for recursive CTEs), then define `Sql.Derives` with the unspecified orders and choices (row order without ORDER BY, random(), bare-column rows) as nondeterminism, and prove `Sql.run` sound for it | planned: about 100 `partial def`s and 200 `while`/`repeat` loops (which Lean compiles through an opaque partial `Loop`) across `Sql/`. Every mutually recursive evaluator function takes a `fuel : Nat` that decreases on each call, exhaustion being a distinct outcome; loops become bounded iteration; then `Sql.Derives script out := ∃ fuel, run fuel script = some out` with the unspecified choices as relations. Mechanical, and split by module (the library lanes' modules to their own agents) once the pragma lane is merged |
+| 2.5 total and relational | make `Sql` total (fuel = SQLite's own limits: recursion depth of triggers, a fuel for recursive CTEs), then define `Sql.Derives` with the unspecified orders and choices (row order without ORDER BY, random(), bare-column rows) as nondeterminism, and prove `Sql.run` sound for it | in progress (gate: `scripts/check_total.py`, 263 hits at the start). **Done:** Select, Query, Eval, Resolve, Exec, Pragma: the evaluator's mutual blocks (Select's 23 functions, Resolve's 5, Exec's 10) take a `fuel : Nat` decreasing on every call, `0` throwing `fuelErr` ("out of fuel"); `runStmt` passes `evalFuel` (10⁹), which bounds recursion depth (SQLite itself stops at SQLITE_MAX_EXPR_DEPTH / SQLITE_MAX_TRIGGER_DEPTH = 1000) and the rounds of a recursive CTE (unbounded in SQLite: a CTE that runs longer has no derivation, and the executable reports out of fuel). Pure walks over syntax take `syntaxFuel` (10⁶, `Sql/Db.lean`); loops became `for` over the bound the `while` had (script length, token count, frame width). LIKE/GLOB recurse on `pattern length + 1`, which is exact. Behaviour unchanged (59/59 semantic scripts, 5,653/5,653 sqllogictest queries, fuzz seed 5000 identical). Helpers: `scripts/dev/fuelize.py`, `scripts/dev/boundsyntax.py`. **In flight:** Lex/Parse/ParseStmt/Value/Real; Json*/Printf/DateTime. **`Sql.Derives` defined** (`Sql/Derives.lean`): `runScriptWith (ch : Choices) (fuel : Nat)` returns the output and whether fuel ran out; `Derives src out` is a named-constructor inductive (some choices and some fuel give `out` without exhaustion); `runScript_derives` (the executable is sound) is proved by construction, axioms `propext`, `Classical.choice`, `Quot.sound` only. Choices modelled: the order of a SELECT core's joined rows (after WHERE: decides group and DISTINCT representatives and aggregate input order) and of its output rows (row order without ORDER BY, ORDER BY ties), as Lehmer codes; `random()`/`randomblob()` draws; the random rowid's candidates. UPDATE/DELETE row order and the FROM row an UPDATE … FROM uses. **Not yet:** page counts; the proof obligations become meaningful once the parser and library modules are total |
 
 ### Phase 2 lanes
 
@@ -93,12 +93,12 @@ keeps the rest out of its generated queries.
 
 ### Phase 2 debts
 
-- `partial def` throughout the evaluator (2.5).
+- `partial def` in the parser and the library modules (2.5, in flight; the evaluator is total).
 - A runtime error in the middle of a streaming SELECT: SQLite has already
   printed the earlier rows; the semantics prints only the error.
-- The executable's choices where SQLite's are unspecified (row order without
-  ORDER BY, random()) are SQLite's in the cases tested; 2.5 makes them
-  nondeterministic choices in `Derives`.
+- The executable's choices where SQLite's are unspecified are SQLite's in the
+  cases tested; `Derives` quantifies over them (`Choices`), except the page
+  layout (2.5).
 
 ### Phase 2 design notes
 
