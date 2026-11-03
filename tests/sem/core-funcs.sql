@@ -1,0 +1,16 @@
+select acos(0.5), acosh(2), asin(1), asinh(1), atan(1), atan2(1, 2), atanh(0.5), cos(1), cosh(1), sin(2), sinh(1), tan(1), tanh(0.5);
+select ceil(1.2), ceiling(-1.2), floor(1.7), floor(-1.7), trunc(2.9), trunc(-2.9), ceil(3), floor('2.5'), ceil(null), ceil('abc');
+select exp(1), ln(10), log10(1000), log2(8), log(2, 1024), log(100), pi(), pow(2, 0.5), power(3, 3), sqrt(16), sqrt(-1), degrees(1), radians(90), mod(10, 3), mod(-10, 3), mod(10.5, 3), mod(1, 0), sign(-2.5), sign(0), sign('x');
+select concat('a', null, 1, 2.5), concat_ws('-', 'a', null, 'b'), concat_ws(null, 'a'), if(1, 'x'), iif(0, 'x', 'y');
+select instr('hello world', 'o'), instr('abc', ''), instr(x'010203', x'03'), instr(null, 'a'), glob('a*', 'abc'), like('A%', 'abc'), like('a!%', 'a%', '!');
+select likelihood(5, 0.5), likely(3), unlikely(4), lower('ÄBC'), upper('abc'), ltrim('  x'), rtrim('x  '), trim('xxaxx', 'x'), ltrim(null), trim('  a  ');
+select octet_length('héllo'), octet_length(123), octet_length(null), length(123.5), length(x'00'), length(null);
+select substring('abcdef', 2, 3), substr('abcdef', -2), substr('abcdef', 0, 2), substr('abcdef', 2, -1), substr(x'0102030405', 2, 2), substr('héllo', 2, 2), substr('abc', 5);
+select unhex('41 42', ' '), unhex('4g'), unhex(null), unicode(''), unicode('A'), char(65, 0x20AC, 128512), zeroblob(0), length(zeroblob(5));
+select typeof(random()), typeof(randomblob(4)), length(randomblob(7)), length(randomblob(0)), length(randomblob(-1));
+select sqlite_version(), typeof(sqlite_source_id()), length(sqlite_source_id()) > 20;
+select string_agg(x, ', ') from (select 'a' x union all select 'b');
+select replace('abcabc', 'bc', 'X'), replace('abc', '', 'X'), replace(null, 'a', 'b'), replace('aaa', 'a', '');
+select quote(1), quote(1.5), quote('a''b'), quote(x'00ff'), quote(null), hex(12), hex('ab'), hex(x''), hex(null);
+select abs(-5), abs(5.5), abs('-3'), abs(null), abs('x');
+select min(3, 'a', 2), max(1, x'00', 'z'), min(1, null), coalesce(), nullif('A', 'a');

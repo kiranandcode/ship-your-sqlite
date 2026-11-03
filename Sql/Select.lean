@@ -557,11 +557,11 @@ partial def scalarFn (n : Name) (vs : List Value) (colls : List (Option (Coll ×
   match name with
   | "abs" =>
     if nargs != 1 then wrong
-    match a0.numeric with
+    -- an integer stays an integer; anything else is read as a double
+    match a0 with
     | .null => return .null
     | .int i => if i == minI64 then err "integer overflow" else return .int i.natAbs
-    | .real r => return .real r.abs
-    | w => return w
+    | v => return .real v.toReal.abs
   | "length" =>
     if nargs != 1 then wrong
     match a0 with
@@ -708,6 +708,23 @@ partial def scalarFn (n : Name) (vs : List Value) (colls : List (Option (Coll ×
     return .blob ⟨Array.replicate (max 0 a0.numeric.toInt).toNat 0⟩
   | "likelihood" | "likely" | "unlikely" => return a0
   | "sqlite_version" => return .ofString "3.54.1"
+  | "sqlite_source_id" => return .ofString "2026-10-16 14:45:20 555e07ef33f69a0957d24d8e555b702464a131d6f1607f4c3c1e4551e8e6ca76"
+  -- random(), randomblob(N): SQLite's PRNG; the semantics allows any value
+  -- (Phase 2.5 states this as a choice); this executable draws from a counter
+  | "random" =>
+    if nargs != 0 then wrong
+    let c ← get
+    let seed := c.db.prng
+    set { c with db := { c.db with prng := seed + 1 } }
+    let x : Nat := (seed * 6364136223846793005 + 1442695040888963407) % 2 ^ 64
+    return .int (if x ≥ 2 ^ 63 then (x : Int) - 2 ^ 64 else x)
+  | "randomblob" =>
+    if nargs != 1 then wrong
+    let n := max 1 a0.numeric.toInt
+    let c ← get
+    let seed := c.db.prng
+    set { c with db := { c.db with prng := seed + 1 } }
+    return .blob ⟨(Array.range n.toNat).map fun i => ((seed * 31 + i * 17) % 256).toUInt8⟩
   | "changes" => return .int (← getDb).changes
   | "total_changes" => return .int (← getDb).totalChanges
   | "last_insert_rowid" => return .int (← getDb).lastRowid

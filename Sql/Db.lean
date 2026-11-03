@@ -122,6 +122,8 @@ structure Db where
   lastRowid : Int := 0
   /-- PRAGMA settings that are not modelled elsewhere, by name (`Sql.Pragma`) -/
   pragmaVals : List (String × Value) := []
+  /-- state of the executable's stand-in for SQLite's PRNG (`random()`) -/
+  prng : Nat := 0
   /-- the schema cookie (`PRAGMA schema_version`) -/
   schemaVersion : Int := 0
   deriving Inhabited

@@ -196,7 +196,7 @@ F0194	diff	avg
 F0195	open	ceil
 F0196	open	ceiling
 F0197	diff	changes
-F0198	open	char
+F0198	diff	char
 F0199	diff	coalesce
 F0200	open	concat
 F0201	open	concat_ws
@@ -214,10 +214,10 @@ F0212	diff	dense_rank
 F0213	open	exp
 F0214	diff	first_value
 F0215	open	floor
-F0216	open	format
+F0216	diff	format
 F0217	open	glob
 F0218	diff	group_concat
-F0219	open	hex
+F0219	diff	hex
 F0220	open	if
 F0221	diff	ifnull
 F0222	diff	iif
@@ -257,7 +257,7 @@ F0255	diff	lag
 F0256	diff	last_insert_rowid
 F0257	diff	last_value
 F0258	diff	lead
-F0259	open	length
+F0259	diff	length
 F0260	open	like
 F0261	open	likelihood
 F0262	open	likely
@@ -280,14 +280,14 @@ F0278	diff	percent_rank
 F0279	open	pi
 F0280	open	pow
 F0281	open	power
-F0282	open	printf
-F0283	open	quote
+F0282	diff	printf
+F0283	diff	quote
 F0284	open	radians
 F0285	open	random
 F0286	open	randomblob
 F0287	diff	rank
 F0288	diff	replace
-F0289	open	round
+F0289	diff	round
 F0290	diff	row_number
 F0291	open	rtrim
 F0292	open	sign
@@ -301,7 +301,7 @@ F0299	open	sqlite_version
 F0300	open	sqrt
 F0301	open	strftime
 F0302	open	string_agg
-F0303	open	substr
+F0303	diff	substr
 F0304	open	substring
 F0305	open	subtype
 F0306	diff	sum
