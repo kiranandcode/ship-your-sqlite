@@ -293,7 +293,9 @@ partial def parseInsert (ctes : List Cte) : P Stmt := do
   let (sch, t) ← qualifiedName
   let alias ← if ← eatKw "AS" then some <$> name else pure none
   let cols ← if ← isOp "LP" then nameList else pure []
-  let src ← if ← eatKw "DEFAULT" then do kw "VALUES"; pure InsertSource.defaults
+  let isDefault ← eatKw "DEFAULT"
+  if isDefault then kw "VALUES"
+  let src ← if isDefault then pure InsertSource.defaults
     else if ← eatKw "VALUES" then do
       let row : P (List Expr) := do op "LP"; let l ← parseExprList; op "RP"; return l
       let mut rows := #[← row]

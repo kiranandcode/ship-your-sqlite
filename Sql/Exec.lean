@@ -585,7 +585,9 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
             err s!"{cm.size} values for {ncols} columns"
           pure rows
       | .defaults => pure #[#[]]
-    let colIdx := if cols.isEmpty then (List.range t.cols.size).filter fun i => t.cols[i]!.generated.isNone else colIdx
+    let colIdx := match src with
+      | .defaults => []
+      | _ => if cols.isEmpty then (List.range t.cols.size).filter fun (i : Nat) => (t.cols[i]!).generated.isNone else colIdx
     let mut inserted := #[]
     let mut n : Int := 0
     for r in srcRows do
