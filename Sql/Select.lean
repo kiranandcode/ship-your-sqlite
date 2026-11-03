@@ -1620,16 +1620,40 @@ partial def runSelect (q : QEnv) (sel : Select) : M (Array ColMeta × Array (Arr
       pure (cols, rows.map (·.1))
     else do
       let (cols, rows0) ← runCore q first []
-      let colls := cols.toList.map (·.coll)
-      let mut acc := rows0.map (·.1)
-      for (op, core) in rest do
+      -- multiSelectCollSeq: each column's collation is that of the leftmost
+      -- SELECT that has one for it
+      let mutable_cores ← rest.mapM fun (op, core) => do
         let (cs, rs) ← runCore q core []
+        pure (op, cs, rs)
+      let colls := (List.range cols.size).map fun i =>
+        let all := (cols :: mutable_cores.map (·.2.1)).filterMap fun cs => cs[i]?.map (·.coll)
+        (all.find? (· != .binary)).getD .binary
+      let cols := cols.mapIdx fun i c => { c with coll := colls[i]! }
+      let mut acc := rows0.map (·.1)
+      for (op, cs, rs) in mutable_cores do
         if cs.size != cols.size then
           err s!"SELECTs to the left and right of {match op with | .union => "UNION" | .unionAll => "UNION ALL" | .intersect => "INTERSECT" | .except => "EXCEPT"} do not have the same number of result columns"
         let rs := rs.map (·.1)
         match op with
         | .unionAll => acc := acc ++ rs
-        | .union => acc := stableSort (lexCompare colls []) (dedupe colls (acc ++ rs))
+        | .union =>
+          -- SQLite's union index: the left side's duplicates keep the first row;
+          -- a row of the right side replaces an equal row already there
+          let mut idx : Std.HashMap String Nat := {}
+          let mut out : Array (Array Value) := #[]
+          for r in acc do
+            let k := canonKey colls r
+            if !idx.contains k then
+              idx := idx.insert k out.size
+              out := out.push r
+          for r in rs do
+            let k := canonKey colls r
+            match idx.get? k with
+            | some i => out := out.set! i r
+            | none =>
+              idx := idx.insert k out.size
+              out := out.push r
+          acc := stableSort (lexCompare colls []) out
         | .intersect =>
           let rk : Std.HashSet String := rs.foldl (fun st r => st.insert (canonKey colls r)) {}
           acc := stableSort (lexCompare colls []) (dedupe colls (acc.filter fun r => rk.contains (canonKey colls r)))
