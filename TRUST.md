@@ -36,8 +36,7 @@ and the WAL index (`volatile u32 *`).
 interpreter stops at every `EF_external` call. Only `malloc`, `free`, `memcpy`
 (the builtin used for struct copies) and annotations have a meaning.
 
-**What we add.** A pure model of the libc/POSIX functions the export calls (85
-names in the D7 build). The state of the outside world is a `World`: stdin
+**What we add.** A pure model of the libc/POSIX functions the export calls (the export declares 84 external functions; `__builtin_debug` and the variadic `fcntl64` among them). The state of the outside world is a `World`: stdin
 (the script), stdout and stderr, the `errno` cell, a clock, and an exit
 status. The model is defined by cases in `callExternal`:
 
