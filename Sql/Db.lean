@@ -216,6 +216,8 @@ structure Err where
   tail : Option Nat := none
   /-- the statement's changes so far stay (ON CONFLICT FAIL) -/
   keep : Bool := false
+  /-- the rows a SELECT handed out before the error (the driver has printed them) -/
+  printed : Array (Array Value) := #[]
   deriving Inhabited
 
 def SQLITE_ERROR : Nat := 1

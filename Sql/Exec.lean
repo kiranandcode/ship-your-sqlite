@@ -525,7 +525,7 @@ def execStmt (fuel : Nat) (q : QEnv) (s : Stmt) : M (Array (Array Value)) :=
     do
       match s with
       | .select sel =>
-        let (_, rows) ← runSelect fuel q sel
+        let (_, rows) ← runSelect fuel q sel (stream := true)
         return rows
       | .explain _ _ => err "EXPLAIN is not modelled"
       | .createTable temp ine sch name cols cons wr strict asSel sql tailStart =>
@@ -1247,6 +1247,7 @@ def runScriptWith (ch : Choices) (fuel : Nat) (src : ByteArray) : RunResult := I
         for r in rows do out := out ++ renderRow r
       | (.ok (.error e), ctx') | (.error e, ctx') =>
         ctx := ctx'
+        for r in e.printed do out := out ++ renderRow r
         out := out ++ renderErr e
         if let some t := e.tail then pos := t
   return { out, exhausted := ctx.exhausted || !finished }
