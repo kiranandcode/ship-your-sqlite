@@ -1545,13 +1545,13 @@ partial def runCore (q : QEnv) (core : SelectCore) (orderBy : List OrderTerm) :
       let gcolls := groupBy.map fun g => ((exprColl qm.env g).map (·.1)).getD .binary
       if !groupBy.isEmpty then groups := stableSort (fun a b => lexCompare gcolls [] a.1 b.1) groups
       -- the row bare columns are read from: the min/max row if there is exactly one
-      -- min()/max() aggregate, else the last row of the group
+      -- min()/max() aggregate, else the first row of the group (SQLite 3.54)
       let minmax := exprs.filterMap fun e => match e with
         | .call n false [a] false [] none none =>
           if nameEq n "min" || nameEq n "max" then some (nameEq n "min", a) else none
         | _ => none
       for (_, grp) in groups do
-        let mut rep : Array Cur := grp.back?.getD (Array.replicate srcs.size none)
+        let mut rep : Array Cur := grp[0]?.getD (Array.replicate srcs.size none)
         if minmax.length == 1 && !grp.isEmpty then
           let (isMin, a) := minmax[0]!
           let coll := ((exprColl qm.env a).map (·.1)).getD .binary
