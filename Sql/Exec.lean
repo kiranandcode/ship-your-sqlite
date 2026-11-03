@@ -118,6 +118,14 @@ structure StmtOut where
 
 def setDb (db : Db) : M Unit := modify fun c => { c with db := db }
 
+/-- Count `n` changed rows: always in total_changes(); in changes() only for a
+    top-level statement (not inside a trigger program). -/
+def countChanges (q : QEnv) (n : Int) : M Unit :=
+  let inTrigger := q.env.newRow.isSome || q.env.oldRow.isSome
+  modify fun c => { c with db := { c.db with
+    changes := if inTrigger then c.db.changes else n,
+    totalChanges := c.db.totalChanges + n } }
+
 def modifyMain (f : Schema → Schema) : M Unit :=
   modify fun c => { c with db := { c.db with main := f c.db.main } }
 
@@ -296,6 +304,109 @@ def resultRows (q : QEnv) (t : Table) (alias : Name) (rows : Array Row) (ret : L
     cols.toArray.filterMapM fun c => match c with
       | .expr e _ _ => some <$> evalExpr q' e
       | _ => pure none
+
+/-! ## ALTER TABLE: rewriting the stored SQL text -/
+
+/-- Replace each identifier token of `sql` naming `old` (case-insensitive,
+    unquoted) by `new`. -/
+def renameIdent (sql : String) (old new : String) : String := Id.run do
+  let b := sql.toUTF8
+  let toks := tokenize b
+  let mut out := ByteArray.empty
+  let mut pos := 0
+  for t in toks do
+    let txt := String.fromUTF8! (b.extract t.start t.stop)
+    let isName := t.tk == .id || (match t.tk with | .kw c => fallbackToId.contains c | _ => false)
+    if isName && nameEq (P.unquote txt) old then
+      out := out ++ b.extract pos t.start ++ new.toUTF8
+      pos := t.stop
+  return String.fromUTF8! (out ++ b.extract pos b.size)
+
+/-- Insert `, coldef` before the last `)` of a CREATE TABLE text. -/
+def addColumnText (sql coldef : String) : String :=
+  let cs := sql.toList
+  match (List.range cs.length).reverse.find? (fun i => cs[i]! == ')') with
+  | some i => String.ofList (cs.take i) ++ ", " ++ coldef ++ String.ofList (cs.drop i)
+  | none => sql
+
+/-- Remove the definition of column `col` (with its preceding comma) from a
+    CREATE TABLE text: from the comma before the column's name token to just
+    before the next top-level comma or the closing `)`. -/
+def dropColumnText (sql col : String) : String := Id.run do
+  let b := sql.toUTF8
+  let toks := tokenize b
+  -- the column list: tokens inside the outermost ( )
+  let mut depth := 0
+  let mut startTok : Option Nat := none     -- index of the comma before the column
+  let mut i := 0
+  let mut prevComma : Option Nat := none
+  while i < toks.size do
+    let t := toks[i]!
+    if t.tk == .op "LP" then
+      depth := depth + 1
+      if depth == 1 then prevComma := some i
+    else if t.tk == .op "RP" then depth := depth - 1
+    else if t.tk == .op "COMMA" && depth == 1 then prevComma := some i
+    else if depth == 1 && prevComma == some (i - 1) &&
+        nameEq (P.unquote (String.fromUTF8! (b.extract t.start t.stop))) col then
+      startTok := prevComma
+      break
+    i := i + 1
+  let some st := startTok | return sql
+  -- the end: the next top-level comma or the closing paren
+  let mut j := i
+  let mut d := 1
+  while j < toks.size do
+    let t := toks[j]!
+    if t.tk == .op "LP" then d := d + 1
+    else if t.tk == .op "RP" then
+      d := d - 1
+      if d == 0 then break
+    else if t.tk == .op "COMMA" && d == 1 then break
+    j := j + 1
+  let stTok := toks[st]!
+  if stTok.tk == .op "LP" then
+    -- the first column: drop it and the comma after it
+    let endPos := if j < toks.size && toks[j]!.tk == .op "COMMA" then
+        (toks[j + 1]?.map (·.start)).getD toks[j]!.stop
+      else (toks[j]?.map (·.start)).getD b.size
+    return String.fromUTF8! (b.extract 0 stTok.stop ++ b.extract endPos b.size)
+  let endPos := (toks[j]?.map (·.start)).getD b.size
+  return String.fromUTF8! (b.extract 0 stTok.start ++ b.extract endPos b.size)
+
+def renameColTerm (old new : Name) : OrderTerm → OrderTerm
+  | .mk (.col sc tb c) d n => .mk (if nameEq c old then .col sc tb new else .col sc tb c) d n
+  | t => t
+
+def renameColInIndex (tname old new : Name) : SchemaObj → SchemaObj
+  | .index ix =>
+    if nameEq ix.table tname then
+      .index { ix with sql := ix.sql.map (fun x => renameIdent x old new), cols := ix.cols.map (renameColTerm old new) }
+    else .index ix
+  | o => o
+
+def renameAutoIndex (tname new : Name) (n : Name) : Name :=
+  let pre := s!"sqlite_autoindex_{tname}_"
+  if n.startsWith pre then s!"sqlite_autoindex_{new}_" ++ (n.drop pre.length).toString else n
+
+/-- One schema object after `ALTER TABLE tname RENAME TO new` (`q` is `"new"`). -/
+def renameTableObj (tname new q : Name) (t' : Table) : SchemaObj → SchemaObj
+  | .table u =>
+    if nameEq u.name tname then .table t'
+    else
+      let refers := u.fks.any (fun fk => nameEq fk.parent tname)
+      .table { u with
+        sql := if refers then renameIdent u.sql tname q else u.sql,
+        fks := u.fks.map (fun fk => if nameEq fk.parent tname then { fk with parent := new } else fk) }
+  | .index ix =>
+    if nameEq ix.table tname then
+      .index { ix with table := new, sql := ix.sql.map (fun x => renameIdent x tname q),
+                       name := renameAutoIndex tname new ix.name }
+    else .index ix
+  | .view v => .view { v with sql := renameIdent v.sql tname q }
+  | .trigger tr =>
+    if nameEq tr.table tname then .trigger { tr with table := new, sql := renameIdent tr.sql tname q }
+    else .trigger tr
 
 /-! ## Foreign keys -/
 
@@ -542,7 +653,7 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
         modify fun c => { c with db := { c.db with lastRowid := row.rowid } }
         runTriggers q .after (.insert) tname none (some row)
       | _ => pure ()
-    modify fun c => { c with db := { c.db with changes := n, totalChanges := c.db.totalChanges + n } }
+    countChanges q n
     resultRows q (← currentTable tname) tname inserted ret
   | .update _ orC _ tname alias sets from_ wh ret _ _ _ =>
     let _ := from_
@@ -592,7 +703,7 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
       updated := updated.push newRow
       let changedCols := sets.flatMap (·.1)
       runTriggers q .after (.update changedCols) tname (some old) (some newRow)
-    modify fun c => { c with db := { c.db with changes := updated.size, totalChanges := c.db.totalChanges + updated.size } }
+    countChanges q updated.size
     resultRows q (← currentTable tname) alias updated ret
   | .delete _ _ tname alias wh ret _ _ _ =>
     let t ← currentTable tname
@@ -611,7 +722,7 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
       modifyMain fun s => s.setTable { t with rows := t.rows.filter (·.rowid != r.rowid) }
       fkOnParentDelete tname r
       runTriggers q .after .delete tname (some r) none
-    modify fun c => { c with db := { c.db with changes := gone.size, totalChanges := c.db.totalChanges + gone.size } }
+    countChanges q gone.size
     return out
   | .begin_ _ =>
     let db ← getDb
@@ -654,6 +765,56 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
       else setDb { db with savepoints := rest }
       return #[]
   | .pragma _ name arg _ => execPragma q name arg
+  | .alterAddColumn _ tname cd txt =>
+    let t ← currentTable tname
+    if t.cols.any (nameEq ·.name cd.name) then err s!"duplicate column name: {cd.name}"
+    for (_, k) in cd.constraints do
+      match k with
+      | .primaryKey .. => err "Cannot add a PRIMARY KEY column"
+      | .unique .. => err "Cannot add a UNIQUE column"
+      | .generated _ true => err "cannot add a STORED column"
+      | _ => pure ()
+    let t1 ← mkTable t.name [cd] [] false false ""
+    let c := t1.cols[0]!
+    if c.notNull && c.dflt.isNone && c.generated.isNone && !t.rows.isEmpty then
+      err "Cannot add a NOT NULL column with default value NULL"
+    let dv ← match c.dflt with
+      | some d => storeValue { t with cols := t.cols.push c } t.cols.size (← evalExpr {} d)
+      | none => pure .null
+    let newFks := t1.fks.map (fun (fk : ForeignKey) => { fk with cols := [t.cols.size] })
+    let newRows := t.rows.map (fun (r : Row) => { r with vals := r.vals.push dv })
+    let t' := { t with cols := t.cols.push c, checks := t.checks ++ t1.checks, fks := t.fks ++ newFks,
+                       sql := addColumnText t.sql txt, rows := newRows }
+    let t' := { t' with rows := ← t'.rows.mapM (withGenerated t') }
+    modifyMain fun s => s.setTable t'
+    return #[]
+  | .alterRenameColumn _ tname old new =>
+    let t ← currentTable tname
+    let some ci := t.cols.toList.findIdx? (nameEq ·.name old) | err s!"no such column: \"{old}\""
+    if t.cols.any (nameEq ·.name new) then err s!"duplicate column name: {new}"
+    let t' := { t with cols := t.cols.modify ci (fun c => { c with name := new }), sql := renameIdent t.sql old new }
+    modifyMain fun s => { (s.setTable t') with objs := (s.setTable t').objs.map (renameColInIndex tname old new) }
+    return #[]
+  | .alterRename _ tname new =>
+    let t ← currentTable tname
+    let db ← getDb
+    if objExists db new then err s!"there is already another table or index with this name: {new}"
+    let q' := "\"" ++ new ++ "\""
+    let t' := { t with name := new, sql := renameIdent t.sql tname q' }
+    modifyMain fun s => { s with objs := s.objs.map (renameTableObj tname new q' t') }
+    return #[]
+  | .alterDropColumn _ tname col =>
+    let t ← currentTable tname
+    let some ci := t.cols.toList.findIdx? (nameEq ·.name col) | err s!"no such column: \"{col}\""
+    if t.pk.contains ci then err s!"cannot drop PRIMARY KEY column: \"{col}\""
+    if t.uniques.any (·.cols.any (·.1 == ci)) then err s!"cannot drop UNIQUE column: \"{col}\""
+    if t.cols.size == 1 then err s!"cannot drop column \"{col}\": no other columns exist"
+    let shift (i : Nat) : Nat := if i > ci then i - 1 else i
+    let t' := { t with cols := t.cols.eraseIdx! ci, rowidCol := t.rowidCol.map shift, pk := t.pk.map shift,
+                       sql := dropColumnText t.sql col,
+                       rows := t.rows.map fun r => { r with vals := r.vals.eraseIdx! ci } }
+    modifyMain fun s => s.setTable t'
+    return #[]
   | _ => err "statement not modelled yet"
 
 /-- ON DELETE actions for the children of a deleted parent row. -/
@@ -665,6 +826,8 @@ partial def fkOnParentDelete (pname : Name) (pr : Row) : M Unit := do
     | "CASCADE" =>
       let t ← currentTable t.name
       modifyMain fun s => s.setTable { t with rows := t.rows.filter (·.rowid != cr.rowid) }
+      -- foreign key actions are trigger programs: counted in total_changes()
+      modify fun c => { c with db := { c.db with totalChanges := c.db.totalChanges + 1 } }
       fkOnParentDelete t.name cr
     | "SET NULL" | "SET DEFAULT" =>
       let t ← currentTable t.name
@@ -676,6 +839,7 @@ partial def fkOnParentDelete (pname : Name) (pr : Row) : M Unit := do
           | none => pure .null
         nv := nv.set! i v
       modifyMain fun s => s.setTable { t with rows := t.rows.map fun r => if r.rowid == cr.rowid then { r with vals := nv } else r }
+      modify fun c => { c with db := { c.db with totalChanges := c.db.totalChanges + 1 } }
     | "RESTRICT" => err "FOREIGN KEY constraint failed" SQLITE_CONSTRAINT_FOREIGNKEY
     | _ => pure ()
 
@@ -701,6 +865,7 @@ partial def fkOnParentUpdate (pname : Name) (old new : Row) : M Unit := do
             | none => pure .null
         nv := nv.set! i v
       modifyMain fun s => s.setTable { t with rows := t.rows.map fun r => if r.rowid == cr.rowid then { r with vals := nv } else r }
+      modify fun c => { c with db := { c.db with totalChanges := c.db.totalChanges + 1 } }
     | "RESTRICT" => err "FOREIGN KEY constraint failed" SQLITE_CONSTRAINT_FOREIGNKEY
     | _ => pure ()
 
