@@ -1,0 +1,1 @@
+select iif(0, zeroblob(9223372036854775807)), coalesce(1, zeroblob(9223372036854775807)), ifnull(1, zeroblob(9223372036854775807)); select zeroblob(2) like '', x'610062' like 'a', 'a'||char(0)||'b' glob 'a';

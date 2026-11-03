@@ -1,0 +1,1 @@
+create table t(a); insert into t values(87),(0.1),(-29),(-44),(NULL),('abc'); select sum(a), total(a), avg(a) from t; select a, sum(a) over (order by rowid) from t; select sum(x) from (select 9223372036854775807 x union all select 1 union all select 0.5); select sum(x) from (select 9223372036854775807 x union all select 1);

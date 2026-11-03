@@ -243,6 +243,12 @@ def maxLength : Int := 1000000000
 
 def windowParamBase : Nat := 1000000000
 
+/-- The arity rules of `pragma function_list` for the lazy built-ins. -/
+def checkArity (n : Name) (k : Nat) : M Unit := do
+  let low := n.toLower
+  let ok := if low == "ifnull" then k == 2 else k ≥ 2
+  if !ok then err s!"wrong number of arguments to function {n}()"
+
 /-- Replace each window-function call (outside subqueries) by a numbered
     parameter; returns the rewritten expressions and the calls in order. -/
 partial def replaceWindows (es : List Expr) : List Expr × List Expr :=
@@ -427,8 +433,12 @@ partial def evalExpr (q : QEnv) (e : Expr) : M Value := do
       | none => pure none
     if s.isNull || p.isNull then return .null
     if let some ev := es then if ev.isNull then return .null
+    -- patternCompare reads NUL-terminated strings
+    let cstr (b : ByteArray) : ByteArray := ⟨(b.data.toList.takeWhile (· != 0)).toArray⟩
+    let ptxt := cstr (textOf p)
+    let stxt := cstr (textOf s)
     let r ← match op with
-      | .glob => pure (globMatch (utf8Chars (textOf p)) (utf8Chars (textOf s)))
+      | .glob => pure (globMatch (utf8Chars ptxt) (utf8Chars stxt))
       | .like =>
         let escC ← match es with
           | some ev =>
@@ -436,7 +446,7 @@ partial def evalExpr (q : QEnv) (e : Expr) : M Value := do
             if c.length != 1 then err "ESCAPE expression must be a single character"
             pure c.head?
           | none => pure none
-        pure (likeMatch (utf8Chars (textOf p)) (utf8Chars (textOf s)) escC
+        pure (likeMatch (utf8Chars ptxt) (utf8Chars stxt) escC
           (!(← getDb).pragmas.caseSensitiveLike))
       | .regexp => err "no such function: regexp"
       | .match_ => err "unable to use function MATCH in the requested context"
@@ -616,6 +626,23 @@ partial def callFn (q : QEnv) (n : Name) (args : List Expr) (distinct : Bool) : 
     two-or-more-argument min/max pass on the subtype of the argument they
     return (checked against SQLite by the JSON lane, tests/sem/json_subtype.sql). -/
 partial def callFnST (q : QEnv) (n : Name) (args : List Expr) (_distinct : Bool) : M (Value × Bool) := do
+  -- coalesce/ifnull/iif are compiled to jumps: later arguments are evaluated
+  -- only if needed
+  let low := n.toLower
+  if low == "coalesce" || low == "ifnull" then
+    checkArity n args.length
+    for a in args do
+      let (v, f) ← evalExprST q a
+      if !v.isNull then return (v, f)
+    return (.null, false)
+  if low == "iif" || low == "if" then
+    checkArity n args.length
+    let rec goIif : List Expr → M (Value × Bool)
+      | c :: v :: rest => do
+        if truth (← evalExpr q c) == some true then evalExprST q v else goIif rest
+      | [e] => evalExprST q e
+      | [] => pure (.null, false)
+    return ← goIif args
   let evs ← args.mapM (evalExprST q)
   let vs := evs.map (·.1)
   let flags := evs.map (·.2)
@@ -879,8 +906,9 @@ partial def scalarFn (n : Name) (vs : List Value) (colls : List (Option (Coll ×
   | "glob" | "like" =>
     if nargs < 2 || nargs > 3 then wrong
     if a0.isNull || a1.isNull then return .null
-    let r := if name == "glob" then globMatch (utf8Chars (textOf a0)) (utf8Chars (textOf a1))
-      else likeMatch (utf8Chars (textOf a0)) (utf8Chars (textOf a1))
+    let cstr (b : ByteArray) : ByteArray := ⟨(b.data.toList.takeWhile (· != 0)).toArray⟩
+    let r := if name == "glob" then globMatch (utf8Chars (cstr (textOf a0))) (utf8Chars (cstr (textOf a1)))
+      else likeMatch (utf8Chars (cstr (textOf a0))) (utf8Chars (cstr (textOf a1)))
         (if nargs == 3 then (utf8Chars (textOf vs[2]!)).head? else none) true
     return .int (if r then 1 else 0)
   | "pi" => if nargs != 0 then wrong else return .real 3.141592653589793
