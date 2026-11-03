@@ -67,6 +67,19 @@ def mkTable (name : Name) (cols : List ColumnDef) (cons : List (Option Name × T
     | some i => return i
     | none => err s!"no such column: {n}"
   let mut t : Table := { name, cols := cs, withoutRowid, strict, sql }
+  -- a constraint's index with the columns and collations of an earlier one is
+  -- that one (sqlite3CreateIndex): its ON CONFLICT is the one given, and a
+  -- PRIMARY KEY makes it the primary key index
+  let addKey (keys : List UniqueKey) (k : UniqueKey) : M (List UniqueKey) := do
+    let same (o : UniqueKey) := o.cols.length == k.cols.length &&
+      (o.cols.zip k.cols).all fun ((i, c), (j, d)) => i == j && c == d
+    match keys.findIdx? same with
+    | none => return keys ++ [k]
+    | some n =>
+      let o := keys[n]!
+      if o.onConflict.isSome && k.onConflict.isSome && o.onConflict != k.onConflict then
+        err "conflicting ON CONFLICT clauses specified"
+      return keys.set n { o with onConflict := o.onConflict.orElse fun _ => k.onConflict, isPk := o.isPk || k.isPk }
   let mut pkSet := false
   -- column constraints
   for h : i in [0:cols.length] do
@@ -81,8 +94,8 @@ def mkTable (name : Name) (cols : List ColumnDef) (cons : List (Option Name × T
           t := { t with rowidCol := some i, autoinc := ai }
         else
           if ai then err "AUTOINCREMENT is only allowed on an INTEGER PRIMARY KEY"
-          t := { t with uniques := t.uniques ++ [{ cols := [(i, cs[i]!.coll)], onConflict := oc, isPk := true }] }
-      | .unique oc => t := { t with uniques := t.uniques ++ [{ cols := [(i, cs[i]!.coll)], onConflict := oc }] }
+          t := { t with uniques := ← addKey t.uniques { cols := [(i, cs[i]!.coll)], onConflict := oc, isPk := true } }
+      | .unique oc => t := { t with uniques := ← addKey t.uniques { cols := [(i, cs[i]!.coll)], onConflict := oc } }
       | .check e txt => t := { t with checks := t.checks ++ [(cname.orElse (fun _ => some txt), e)] }
       | .references p pc acts =>
         let del := (acts.find? (·.startsWith "DELETE ")).map (·.drop 7 |>.toString) |>.getD "NO ACTION"
@@ -101,11 +114,13 @@ def mkTable (name : Name) (cols : List ColumnDef) (cons : List (Option Name × T
          (kcols[0]!.2.2 != .desc) then
         t := { t with rowidCol := some idxs[0]!, autoinc := ai }
       else
-        t := { t with uniques := t.uniques ++ [{ cols := ← kcols.mapM (fun (n, c, _) => do
-          let i ← colIdx n; pure (i, (c.bind collOfName).getD cs[i]!.coll)), onConflict := oc, isPk := true }] }
+        let kc ← kcols.mapM (fun (n, c, _) => do
+          let i ← colIdx n; pure (i, (c.bind collOfName).getD cs[i]!.coll))
+        t := { t with uniques := ← addKey t.uniques { cols := kc, onConflict := oc, isPk := true } }
     | .unique kcols oc =>
-      t := { t with uniques := t.uniques ++ [{ cols := ← kcols.mapM (fun (n, c, _) => do
-          let i ← colIdx n; pure (i, (c.bind collOfName).getD cs[i]!.coll)), onConflict := oc }] }
+      let kc ← kcols.mapM (fun (n, c, _) => do
+          let i ← colIdx n; pure (i, (c.bind collOfName).getD cs[i]!.coll))
+      t := { t with uniques := ← addKey t.uniques { cols := kc, onConflict := oc } }
     | .check e txt => t := { t with checks := t.checks ++ [(cname.orElse (fun _ => some txt), e)] }
     | .foreignKey fc p pc acts =>
       let del := (acts.find? (·.startsWith "DELETE ")).map (·.drop 7 |>.toString) |>.getD "NO ACTION"
@@ -654,7 +669,9 @@ def execStmt (fuel : Nat) (q : QEnv) (s : Stmt) : M (Array (Array Value)) :=
           -- UPSERT: a conflict on the target runs the DO clause instead
           let r? : Option Row ← try (insertRow fuel tname vals rowidV (if upserts.isEmpty then oc else .abort))
             catch e => do
-              if oc == .fail && upserts.isEmpty then
+              -- OR FAIL keeps the earlier rows on a constraint conflict only
+              -- (SQLITE_CONSTRAINT_*); any other error rolls the statement back
+              if oc == .fail && upserts.isEmpty && e.code % 256 == 19 then
                 modify fun c => { c with db := { c.db with changes := n, totalChanges := c.db.totalChanges + n } }
                 throw { e with keep := true }
               if upserts.isEmpty || !(e.code == SQLITE_CONSTRAINT_UNIQUE || e.code == SQLITE_CONSTRAINT_PRIMARYKEY) then throw e
@@ -1170,11 +1187,15 @@ def runStmt (fuel : Nat) (s : Stmt) : M (Except Err (Array (Array Value))) := do
     return .ok rows
   catch e =>
     if !e.keep then
-      -- a failed statement changes nothing, and changes() becomes 0
+      -- a failed statement changes nothing
       -- (the eponymous virtual tables it named stay registered)
       let failed ← get
+      -- a failed INSERT/UPDATE/DELETE sets changes() to 0; other statements
+      -- leave it (vdbeHalt: sqlite3VdbeSetChanges only when changeCntOn)
+      let isDml := match s with | .insert .. | .update .. | .delete .. => true | _ => false
+      let changes := if isDml then 0 else saved.db.changes
       -- the choices made and the fuel spent are not rolled back
-      set { saved with db := Pragma.keepModules failed.db { saved.db with changes := 0 },
+      set { saved with db := Pragma.keepModules failed.db { saved.db with changes },
                        orderPos := failed.orderPos, exhausted := failed.exhausted }
     return .error e
 
