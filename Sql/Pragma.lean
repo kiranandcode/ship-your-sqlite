@@ -176,24 +176,41 @@ def flagPragmas : List String :=
 
 /-! ## Databases and their objects -/
 
-/-- The database an object belongs to (lower case). -/
-def objDb (db : Db) : SchemaObj → String
-  | .table t => t.dbName.toLower
-  | .view v => (v.attachedTo.getD (if v.temp then "temp" else "main")).toLower
-  | .index ix => (((db.main.findTable ix.table db.attached).map (·.dbName)).getD "main").toLower
-  | .trigger tr => (((db.main.findTable tr.table db.attached).map (·.dbName)).getD "main").toLower
-
 /-- The databases in `db->aDb` order: main, temp, attached (lower-case key, name). -/
 def databases (db : Db) : List (String × String) :=
   [("main", "main"), ("temp", "temp")] ++ db.attached.map fun a => (a.toLower, a)
 
+/-- Each object with the database it belongs to (lower case). An index or
+    trigger names its table only; it belongs to the table it was created on:
+    an automatic index to the table it follows, a CREATE INDEX or trigger to
+    the table that name found (temp, main, attached) among the tables created
+    before it. -/
+def objsWithDb (db : Db) : List (SchemaObj × String) := Id.run do
+  let order : List String := ["temp", "main"] ++ db.attached.map fun (a : String) => a.toLower
+  let mut seen : List (String × String) := []   -- (table name, db), latest first
+  let mut out := #[]
+  for o in db.main.objs do
+    let d : String := match o with
+      | .table t => t.dbName.toLower
+      | .view v => (v.attachedTo.getD (if v.temp then "temp" else "main")).toLower
+      | .index ix =>
+        if ix.sql.isNone then ((seen.find? (nameEq ·.1 ix.table)).map (·.2)).getD "main"
+        else byOrder order seen ix.table
+      | .trigger tr => byOrder order seen tr.table
+    if let .table t := o then seen := (t.name, d) :: seen
+    out := out.push (o, d)
+  return out.toList
+where
+  byOrder (order : List String) (seen : List (String × String)) (n : String) : String :=
+    (order.find? fun d => seen.any fun (m, e) => nameEq m n && e == d).getD "main"
+
 def tempOpen (db : Db) : Bool :=
-  pvInt db "temp_open" 0 != 0 || db.main.objs.any (objDb db · == "temp")
+  pvInt db "temp_open" 0 != 0 || (objsWithDb db).any (·.2 == "temp")
 
 def tablesIn (db : Db) (dbk : String) : List Table := db.main.tables.filter (·.dbName.toLower == dbk)
 def viewsIn (db : Db) (dbk : String) : List View :=
   db.main.objs.toList.filterMap fun o => match o with
-    | .view v => if objDb db o == dbk then some v else none
+    | .view v => if (v.attachedTo.getD (if v.temp then "temp" else "main")).toLower == dbk then some v else none
     | _ => none
 
 /-- `sqlite3_strnicmp(zName, "sqlite_", 7)` names of the schema tables. -/
@@ -204,6 +221,8 @@ inductive Obj where
   | table (t : Table)
   | view (v : View)
   | master (dbk : String)
+  /-- an eponymous virtual table: its module, columns, how many are visible -/
+  | vtab (name : String) (cols : List String) (nVisible : Nat)
 
 def findIn (db : Db) (dbk : String) (n : String) : Option Obj :=
   match (tablesIn db dbk).find? (nameEq ·.name n) with
@@ -212,8 +231,15 @@ def findIn (db : Db) (dbk : String) (n : String) : Option Obj :=
     | some v => some (.view v)
     | none => if nameEq n (masterName dbk) then some (.master dbk) else none
 
+/-- The eponymous virtual tables of json.c (columns; `json` and `root` hidden). -/
+def jsonVtab (n : String) : Option Obj :=
+  if ["json_each", "json_tree", "jsonb_each", "jsonb_tree"].contains n.toLower then
+    some (.vtab n.toLower ["key", "value", "type", "atom", "id", "parent", "fullkey", "path", "json", "root"] 8)
+  else none
+
 /-- `sqlite3LocateTable`: temp before main, then the attached databases; the
-    names `sqlite_schema`/`sqlite_temp_schema` are the legacy ones. -/
+    names `sqlite_schema`/`sqlite_temp_schema` are the legacy ones. Eponymous
+    virtual tables are found by `locateAny`. -/
 def locate (db : Db) (n : String) (zDb : Option String) : Option Obj :=
   let n := if nameEq n "sqlite_schema" then "sqlite_master"
     else if nameEq n "sqlite_temp_schema" then "sqlite_temp_master" else n
@@ -332,9 +358,9 @@ def explicitIndexes (db : Db) (t : Table) : Array IdxInfo := Id.run do
   let pkCols : Array IdxCol := match (autoIndexes t).find? (·.origin == "pk") with
     | some i => i.keys | none => #[]
   let mut out := #[]
-  for o in db.main.objs do
+  for (o, d) in objsWithDb db do
     let .index ix := o | continue
-    if ix.sql.isNone || !nameEq ix.table t.name || objDb db o != t.dbName.toLower then continue
+    if ix.sql.isNone || !nameEq ix.table t.name || d != t.dbName.toLower then continue
     let keys : Array IdxCol := (ix.cols.map fun (.mk e dir _) =>
       let (e, coll) := match e with | .collate e c => (e, some c) | e => (e, none)
       let cid : Option Nat := match e with
@@ -361,8 +387,8 @@ def btrees (db : Db) (dbk : String) : Nat :=
       if l.any (· == u.cols) then l else l ++ [u.cols]) []
     let wrPk := if t.withoutRowid && !t.uniques.any (·.isPk) then 1 else 0
     n + (if t.withoutRowid then 0 else 1) + autos.length + wrPk) 0
-  + (db.main.objs.toList.filter fun o => match o with
-      | .index ix => ix.sql.isSome && objDb db o == dbk
+  + ((objsWithDb db).filter fun (o, d) => match o with
+      | .index ix => ix.sql.isSome && d == dbk
       | _ => false).length
 
 /-! ## The table hash (hash.c) -/
@@ -398,8 +424,8 @@ def hashRemove (h : TblHash) (k : String) : TblHash :=
 /-- The table and view names of a database, in `sqlite_schema` order. -/
 def tableNames (db : Db) (dbk : String) : List String :=
   db.main.objs.toList.filterMap fun o => match o with
-    | .table t => if objDb db o == dbk then some t.name else none
-    | .view v => if objDb db o == dbk then some v.name else none
+    | .table t => if t.dbName.toLower == dbk then some t.name else none
+    | .view v => if (v.attachedTo.getD (if v.temp then "temp" else "main")).toLower == dbk then some v.name else none
     | _ => none
 
 /-- The hash as a fresh schema load builds it. -/
@@ -451,8 +477,8 @@ def openTemp (db : Db) : Db :=
 
 /-- What identifies a database's schema (not its contents). -/
 def signature (db : Db) (dbk : String) : List String :=
-  db.main.objs.toList.filterMap fun o =>
-    if objDb db o != dbk then none else some (match o with
+  (objsWithDb db).filterMap fun (o, d) =>
+    if d != dbk then none else some (match o with
       | .table t => "t" ++ t.name ++ "\x00" ++ t.sql ++ "\x00" ++ toString t.cols.size
       | .index i => "i" ++ i.name ++ "\x00" ++ (i.sql.getD "")
       | .view v => "v" ++ v.name ++ "\x00" ++ v.sql
@@ -503,7 +529,10 @@ def afterStmt (before after : Db) (s : Stmt) : Db := Id.run do
       let new := tableNames after dbk
       let h0 := hashOf before dbk
       let h1 := old.foldl (fun h n => if new.any (nameEq · n) then h else hashRemove h n) h0
-      let h2 := new.foldl (fun h n => if old.any (nameEq · n) then h else hashInsert h n) h1
+      -- sqlite_sequence is parsed (nested) before the AUTOINCREMENT table that creates it
+      let added := new.filter fun n => !old.any (nameEq · n)
+      let added := added.filter (nameEq · "sqlite_sequence") ++ added.filter (!nameEq · "sqlite_sequence")
+      let h2 := added.foldl hashInsert h1
       db := setHash db dbk (some h2)
   return db
 
@@ -596,7 +625,7 @@ def setJournal (db : Db) (dbk : String) (mode : String) : Db :=
 
 /-- Name and affinity of each result column of a view (`none`: the view's
     SELECT fails), supplied by the evaluator. -/
-abbrev ViewCols := View → Option (Array (Name × Option Aff))
+abbrev ViewCols := View → Except Err (Array (Name × Option Aff))
 
 def stdType : Aff → String
   | .numeric => "NUM" | .blob => "BLOB" | .integer => "INT" | .real => "REAL" | .text => "TEXT"
@@ -604,10 +633,10 @@ def stdType : Aff → String
 /-- The declared types of a view's columns (`sqlite3SubqueryColumnTypes`): the
     declared type of a column the expression names, when its affinity is the
     column's; otherwise the standard type of the affinity. -/
-def viewColumns (db : Db) (vc : ViewCols) (v : View) : Array (Name × String) :=
+partial def viewColumns (db : Db) (vc : ViewCols) (v : View) : Except Err (Array (Name × String)) :=
   match vc v with
-  | none => #[]
-  | some cols =>
+  | .error e => .error e
+  | .ok cols => .ok <|
     let srcCols : Array (Option String) := match v.q with
       | .mk _ _ (.select _ rcs from_ ..) _ _ _ _ =>
         let tabs : List (Name × Table) := match from_ with
@@ -618,15 +647,59 @@ def viewColumns (db : Db) (vc : ViewCols) (v : View) : Array (Name × String) :=
           | .tableStar a => (tabs.filter (nameEq ·.1 a)).flatMap fun (_, t) => t.cols.toList.map fun c => some c.type
           | .expr e _ _ => [declOf tabs e]).toArray
       | _ => #[]
+    -- the later arms of a compound SELECT: the possible datatypes of each column
+    let arms : List (List Expr × List (Name × Table)) := match v.q with
+      | .mk _ _ first rest _ _ _ =>
+        let later := match first with
+          | .values (_ :: rows) => rows.map fun r => (r, [])
+          | _ => []
+        later ++ rest.flatMap fun (_, core) => match core with
+          | .select _ rcs from_ .. =>
+            [(rcs.filterMap fun | .expr e _ _ => some e | _ => none, match from_ with
+                | some f => tablesOfFrom f | none => [])]
+          | .values rows => rows.map fun r => (r, [])
+    let firstCast : Array Bool := match v.q with
+      | .mk _ _ (.select _ rcs ..) _ _ _ _ =>
+        (rcs.map fun | .expr (.cast ..) _ _ => true | _ => false).toArray
+      | _ => #[]
     let names := if v.cols.isEmpty then cols.map (·.1) else v.cols.toArray
     (cols.zip names).mapIdx fun i ((_, aff), nm) =>
+      let compound := !arms.isEmpty
+      let m := arms.foldl (fun m (es, tabs) => m ||| (match es[i]? with | some e => dataType tabs e | none => 0)) 0
+      let aff := match aff with
+        | some .text => if compound && m &&& 1 != 0 then some .blob else aff
+        | some .blob => aff
+        | some a => if compound && m &&& 2 != 0 then some .blob else some a
+        | none => none
+      let flex := compound && firstCast[i]?.getD false &&
+        (match aff with | some .numeric | some .integer | some .real => true | _ => false)
       let ty := match aff with
         | none => ""
-        | some a => match srcCols[i]?.getD none with
+        | some a => if flex then "NUM" else match srcCols[i]?.getD none with
           | some d => if !d.isEmpty && affinityOfType d == a then d else stdType a
           | none => stdType a
       (nm, ty)
 where
+  /-- `sqlite3ExprDataType`: 1 numeric, 2 text, 4 blob. -/
+  dataType (tabs : List (Name × Table)) : Expr → Nat
+    | .collate e _ | .unop .pos e => dataType tabs e
+    | .lit .null => 0
+    | .lit (.text _) => 2
+    | .lit (.blob _) => 4
+    | .binop .concat .. => 6
+    | .param .. | .call .. => 7
+    | e@(.col ..) | e@(.subquery _) | e@(.cast ..) =>
+      let aff := match e with
+        | .cast _ ty => some (affinityOfType ty)
+        | .col .. => (declOf tabs e).map affinityOfType
+        | _ => none
+      match aff with
+      | some .text => 6
+      | some .blob | none => 7
+      | _ => 5
+    | .case_ _ whens els =>
+      whens.foldl (fun m (_, r) => m ||| dataType tabs r) (match els with | some e => dataType tabs e | none => 0)
+    | _ => 1
   tablesOfFrom : FromItem → List (Name × Table)
     | .table sch n alias _ =>
       let t := match sch with
@@ -654,14 +727,18 @@ def dfltText (cd : ColumnDef) : Option String :=
       some (if s.startsWith "(" && s.endsWith ")" then ((s.drop 1).dropEnd 1).trimAscii.toString else s)
     | _ => none
 
-def tableInfo (db : Db) (vc : ViewCols) (o : Obj) (xinfo : Bool) : Rows := Id.run do
+def tableInfo (db : Db) (vc : ViewCols) (o : Obj) (xinfo : Bool) : Except Err Rows := do
   match o with
   | .master _ =>
     return masterCols.mapIdx fun i (n, ty) =>
       #[int i, txt n, txt ty, int 0, .null, int 0] ++ (if xinfo then #[int 0] else #[])
   | .view v =>
-    return (viewColumns db vc v).mapIdx fun i (n, ty) =>
+    return (← viewColumns db vc v).mapIdx fun i (n, ty) =>
       #[int i, txt n, txt ty, int 0, .null, int 0] ++ (if xinfo then #[int 0] else #[])
+  | .vtab _ cols nVisible =>
+    let cols := if xinfo then cols else cols.take nVisible
+    return cols.toArray.mapIdx fun i n =>
+      #[int i, txt n, txt "", int 0, .null, int 0] ++ (if xinfo then #[int (if i < nVisible then 0 else 1)] else #[])
   | .table t =>
     let cds := (reparse t).map (·.1)
     let mut out := #[]
@@ -801,11 +878,49 @@ def journalModes : List String := ["delete", "persist", "off", "truncate", "memo
 /-- Close the temp database (`invalidateTempStorage`): its objects go, all
     schemas are reloaded. -/
 def closeTemp (db : Db) : Db :=
-  let db := { db with main := { db.main with objs := db.main.objs.filter (objDb db · != "temp") } }
+  let keep := ((objsWithDb db).filter (·.2 != "temp")).map (·.1)
+  let db := { db with main := { db.main with objs := keep.toArray } }
   { forgetDb (setPvInt db "temp_open" 0) "temp" with tblHash := [] }
 
 /-- PRAGMA statements whose output does not depend on a database argument. -/
 def pragmaNames : List String := pragmaList.toList
+
+/-- The flags of the pragmas that are eponymous virtual tables: (has an
+    argument column, has a schema column, result column names). -/
+def vtabShape (name : String) : Option (Bool × Bool × List String) :=
+  let r1 := ["foreign_key_check", "foreign_key_list", "index_info", "index_list", "index_xinfo",
+    "integrity_check", "optimize", "quick_check", "table_info", "table_list", "table_xinfo"]
+  let schemaOpt := ["foreign_key_check", "foreign_key_list", "index_info", "index_list", "index_xinfo",
+    "integrity_check", "quick_check", "table_info", "table_xinfo"]
+  let schemaReq := ["auto_vacuum", "cache_size", "cache_spill", "default_cache_size", "journal_mode",
+    "journal_size_limit", "locking_mode", "max_page_count", "page_count", "page_size", "synchronous"]
+  let noResult0 := ["case_sensitive_like", "incremental_vacuum", "lock_proxy_file", "mmap_size",
+    "shrink_memory", "temp_store_directory", "wal_autocheckpoint", "wal_checkpoint", "optimize"]
+  let cols : List String := match name with
+    | "foreign_key_list" => ["id", "seq", "table", "from", "to", "on_update", "on_delete", "match"]
+    | "table_info" => ["cid", "name", "type", "notnull", "dflt_value", "pk"]
+    | "table_xinfo" => ["cid", "name", "type", "notnull", "dflt_value", "pk", "hidden"]
+    | "function_list" => ["name", "builtin", "type", "enc", "narg", "flags"]
+    | "table_list" => ["schema", "name", "type", "ncol", "wr", "strict"]
+    | "index_xinfo" => ["seqno", "cid", "name", "desc", "coll", "key"]
+    | "index_info" => ["seqno", "cid", "name"]
+    | "index_list" => ["seq", "name", "unique", "origin", "partial"]
+    | "foreign_key_check" => ["table", "rowid", "parent", "fkid"]
+    | "database_list" => ["seq", "name", "file"]
+    | "collation_list" => ["seq", "name"]
+    | "default_cache_size" => ["cache_size"]
+    | "busy_timeout" => ["timeout"]
+    | "module_list" | "pragma_list" => ["name"]
+    | "wal_checkpoint" => ["busy", "log", "checkpointed"]
+    | n => [n]
+  if !pragmaNames.contains name then none
+  else if noResult0.contains name && !r1.contains name then none
+  else some (r1.contains name, schemaOpt.contains name || schemaReq.contains name, cols)
+
+/-- Register an eponymous virtual table module (`pragma module_list`). -/
+def registerModule (db : Db) (m : String) : Db :=
+  let mods := (pvStr db "modules" "").splitOn "\x00" |>.filter (!·.isEmpty)
+  if mods.any (nameEq · m) then db else setPv db "modules" (txt ("\x00".intercalate (mods ++ [m.toLower])))
 
 /-- `PRAGMA [schema.]name [= arg | (arg)]` on database state `db`. `arg` is
     the argument as `sqlite3Pragma` sees it: the token's text (with its sign
@@ -1066,8 +1181,17 @@ def runWith (vc : ViewCols) (db0 : Db) (schema : Option String) (name : String) 
     match zStr with
     | none => return (db, #[])
     | some s => match locate db s zDb with
-      | some o => return (db, tableInfo db vc o (name == "table_xinfo"))
-      | none => return (db, #[])
+      | some o => return (db, ← tableInfo db vc o (name == "table_xinfo"))
+      | none =>
+        -- an eponymous virtual table (`sqlite3LocateTable` registers its module)
+        let ep : Option Obj := (jsonVtab s).orElse fun _ =>
+          if s.toLower.startsWith "pragma_" then
+            (vtabShape (s.toLower.drop 7).toString).map fun (hasArg, hasSchema, cols) =>
+              .vtab s.toLower (cols ++ (if hasArg then ["arg"] else []) ++ (if hasSchema then ["schema"] else [])) cols.length
+          else none
+        match ep with
+        | some o@(.vtab m _ _) => return (registerModule db m, ← tableInfo db vc o (name == "table_xinfo"))
+        | _ => return (db, #[])
   | "table_list" =>
     let mut out := #[]
     for (k, n) in databases db do
@@ -1083,8 +1207,8 @@ def runWith (vc : ViewCols) (db0 : Db) (schema : Option String) (name : String) 
           out := out.push #[txt n, txt t.name, txt "table", int t.cols.size,
             int (if t.withoutRowid then 1 else 0), int (if t.strict then 1 else 0)]
         | some (.view v) =>
-          out := out.push #[txt n, txt v.name, txt "view", int (viewColumns db vc v).size, int 0, int 0]
-        | none => pure ()
+          out := out.push #[txt n, txt v.name, txt "view", int (match viewColumns db vc v with | .ok c => c.size | .error _ => 0), int 0, int 0]
+        | _ => pure ()
     return (db, out)
   | "index_list" =>
     match zStr.bind fun s => (match locate db s zDb with | some (.table t) => some t | _ => none) with
@@ -1126,46 +1250,9 @@ def runWith (vc : ViewCols) (db0 : Db) (schema : Option String) (name : String) 
     known columns. -/
 def run (db : Db) (schema : Option String) (name : String) (arg : Option Value) (_call : Bool) :
     Option (Except Err (Db × Array (Array Value))) :=
-  some (runWith (fun _ => none) db schema name arg)
+  some (runWith (fun _ => .ok #[]) db schema name arg)
 
 /-! ## Table-valued functions `pragma_<name>(arg, schema)` (pragmaVtab*) -/
-
-/-- The flags of the pragmas that are eponymous virtual tables: (has an
-    argument column, has a schema column, result column names). -/
-def vtabShape (name : String) : Option (Bool × Bool × List String) :=
-  let r1 := ["foreign_key_check", "foreign_key_list", "index_info", "index_list", "index_xinfo",
-    "integrity_check", "optimize", "quick_check", "table_info", "table_list", "table_xinfo"]
-  let schemaOpt := ["foreign_key_check", "foreign_key_list", "index_info", "index_list", "index_xinfo",
-    "integrity_check", "quick_check", "table_info", "table_xinfo"]
-  let schemaReq := ["auto_vacuum", "cache_size", "cache_spill", "default_cache_size", "journal_mode",
-    "journal_size_limit", "locking_mode", "max_page_count", "page_count", "page_size", "synchronous"]
-  let noResult0 := ["case_sensitive_like", "incremental_vacuum", "lock_proxy_file", "mmap_size",
-    "shrink_memory", "temp_store_directory", "wal_autocheckpoint", "wal_checkpoint", "optimize"]
-  let cols : List String := match name with
-    | "foreign_key_list" => ["id", "seq", "table", "from", "to", "on_update", "on_delete", "match"]
-    | "table_info" => ["cid", "name", "type", "notnull", "dflt_value", "pk"]
-    | "table_xinfo" => ["cid", "name", "type", "notnull", "dflt_value", "pk", "hidden"]
-    | "function_list" => ["name", "builtin", "type", "enc", "narg", "flags"]
-    | "table_list" => ["schema", "name", "type", "ncol", "wr", "strict"]
-    | "index_xinfo" => ["seqno", "cid", "name", "desc", "coll", "key"]
-    | "index_info" => ["seqno", "cid", "name"]
-    | "index_list" => ["seq", "name", "unique", "origin", "partial"]
-    | "foreign_key_check" => ["table", "rowid", "parent", "fkid"]
-    | "database_list" => ["seq", "name", "file"]
-    | "collation_list" => ["seq", "name"]
-    | "default_cache_size" => ["cache_size"]
-    | "busy_timeout" => ["timeout"]
-    | "module_list" | "pragma_list" => ["name"]
-    | "wal_checkpoint" => ["busy", "log", "checkpointed"]
-    | n => [n]
-  if !pragmaNames.contains name then none
-  else if noResult0.contains name && !r1.contains name then none
-  else some (r1.contains name, schemaOpt.contains name || schemaReq.contains name, cols)
-
-/-- Register an eponymous virtual table module (`pragma module_list`). -/
-def registerModule (db : Db) (m : String) : Db :=
-  let mods := (pvStr db "modules" "").splitOn "\x00" |>.filter (!·.isEmpty)
-  if mods.any (nameEq · m) then db else setPv db "modules" (txt ("\x00".intercalate (mods ++ [m.toLower])))
 
 /-- The columns of `pragma_<name>` (`pragmaVtabConnect`): the result columns,
     then the hidden `arg` and `schema`; and how many are visible. -/

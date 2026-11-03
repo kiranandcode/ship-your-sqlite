@@ -1320,8 +1320,8 @@ partial def evalFrom (q : QEnv) : FromItem → M (Array Src × Array (Array Cur)
 partial def viewCols : M Pragma.ViewCols := do
   let ctx ← get
   return fun v => match ((runSelect {} v.q).run).run ctx with
-    | (.ok (cols, _), _) => some (cols.map fun c => (c.name, c.aff))
-    | _ => none
+    | (.ok (cols, _), _) => .ok (cols.map fun c => (c.name, c.aff))
+    | (.error e, _) => .error e
 
 /-- The source of a table-valued function (its columns; `json` and `root` of
     json_each/json_tree are hidden, as are `arg` and `schema` of the
