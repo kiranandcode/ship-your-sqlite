@@ -117,9 +117,25 @@ def query(sc):
     dist = 'DISTINCT ' if R.random() < 0.2 else ''
     return f'SELECT {dist}{", ".join(es)} FROM {from_}{where} ORDER BY {order}{lim};'
 
+def dml(sc):
+    t = R.choice(list(sc.tables)); cols = sc.tables[t]
+    k = R.randrange(3)
+    if k == 0:
+        oc = R.choice(['', 'OR IGNORE ', 'OR REPLACE ', 'OR FAIL ', 'OR ABORT '])
+        rows = ', '.join('(' + ', '.join(expr([], 2) for _ in cols) + ')' for _ in range(R.randint(1, 3)))
+        st = f'INSERT {oc}INTO {t} VALUES {rows};'
+    elif k == 1:
+        sets = ', '.join(f'{c} = {expr(cols, 2)}' for c in R.sample(cols, R.randint(1, len(cols))))
+        st = f'UPDATE {R.choice(["", "OR IGNORE ", "OR REPLACE "])}{t} SET {sets} WHERE {expr(cols, 1)};'
+    else:
+        st = f'DELETE FROM {t} WHERE {expr(cols, 1)};'
+    order = ', '.join(str(i + 1) for i in range(len(cols) + 1))
+    return st + f'\nSELECT rowid, {", ".join(cols)} FROM {t} ORDER BY {order};\nSELECT changes();'
+
+dmlmode = len(sys.argv) > 3 and sys.argv[3] == 'dml'
 out = []
 sc = Schema()
 gen_schema(sc, out)
 for _ in range(nq):
-    out.append(query(sc))
+    out.append(dml(sc) if dmlmode and R.random() < 0.5 else query(sc))
 print('\n'.join(out))
