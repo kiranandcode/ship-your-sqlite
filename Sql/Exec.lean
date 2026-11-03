@@ -207,8 +207,8 @@ def checkRow (fuel : Nat) (t : Table) (r : Row) : M Unit := do
     if c.notNull && (r.vals[i]?.getD .null).isNull then
       err s!"NOT NULL constraint failed: {t.name}.{c.name}" SQLITE_CONSTRAINT_NOTNULL
   for (nm, e) in (if Pragma.flag (← getDb) "ignore_check_constraints" then [] else t.checks) do
-    let v ← evalExpr fuel (qOfRow t r) e
-    if truth v == some false then
+    -- sqlite3ExprIfTrue(check, ok, SQLITE_JUMPIFNULL): true or NULL passes
+    if !(← condJump fuel (qOfRow t r) e true true) then
       err s!"CHECK constraint failed: {nm.getD ""}" SQLITE_CONSTRAINT_CHECK
 
 /-- Unique keys of the table, including UNIQUE indexes. -/
@@ -695,7 +695,7 @@ def execStmt (fuel : Nat) (q : QEnv) (s : Stmt) : M (Array (Array Value)) :=
                   let exSrc := { tableSrc "excluded" t with hasRowid := false, qualOnly := true }
                   let qx := { q with env := { q.env with frames := { srcs := #[tableSrc t.name t, exSrc], cur := #[some old, some probe] } :: q.env.frames } }
                   let pass ← match wh with
-                    | some wexp => do pure (truth (← evalExpr fuel qx wexp) == some true)
+                    | some wexp => condHolds fuel qx wexp
                     | none => pure true
                   if !pass then pure none else
                   let mut nv := old.vals
@@ -738,7 +738,7 @@ def execStmt (fuel : Nat) (q : QEnv) (s : Stmt) : M (Array (Array Value)) :=
           for fr in ← chooseOrder frows do
             let qr := { q with env := { q.env with frames := { srcs := #[src] ++ fsrcs, cur := #[some r] ++ fr } :: q.env.frames } }
             let ok ← match wh with
-              | some w => do pure (truth (← evalExpr fuel qr w) == some true)
+              | some w => condHolds fuel qr w
               | none => pure true
             if ok then targets := targets.push (r, fr); break
         -- the order the rows are updated in is the plan's
@@ -829,7 +829,7 @@ def execStmt (fuel : Nat) (q : QEnv) (s : Stmt) : M (Array (Array Value)) :=
         for r in t.rows do
           let qr := { q with env := { q.env with frames := { srcs := #[src], cur := #[some r] } :: q.env.frames } }
           match wh with
-          | some w => if truth (← evalExpr fuel qr w) == some true then gone := gone.push r
+          | some w => if ← condHolds fuel qr w then gone := gone.push r
           | none => gone := gone.push r
         -- the order the rows are deleted in is the plan's
         gone ← chooseOrder gone
@@ -1082,7 +1082,7 @@ def updateView (fuel : Nat) (q : QEnv) (vname : Name) (sets : List (List Name ×
       for r in rows do
         let qr := { q with env := { q.env with frames := { srcs := #[vsrc], cur := #[some r] } :: q.env.frames } }
         if let some w := wh then
-          if truth (← evalExpr fuel qr w) != some true then continue
+          if !(← condHolds fuel qr w) then continue
         let mut nv := r.vals
         for (names, ex) in sets do
           let v ← evalExpr fuel qr ex
@@ -1105,7 +1105,7 @@ def deleteView (fuel : Nat) (q : QEnv) (vname : Name) (wh : Option Expr) : M (Ar
       for r in rows do
         let qr := { q with env := { q.env with frames := { srcs := #[vsrc], cur := #[some r] } :: q.env.frames } }
         if let some w := wh then
-          if truth (← evalExpr fuel qr w) != some true then continue
+          if !(← condHolds fuel qr w) then continue
         runViewTriggers fuel q vname .delete (some r) none vsrc
       return #[]
 
@@ -1124,7 +1124,7 @@ def runViewTriggers (fuel : Nat) (q : QEnv) (vname : Name) (ev : TriggerEvent) (
         if !fires then continue
         let qt := { q with env := { q.env with newRow := new.map (src, ·), oldRow := old.map (src, ·) } }
         if let some w := tr.when_ then
-          if truth (← evalExpr fuel qt w) != some true then continue
+          if !(← condHolds fuel qt w) then continue
         for st in tr.body do
           let r ← try (some <$> execStmt fuel qt st) catch e => if e.code == 0 then pure none else throw e
           if r.isNone then break
@@ -1149,7 +1149,7 @@ def runTriggers (fuel : Nat) (q : QEnv) (time : TriggerTime) (ev : TriggerEvent)
         if !fires then continue
         let qt := { q with env := { q.env with newRow := new.map (src, ·), oldRow := old.map (src, ·) } }
         if let some w := tr.when_ then
-          if truth (← evalExpr fuel qt w) != some true then continue
+          if !(← condHolds fuel qt w) then continue
         for st in tr.body do
           let r ← try (some <$> execStmt fuel qt st) catch e => if e.code == 0 then pure none else throw e
           if r.isNone then break

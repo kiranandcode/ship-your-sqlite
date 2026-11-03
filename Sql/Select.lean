@@ -446,6 +446,77 @@ end
 def subqueryAffK (db : Db) (k : Nat) (env : Env) (q : Select) : Option Aff :=
   (selectMetaK db k env q).bind fun m => m[0]?.bind (·.aff)
 
+/-! ### AND and OR as SQLite codes them (expr.c) -/
+
+/-- `ExprAlwaysTrue`/`ExprAlwaysFalse`: an integer literal that fits in 32
+    bits (`sqlite3ExprInt32`, EP_IsTrue/EP_IsFalse) or TRUE/FALSE when no
+    column has that name. -/
+def alwaysTF (env : Env) : Expr → Option Bool
+  | .lit (.int i) => if 0 ≤ i && i < 2147483648 then some (i != 0) else none
+  | .col none none c =>
+    if (nameEq c "true" || nameEq c "false") && (resolveCol env none c).toOption.isNone
+    then some (nameEq c "true") else none
+  | _ => none
+
+/-- `sqlite3ExprSimplifiedAndOr`, bounded by `k`. -/
+def simplifyAndOrK (env : Env) (k : Nat) (e : Expr) : Expr :=
+  match k with
+  | 0 => e
+  | k + 1 =>
+  let pick (isAnd : Bool) (l r : Expr) : Expr :=
+    let r' := simplifyAndOrK env k r
+    let l' := simplifyAndOrK env k l
+    if alwaysTF env l' == some true || alwaysTF env r' == some false then (if isAnd then r' else l')
+    else if alwaysTF env r' == some true || alwaysTF env l' == some false then (if isAnd then l' else r')
+    else e
+  match e with
+  | .binop .and l r => pick true l r
+  | .binop .or l r => pick false l r
+  | _ => e
+
+/-- The simplified form of an AND/OR when it differs from it (`pAlt!=pExpr`). -/
+def andOrAlt (env : Env) (e : Expr) : Option Expr :=
+  match e with
+  | .binop .and l r | .binop .or l r =>
+    let r' := simplifyAndOrK env syntaxFuel r
+    let l' := simplifyAndOrK env syntaxFuel l
+    if alwaysTF env l' == some true || alwaysTF env r' == some false
+       || alwaysTF env r' == some true || alwaysTF env l' == some false
+    then some (simplifyAndOrK env syntaxFuel e) else none
+  | _ => none
+
+/-- EP_Subquery: the expression contains a subquery. -/
+def hasSubqueryK (k : Nat) (e : Expr) : Bool :=
+  match k with
+  | 0 => false
+  | k + 1 =>
+  match e with
+  | .subquery _ | .exists_ _ | .inSelect .. | .inTable .. => true
+  | .unop _ a | .collate a _ | .cast a _ | .isNull _ a => hasSubqueryK k a
+  | .binop _ a b => hasSubqueryK k a || hasSubqueryK k b
+  | .between _ a b c => hasSubqueryK k a || hasSubqueryK k b || hasSubqueryK k c
+  | .inList _ a l => hasSubqueryK k a || l.any (hasSubqueryK k)
+  | .like _ _ a b c => hasSubqueryK k a || hasSubqueryK k b || c.any (hasSubqueryK k)
+  | .case_ b ws el => b.any (hasSubqueryK k) || ws.any (fun (x, y) => hasSubqueryK k x || hasSubqueryK k y) || el.any (hasSubqueryK k)
+  | .row l => l.any (hasSubqueryK k)
+  | .call _ _ args _ _ f _ => args.any (hasSubqueryK k) || f.any (hasSubqueryK k)
+  | _ => false
+
+def hasSubquery (e : Expr) : Bool := hasSubqueryK syntaxFuel e
+
+/-- AND/OR of two truth values (OP_And, OP_Or). -/
+def andOrValue (isAnd : Bool) (x y : Value) : Value :=
+  if isAnd then
+    match truth x, truth y with
+    | some false, _ | _, some false => .int 0
+    | some true, some true => .int 1
+    | _, _ => .null
+  else
+    match truth x, truth y with
+    | some true, _ | _, some true => .int 1
+    | some false, some false => .int 0
+    | _, _ => .null
+
 /-- Expression affinity, with scalar subqueries resolved against the schema. -/
 def affOf (env : Env) (e : Expr) : M (Option Aff) := do
   return exprAff env e (subqueryAffK (← getDb) syntaxFuel)
@@ -492,22 +563,26 @@ def evalExpr (fuel : Nat) (q : QEnv) (e : Expr) : M Value :=
           return .int (-x - 1)
       | .binop op a b =>
         match op with
-        | .and =>
-          let x ← evalExpr fuel q a
-          if truth x == some false then return .int 0
-          let y ← evalExpr fuel q b
-          return match truth x, truth y with
-            | _, some false => .int 0
-            | some true, some true => .int 1
-            | _, _ => .null
-        | .or =>
-          let x ← evalExpr fuel q a
-          if truth x == some true then return .int 1
-          let y ← evalExpr fuel q b
-          return match truth x, truth y with
-            | _, some true => .int 1
-            | some false, some false => .int 0
-            | _, _ => .null
+        | .and | .or =>
+          -- exprCodeTargetAndOr: both operands are computed, except that a
+          -- subquery operand is skipped when the other decides the result
+          let isAnd := match op with | .and => true | _ => false
+          let decides (v : Value) : Bool := truth v == some !isAnd
+          match andOrAlt env e with
+          | some alt =>
+            let v ← evalExpr fuel q alt
+            return andOrValue true v v
+          | none =>
+            if hasSubquery a && !hasSubquery b then
+              let y ← evalExpr fuel q b
+              if decides y then return andOrValue true y y
+              let x ← evalExpr fuel q a
+              return andOrValue isAnd x y
+            else
+              let x ← evalExpr fuel q a
+              if hasSubquery b && decides x then return andOrValue true x x
+              let y ← evalExpr fuel q b
+              return andOrValue isAnd x y
         | .lt | .le | .gt | .ge | .eq | .ne =>
           match a, b with
           | .row xs, .row ys => compareRows fuel q op xs ys
@@ -719,7 +794,7 @@ def evalAgg (fuel : Nat) (q : QEnv) (n : Name) (distinct : Bool) (args : List Ex
       for cur in grp do
         let q' := setCur q cur
         if let some fl := filter then
-          if truth (← evalExpr fuel q'.noGroup fl) != some true then continue
+          if !(← condHolds fuel q'.noGroup fl) then continue
         let vs ← args.mapM (evalExpr fuel q'.noGroup)
         jflags := jflags.push (← args.mapM (argIsJson fuel q'.noGroup))
         let keys ← ob.toArray.mapM fun (.mk e _ _) => evalExpr fuel q'.noGroup e
@@ -850,7 +925,7 @@ def callFnST (fuel : Nat) (q : QEnv) (n : Name) (args : List Expr) (_distinct : 
         let mut i := 0
         for _ in [0:arr.size] do
           if i + 1 < arr.size then
-            if truth (← evalExpr fuel q arr[i]!) == some true then return ← evalExprST fuel q arr[i + 1]!
+            if ← condHolds fuel q arr[i]! then return ← evalExprST fuel q arr[i + 1]!
             i := i + 2
         if i < arr.size then return ← evalExprST fuel q arr[i]!
         return (.null, false)
@@ -890,6 +965,76 @@ def callFnST (fuel : Nat) (q : QEnv) (n : Name) (args : List Expr) (_distinct : 
           | _ => none
         return (v, (pick.bind (flags[·]?)).getD false)
 
+/-- A condition coded as a jump (`sqlite3ExprIfTrue` when `sense`,
+    `sqlite3ExprIfFalse` otherwise; `jn`: SQLITE_JUMPIFNULL): whether the
+    jump is taken. AND/OR evaluate their second operand only when the first
+    does not decide the jump. -/
+def condJump (fuel : Nat) (q : QEnv) (e : Expr) (sense jn : Bool) : M Bool :=
+  match fuel with
+  | 0 => outOfFuel
+  | fuel + 1 => do
+    let env := q.env
+    let ofValue (v : Value) (sense jn : Bool) : Bool :=
+      match truth v with | some t => t == sense | none => jn
+    let leaf : M Bool := do return ofValue (← evalExpr fuel q e) sense jn
+    -- AND/OR of two jumps
+    let both (isAnd : Bool) (p1 p2 : Bool → Bool → M Bool) : M Bool := do
+      if sense then
+        if isAnd then
+          if ← p1 false (!jn) then return false
+          p2 true jn
+        else
+          if ← p1 true jn then return true
+          p2 true jn
+      else
+        if isAnd then
+          if ← p1 false jn then return true
+          p2 false jn
+        else
+          if ← p1 true (!jn) then return false
+          p2 false jn
+    match e with
+    | .binop .and a b | .binop .or a b =>
+      let isAnd := match e with | .binop .and .. => true | _ => false
+      match andOrAlt env e with
+      | some alt => condJump fuel q alt sense jn
+      | none =>
+        let (f1, f2) := if hasSubquery a && !hasSubquery b then (b, a) else (a, b)
+        both isAnd (condJump fuel q f1) (condJump fuel q f2)
+    | .binop .is a b | .binop .isNot a b =>
+      let isNot := match e with | .binop .isNot .. => true | _ => false
+      let tc : Option Bool := match b with
+        | .col none none c =>
+          if (nameEq c "true" || nameEq c "false") && (resolveCol env none c).toOption.isNone
+          then some (nameEq c "true") else none
+        | _ => none
+      match tc with
+      | some tv =>
+        -- TK_TRUTH
+        if sense then condJump fuel q a (tv != isNot) isNot
+        else condJump fuel q a (tv == isNot) (!isNot)
+      | none => leaf
+    | .unop .not a => condJump fuel q a (!sense) jn
+    | .between true x lo hi => condJump fuel q (.between false x lo hi) (!sense) jn
+    | .between false x lo hi =>
+      -- exprCodeBetween: x once, then (x >= lo) AND (x <= hi) as jumps
+      let xv ← evalExpr fuel q x
+      let c1 (s j : Bool) : M Bool := do
+        let l ← evalExpr fuel q lo
+        return ofValue (compareOp .ge (cmpAff (← affOf env x) (← affOf env lo)) (cmpColl env x lo) xv l) s j
+      let c2 (s j : Bool) : M Bool := do
+        let h ← evalExpr fuel q hi
+        return ofValue (compareOp .le (cmpAff (← affOf env x) (← affOf env hi)) (cmpColl env x hi) xv h) s j
+      both true c1 c2
+    | _ => leaf
+
+/-- A WHERE, ON, HAVING, FILTER, CASE WHEN or trigger WHEN condition holds
+    (`sqlite3ExprIfFalse(e, skip, SQLITE_JUMPIFNULL)` not taken). -/
+def condHolds (fuel : Nat) (q : QEnv) (e : Expr) : M Bool :=
+  match fuel with
+  | 0 => outOfFuel
+  | fuel + 1 => do return !(← condJump fuel q e false true)
+
 /-- An expression's value and whether it carries the JSON subtype. -/
 def evalExprST (fuel : Nat) (q : QEnv) (e : Expr) : M (Value × Bool) :=
   match fuel with
@@ -921,7 +1066,7 @@ def evalExprST (fuel : Nat) (q : QEnv) (e : Expr) : M (Value × Bool) :=
           | none => return (.null, false)
         | none =>
           for (w, t) in whens do
-            if truth (← evalExpr fuel q w) == some true then return ← evalExprST fuel q t
+            if ← condHolds fuel q w then return ← evalExprST fuel q t
           match els with
           | some x => evalExprST fuel q x
           | none => return (.null, false)
@@ -1242,7 +1387,7 @@ def computeWindow (fuel : Nat) (ctxs : Array QEnv) (windows : List (Name × Wind
       -- per-row argument values
       let argv ← ctxs.mapM fun c => args.mapM (evalExpr fuel c)
       let pass ← ctxs.mapM fun c => match filter with
-        | some f => do pure (truth (← evalExpr fuel c f) == some true)
+        | some f => condHolds fuel c f
         | none => pure true
       let constArg (k : Nat) (dflt : Int) : M Int := do
         match args[k]? with
@@ -1446,7 +1591,7 @@ def evalFromWhere (fuel : Nat) (q : QEnv) (f : FromItem) (where_ : Option Expr) 
         for (l, loc, e) in byLevel do
           if l == lv && !(skipLocal && loc == some lv) then
             if hasAgg e then err "misuse of aggregate function"
-            if truth (← evalExpr fuel qr e) != some true then return false
+            if !(← condHolds fuel qr e) then return false
         return true
       -- a leaf's own conjuncts filter its rows once, before the nested loop
       -- (as SQLite's plan applies a table's constraints in its loop); only
@@ -1464,7 +1609,7 @@ def evalFromWhere (fuel : Nat) (q : QEnv) (f : FromItem) (where_ : Option Expr) 
           let mut ok := true
           for (_, _, e) in mine do
             if hasAgg e then err "misuse of aggregate function"
-            if truth (← evalExpr fuel qr e) != some true then ok := false; break
+            if !(← condHolds fuel qr e) then ok := false; break
           if ok then out := out.push r
         return out
       let mut partial_ : Array (Array Cur) := #[#[]]
@@ -1656,7 +1801,7 @@ def evalFrom (fuel : Nat) (q : QEnv) (f0 : FromItem) : M (Array Src × Array (Ar
             let rv ← evalExpr fuel { q' with env := { q'.env with frames := { srcs := rs, cur := cur.extract nl cur.size } :: q.env.frames } } (.col none none c)
             if truth (compareOp .eq none .binary lv rv) != some true then return false
           match on with
-          | some e => return truth (← evalExpr fuel q' e) == some true
+          | some e => condHolds fuel q' e
           | none => return true
         let mut out := #[]
         let rrows := rrows0
@@ -1798,7 +1943,7 @@ def runCore (fuel : Nat) (q : QEnv) (core : SelectCore) (orderBy : List OrderTer
           match where_, from_ with
           | some w, none =>
             if hasAgg w then err "misuse of aggregate function"
-            if truth (← evalExpr fuel (withFrame cur aliases) w) == some true then kept := kept.push cur
+            if ← condHolds fuel (withFrame cur aliases) w then kept := kept.push cur
           | _, _ => kept := kept.push cur
         -- the order the plan visits the joined rows: it decides group and
         -- DISTINCT representatives and the input order of aggregates
@@ -1884,7 +2029,7 @@ def runCore (fuel : Nat) (q : QEnv) (core : SelectCore) (orderBy : List OrderTer
                   if (isMin && o == .lt) || (!isMin && o == .gt) then best := some v; rep := cur
             let qg := { withFrame rep aliases with env := { (withFrame rep aliases).env with group := some grp } }
             if let some h := having then
-              if truth (← evalExpr fuel qg h) != some true then continue
+              if !(← condHolds fuel qg h) then continue
             ctxs := ctxs.push qg
         else
           if having.isSome then err "HAVING clause on a non-aggregate query"
