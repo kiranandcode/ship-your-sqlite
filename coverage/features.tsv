@@ -390,5 +390,6 @@ F0388	pragma	wal_checkpoint	pragma_pragma_list
 F0389	pragma	writable_schema	pragma_pragma_list
 F0390	module	json_each	checked on the oracle
 F0391	module	json_tree	checked on the oracle
-F0392	module	generate_series	checked on the oracle
-F0393	module	pragma_* table-valued functions	checked on the oracle
+F0392	module	jsonb_each	checked on the oracle
+F0393	module	jsonb_tree	checked on the oracle
+F0394	module	pragma_* table-valued functions	checked on the oracle

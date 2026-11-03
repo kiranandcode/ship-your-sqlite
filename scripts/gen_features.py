@@ -53,8 +53,9 @@ def rows():
     for name in q('select name from pragma_pragma_list order by name;'):
         yield 'pragma', name, 'pragma_pragma_list'
     # table-valued functions of the default build (pragma_module_list lists
-    # only the registered non-eponymous ones; these were checked one by one)
-    for name in ('json_each', 'json_tree', 'generate_series', 'pragma_* table-valued functions'):
+    # only the registered non-eponymous ones; these were checked one by one;
+    # generate_series is shell.c's, not sqlite3.c's)
+    for name in ('json_each', 'json_tree', 'jsonb_each', 'jsonb_tree', 'pragma_* table-valued functions'):
         yield 'module', name, 'checked on the oracle'
 
 def main():

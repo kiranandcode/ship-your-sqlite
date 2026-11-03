@@ -3,6 +3,8 @@
 # native driver (driver-gcc) on each script. Outputs in build/diffsem/.
 #   scripts/difftest_sem.sh [script.sql ...]     (default: tests/sql/*.sql tests/sem/*.sql)
 set -uo pipefail
+# the semantics takes the time zone to be UTC (Sql/DateTime.lean)
+export TZ=UTC
 . "$(dirname "$0")/env.sh"
 out="$SYS_ROOT/build/diffsem"; mkdir -p "$out"
 [ $# -gt 0 ] || set -- "$SYS_ROOT"/tests/sem/*.sql "$SYS_ROOT"/tests/sql/*.sql

@@ -160,6 +160,9 @@ partial def fromRefs : FromItem → List (Option Name × Name)
   | _ => []
 end
 
+/-- SQLITE_LIMIT_LENGTH (SQLITE_MAX_LENGTH of the default build) -/
+def maxLength : Int := 1000000000
+
 def windowParamBase : Nat := 1000000000
 
 /-- Replace each window-function call (outside subqueries) by a numbered
@@ -185,6 +188,14 @@ partial def replaceWindows (es : List Expr) : List Expr × List Expr :=
     | x => return x
   let (es', calls) := (es.mapM go).run #[]
   (es', calls.toList)
+
+/-- The index of the argument iif(c1, v1, c2, v2, …, else) returns. -/
+def iifIndex (vs : List Value) : Option Nat :=
+  let rec go (i : Nat) : List Value → Option Nat
+    | c :: _ :: rest => if truth c == some true then some (i + 1) else go (i + 2) rest
+    | [_] => some i
+    | [] => none
+  go 0 vs
 
 def iifPick : List Value → Value
   | c :: v :: rest => if truth c == some true then v else iifPick rest
@@ -272,7 +283,9 @@ partial def evalExpr (q : QEnv) (e : Expr) : M Value := do
       let x ← evalExpr q a
       let y ← evalExpr q b
       if x.isNull || y.isNull then return .null
-      return .text (textOf x ++ textOf y)
+      let r := textOf x ++ textOf y
+      if r.size > maxLength then err "string or blob too big" SQLITE_TOOBIG
+      return .text r
     | .bitand | .bitor | .shl | .shr =>
       return bitOp op (← evalExpr q a) (← evalExpr q b)
     | .ptr | .ptr2 => callFn q (if op == .ptr then "->" else "->>") [a, b] false
@@ -299,10 +312,8 @@ partial def evalExpr (q : QEnv) (e : Expr) : M Value := do
     let mut found := false
     for it in items do
       let w ← evalExpr q it
-      let aff := match exprAff env x with
-        | some a => some a
-        | none => none
-      let c := compareOp .eq (cmpAff aff (exprAff env it)) (cmpColl env x it) v w
+      -- comparisonAffinity: an IN list compares with the left side's affinity only
+      let c := compareOp .eq (exprAff env x) (cmpColl env x it) v w
       if truth c == some true then found := true; break
       if c.isNull then sawNull := true
     if v.isNull then return .null
@@ -349,26 +360,10 @@ partial def evalExpr (q : QEnv) (e : Expr) : M Value := do
           | none => pure none
         pure (likeMatch (utf8Chars (textOf p)) (utf8Chars (textOf s)) escC
           (!(← getDb).pragmas.caseSensitiveLike))
-      | .regexp => err "no such function: REGEXP"
+      | .regexp => err "no such function: regexp"
       | .match_ => err "unable to use function MATCH in the requested context"
     return .int (if r != neg then 1 else 0)
-  | .case_ base whens els =>
-    match base with
-    | some b =>
-      let bv ← evalExpr q b
-      for (w, t) in whens do
-        let wv ← evalExpr q w
-        let c := compareOp .eq (cmpAff (exprAff env b) (exprAff env w)) (cmpColl env b w) bv wv
-        if truth c == some true then return ← evalExpr q t
-      match els with
-      | some x => evalExpr q x
-      | none => return .null
-    | none =>
-      for (w, t) in whens do
-        if truth (← evalExpr q w) == some true then return ← evalExpr q t
-      match els with
-      | some x => evalExpr q x
-      | none => return .null
+  | .case_ .. => return (← evalExprST q e).1
   | .exists_ sub =>
     let (_, rows) ← runSelect q sub
     return .int (if rows.isEmpty then 0 else 1)
@@ -442,11 +437,13 @@ partial def evalAgg (q : QEnv) (n : Name) (distinct : Bool) (args : List Expr) (
   let name := n.toLower
   -- evaluate arguments per row of the group, in the context of that row
   let mut rows : Array (List Value × Array Value) := #[]
+  let mut jflags : Array (List Bool) := #[]
   for cur in grp do
     let q' := setCur q cur
     if let some fl := filter then
       if truth (← evalExpr q'.noGroup fl) != some true then continue
     let vs ← args.mapM (evalExpr q'.noGroup)
+    jflags := jflags.push (← args.mapM (argIsJson q'.noGroup))
     let keys ← ob.toArray.mapM fun (.mk e _ _) => evalExpr q'.noGroup e
     rows := rows.push (vs, keys)
   if !ob.isEmpty then
@@ -460,11 +457,11 @@ partial def evalAgg (q : QEnv) (n : Name) (distinct : Bool) (args : List Expr) (
       if !(seen.any fun s => rowsEq [coll] s.toArray vs.toArray) then seen := seen.push vs
     rows := seen.map (·, #[])
   let coll := ((args.head?.bind (exprColl q.env)).map (·.1)).getD .binary
-  aggFinish q n star args coll (rows.map (·.1))
+  aggFinish q n star args coll (rows.map (·.1)) (if ob.isEmpty && !distinct then some jflags else none)
 
 /-- An aggregate over the argument lists of its rows (after FILTER, ORDER BY, DISTINCT). -/
 partial def aggFinish (q : QEnv) (n : Name) (star : Bool) (args : List Expr) (coll : Coll)
-    (vals : Array (List Value)) : M Value := do
+    (vals : Array (List Value)) (jflags : Option (Array (List Bool)) := none) : M Value := do
   let name := n.toLower
   let arg1 := vals.map fun vs => vs.head?.getD .null
   match name with
@@ -523,30 +520,108 @@ partial def aggFinish (q : QEnv) (n : Name) (star : Bool) (args : List Expr) (co
         | none => textOf v
         | some acc => acc ++ sep ++ textOf v)
     return match out with | some b => .text b | none => .null
-  | _ => callAgg q name vals (args.map Json.exprIsJson)
+  | _ => callAgg q name vals (args.map Json.exprIsJson) jflags
 
 /-- Aggregates implemented elsewhere (JSON). -/
-partial def callAgg (_q : QEnv) (name : String) (vals : Array (List Value)) (flags : List Bool) : M Value :=
-  match Json.aggregate? name (vals.toList.map fun vs => vs.zip flags) with
+partial def callAgg (_q : QEnv) (name : String) (vals : Array (List Value)) (flags : List Bool)
+    (rowFlags : Option (Array (List Bool)) := none) : M Value :=
+  let rows := match rowFlags with
+    | some fs => (vals.zip fs).toList.map fun (vs, f) => vs.zip (f.zipWith (· || ·) flags)
+    | none => vals.toList.map fun vs => vs.zip flags
+  match Json.aggregate? name rows with
   | some (.ok v) => pure v
   | some (.error e) => throw e
   | none => err s!"no such function: {name}"
 
-partial def callFn (q : QEnv) (n : Name) (args : List Expr) (_distinct : Bool) : M Value := do
-  let vs ← args.mapM (evalExpr q)
-  -- the library modules (JSON first: it needs the subtype of each argument)
-  let lift (r : Except Err Value) : M Value := match r with
-    | .ok v => pure v
-    | .error e => throw e
-  match Json.scalar? n.toLower (vs.zip (args.map Json.exprIsJson)) with
-  | some r => lift r
+/-- Does an argument carry the JSON subtype: a JSON-valued expression, or a
+    column whose current value has it (`json_each.value`)? -/
+partial def argIsJson (q : QEnv) (a : Expr) : M Bool := do
+  if Json.exprIsJson a then return true
+  match a with
+  | .col _ t c =>
+    match resolveCol q.env t c with
+    | .ok (.col fi si ci) =>
+      match q.env.frames[fi]? with
+      | some f => match f.cur[si]? with
+        | some (some r) => return r.jsonCols.contains ci
+        | _ => return false
+      | none => return false
+    | _ => return false
+  | _ => return false
+
+partial def callFn (q : QEnv) (n : Name) (args : List Expr) (distinct : Bool) : M Value :=
+  return (← callFnST q n args distinct).1
+
+/-- A scalar call, with whether its result carries the JSON subtype: a JSON
+    function says so; coalesce/ifnull/iif/nullif/likely/unlikely/likelihood and
+    two-or-more-argument min/max pass on the subtype of the argument they
+    return (checked against SQLite by the JSON lane, tests/sem/json_subtype.sql). -/
+partial def callFnST (q : QEnv) (n : Name) (args : List Expr) (_distinct : Bool) : M (Value × Bool) := do
+  let evs ← args.mapM (evalExprST q)
+  let vs := evs.map (·.1)
+  let flags := evs.map (·.2)
+  -- an arity error names the function as written
+  let fixName (e : Err) : Err :=
+    let low := s!"wrong number of arguments to function {n.toLower}()"
+    if e.msg == low then { e with msg := s!"wrong number of arguments to function {n}()" } else e
+  let lift (r : Except Err Value) : M (Value × Bool) := match r with
+    | .ok v => pure (v, false)
+    | .error e => throw (fixName e)
+  match Json.scalarCached (← get).jsonCache n.toLower evs with
+  | some (.ok (vf, cache')) =>
+    modify fun c => { c with jsonCache := cache' }
+    return vf
+  | some (.error e) => throw (fixName e)
   | none =>
   match Printf.scalar? n.toLower vs with
   | some r => lift r
   | none =>
   match DateTime.scalar? {} n.toLower vs with
   | some r => lift r
-  | none => scalarFn n vs (args.map fun a => exprColl q.env a)
+  | none =>
+    let v ← (try scalarFn n vs (args.map fun a => exprColl q.env a) catch e => throw (fixName e))
+    -- the argument whose value is returned passes its subtype on
+    let pick : Option Nat := match n.toLower with
+      | "coalesce" | "ifnull" => vs.findIdx? (!·.isNull)
+      | "nullif" | "likely" | "unlikely" | "likelihood" => if v.isNull then none else some 0
+      | "iif" | "if" => iifIndex vs
+      | "min" | "max" => if vs.length ≥ 2 then vs.findIdx? (fun x => compareValues .binary x v == .eq && x.rank == v.rank) else none
+      | _ => none
+    return (v, (pick.bind (flags[·]?)).getD false)
+
+/-- An expression's value and whether it carries the JSON subtype. -/
+partial def evalExprST (q : QEnv) (e : Expr) : M (Value × Bool) := do
+  match e with
+  | .call n distinct args star ob filter none =>
+    if isAggCall n args.length star false then
+      return (← evalExpr q e, Json.jsonProducers.contains n.toLower)
+    if filter.isSome || star || !ob.isEmpty then return (← evalExpr q e, false)
+    callFnST q n args distinct
+  | .binop .ptr a b => callFnST q "->" [a, b] false
+  | .unop .pos a => evalExprST q a
+  | .collate a _ => evalExprST q a
+  | .cast a ty =>
+    let (v, f) ← evalExprST q a
+    return (castValue v ty, f && affinityOfType ty == .text)
+  | .case_ base whens els =>
+    match base with
+    | some b =>
+      let bv ← evalExpr q b
+      for (w, t) in whens do
+        let wv ← evalExpr q w
+        let c := compareOp .eq (cmpAff (exprAff q.env b) (exprAff q.env w)) (cmpColl q.env b w) bv wv
+        if truth c == some true then return ← evalExprST q t
+      match els with
+      | some x => evalExprST q x
+      | none => return (.null, false)
+    | none =>
+      for (w, t) in whens do
+        if truth (← evalExpr q w) == some true then return ← evalExprST q t
+      match els with
+      | some x => evalExprST q x
+      | none => return (.null, false)
+  | .col _ _ _ => return (← evalExpr q e, ← argIsJson q e)
+  | _ => return (← evalExpr q e, false)
 
 /-- Scalar functions. -/
 partial def scalarFn (n : Name) (vs : List Value) (colls : List (Option (Coll × Bool))) : M Value := do
@@ -706,7 +781,9 @@ partial def scalarFn (n : Name) (vs : List Value) (colls : List (Option (Coll ×
     return vs.foldl (fun acc v => if better v acc then v else acc) a0
   | "zeroblob" =>
     if nargs != 1 then wrong
-    return .blob ⟨Array.replicate (max 0 a0.numeric.toInt).toNat 0⟩
+    let n := max 0 a0.numeric.toInt
+    if n > maxLength then err "string or blob too big" SQLITE_TOOBIG
+    return .blob ⟨Array.replicate n.toNat 0⟩
   | "likelihood" | "likely" | "unlikely" => return a0
   | "sqlite_version" => return .ofString "3.54.1"
   | "sqlite_source_id" => return .ofString "2026-10-16 14:45:20 555e07ef33f69a0957d24d8e555b702464a131d6f1607f4c3c1e4551e8e6ca76"
@@ -722,6 +799,7 @@ partial def scalarFn (n : Name) (vs : List Value) (colls : List (Option (Coll ×
   | "randomblob" =>
     if nargs != 1 then wrong
     let n := max 1 a0.numeric.toInt
+    if n > maxLength then err "string or blob too big" SQLITE_TOOBIG
     let c ← get
     let seed := c.db.prng
     set { c with db := { c.db with prng := seed + 1 } }
@@ -982,8 +1060,7 @@ partial def evalFromWhere (q : QEnv) (f : FromItem) (where_ : Option Expr) (alia
   for lf in leaves do
     match lf with
     | .tableFn _ n _ alias =>
-      let (cols, _) ← tableFunction n []
-      leafSrcs := leafSrcs.push #[metaSrc (alias.getD n) cols]
+      leafSrcs := leafSrcs.push #[← tableFnSrc n alias]
       leafRows := leafRows.push none
     | _ =>
       let (ss, rs) ← evalFrom q lf
@@ -1023,9 +1100,9 @@ partial def evalFromWhere (q : QEnv) (f : FromItem) (where_ : Option Expr) (alia
           | .tableFn _ n args alias =>
             let qp := { q with env := { q.env with frames := { srcs := srcs.extract 0 pre.size, cur := pre } :: q.env.frames } }
             let vs ← args.mapM (evalExpr qp)
-            let (cols, rs) ← tableFunction n (vs.zip (args.map Json.exprIsJson))
-            let _ := (cols, alias)
-            pure (rs.mapIdx fun i r => #[some (⟨i + 1, r⟩ : Row)])
+            let rs ← tableFunction n (vs.zip (← args.mapM (argIsJson qp)))
+            let _ := alias
+            pure (rs.map fun r => #[some r])
           | _ => pure #[]
       for r in rows do
         let cur := pre ++ r
@@ -1040,7 +1117,7 @@ partial def namedSource (q : QEnv) (sch : Option Name) (n : Name) (alias : Name)
   if sch.isNone then
     if let some (_, cv) := q.ctes.find? (fun (m, _) => nameEq m n) then
       let (cols, rows) ← cteRows q n cv
-      return (metaSrc alias cols, rows.mapIdx fun i r => ⟨i + 1, r⟩)
+      return (metaSrc alias cols, rows.mapIdx fun i r => ({ rowid := i + 1, vals := r } : Row))
   let db ← getDb
   let tbl ← match sch with
     | none => pure (db.main.findTable n db.attached)
@@ -1053,15 +1130,14 @@ partial def namedSource (q : QEnv) (sch : Option Name) (n : Name) (alias : Name)
     let (cols, rows) ← runSelect { q with ctes := [] } v.q
     let cols := if v.cols.isEmpty then cols else
       (cols.zip v.cols.toArray).map fun (c, nm) => { c with name := nm }
-    return (metaSrc alias cols, rows.mapIdx fun i r => ⟨i + 1, r⟩)
+    return (metaSrc alias cols, rows.mapIdx fun i r => ({ rowid := i + 1, vals := r } : Row))
   if nameEq n "sqlite_schema" || nameEq n "sqlite_master" || nameEq n "sqlite_temp_schema" || nameEq n "sqlite_temp_master" then
     let which : Name := if nameEq n "sqlite_temp_schema" || nameEq n "sqlite_temp_master" then "temp" else (sch.getD "main")
     let rows := schemaRows db which
     let cols : Array ColMeta := #["type", "name", "tbl_name", "rootpage", "sql"].map fun c => ⟨c, none, .binary⟩
-    return (metaSrc alias cols, rows.mapIdx fun i r => ⟨i + 1, r⟩)
+    return (metaSrc alias cols, rows.mapIdx fun i r => ({ rowid := i + 1, vals := r } : Row))
   if n.toLower.startsWith "pragma_" then
-    let (cols, rows) ← tableFunction n []
-    return (metaSrc alias cols, rows.mapIdx fun i r => ⟨i + 1, r⟩)
+    return (← tableFnSrc n (some alias), ← tableFunction n [])
   err s!"no such table: {n}"
 
 /-- Rows of `sqlite_schema` (or `sqlite_temp_schema`): tables and indexes take
@@ -1134,7 +1210,7 @@ partial def cteRows (q : QEnv) (n : Name) : CteVal → M (Array ColMeta × Array
       let (row, rest') ← if ob.isEmpty then pure (queue[0]!, queue.extract 1 queue.size)
         else do
           let keys ← queue.mapM fun r => ob.toArray.mapM fun (.mk e _ _) =>
-            evalExpr { q with env := { q.env with frames := { srcs := #[metaSrc n cols], cur := #[some ⟨0, r⟩] } :: q.env.frames } } e
+            evalExpr { q with env := { q.env with frames := { srcs := #[metaSrc n cols], cur := #[some { rowid := 0, vals := r }] } :: q.env.frames } } e
           let dirs := ob.map fun (.mk _ d nl) => (d, nl)
           let mut best := 0
           for i in [1:queue.size] do
@@ -1175,15 +1251,28 @@ partial def evalFrom (q : QEnv) : FromItem → M (Array Src × Array (Array Cur)
     return (#[src], rows.map fun r => #[some r])
   | .subquery sel alias => do
     let (cols, rows) ← runSelect q sel
-    return (#[metaSrc (alias.getD "") cols], rows.mapIdx fun i r => #[some ⟨i + 1, r⟩])
+    return (#[metaSrc (alias.getD "") cols], rows.mapIdx fun i r => #[some ({ rowid := i + 1, vals := r } : Row)])
   | .tableFn sch n args alias => do
     let _ := sch
     let vs ← args.mapM (evalExpr q)
-    let (cols, rows) ← tableFunction n (vs.zip (args.map Json.exprIsJson))
-    return (#[metaSrc (alias.getD n) cols], rows.mapIdx fun i r => #[some ⟨i + 1, r⟩])
+    let rows ← tableFunction n (vs.zip (← args.mapM (argIsJson q)))
+    return (#[← tableFnSrc n alias], rows.map fun r => #[some r])
   | .join l kind natural r on usingCols => do
     let (ls, lrows) ← evalFrom q l
-    let (rs, rrows) ← evalFrom q r
+    -- a table-valued function on the right may refer to the left sources: its
+    -- rows are computed per left row
+    let (rs, rrows0) ← match r with
+      | .tableFn _ n _ alias => do
+        pure (#[← tableFnSrc n alias], #[])
+      | _ => evalFrom q r
+    let rowsFor (lr : Array Cur) : M (Array (Array Cur)) := do
+      match r with
+      | .tableFn _ n args _ =>
+        let qp := { q with env := { q.env with frames := { srcs := ls, cur := lr } :: q.env.frames } }
+        let vs ← args.mapM (evalExpr qp)
+        let rows ← tableFunction n (vs.zip (← args.mapM (argIsJson qp)))
+        pure (rows.map fun row => #[some row])
+      | _ => pure rrows0
     let srcs := ls ++ rs
     -- USING / NATURAL columns: equality on each, right copy hidden from *
     let common : List Name :=
@@ -1207,14 +1296,16 @@ partial def evalFrom (q : QEnv) : FromItem → M (Array Src × Array (Array Cur)
       | some e => return truth (← evalExpr q' e) == some true
       | none => return true
     let mut out := #[]
+    let rrows := rrows0
     let mut rmatched := Array.replicate rrows.size false
     for lr in lrows do
+      let rrows ← rowsFor lr
       let mut any := false
       for h : j in [0:rrows.size] do
         let cur := lr ++ rrows[j]
         if ← joinCond cur then
           out := out.push cur; any := true
-          rmatched := rmatched.set! j true
+          if j < rmatched.size then rmatched := rmatched.set! j true
       if !any && (kind == .left || kind == .full) then
         out := out.push (lr ++ Array.replicate rs.size none)
     if kind == .right || kind == .full then
@@ -1232,37 +1323,33 @@ partial def viewCols : M Pragma.ViewCols := do
     | (.ok (cols, _), _) => some (cols.map fun c => (c.name, c.aff))
     | _ => none
 
-/-- Table-valued functions. -/
-partial def tableFunction (n : Name) (argsJ : List (Value × Bool)) : M (Array ColMeta × Array (Array Value)) := do
-  let args := argsJ.map (·.1)
-  match n.toLower with
-  | "generate_series" =>
-    let start := (args[0]?.getD (Value.int 0)).numeric.toInt
-    let stop := match args[1]? with | some v => if v.isNull then maxI64 else v.numeric.toInt | none => maxI64
-    let step := match args[2]? with | some v => if v.isNull then 1 else v.numeric.toInt | none => 1
-    let step := if step == 0 then 1 else step
-    let mut rows := #[]
-    let mut v := start
-    let mut fuel := 10000000
-    while fuel > 0 && (if step > 0 then v ≤ stop else v ≥ stop) do
-      rows := rows.push (#[.int v, .int start, .int stop, .int step] : Array Value)
-      v := v + step; fuel := fuel - 1
-    let cols : Array ColMeta := #["value", "start", "stop", "step"].map fun c => ⟨c, none, .binary⟩
-    return (cols, rows)
-  | _ =>
-    -- pragma_<name>(arg, schema): eponymous virtual tables of pragma.c
-    match Pragma.tableValued (← viewCols) (← getDb) n args with
-    | some (.ok (db', cols, rows)) =>
-      modify fun c => { c with db := db' }
-      return (cols.toArray.map fun c => ⟨c, none, .binary⟩, rows)
-    | some (.error e) => throw e
-    | none =>
-    match Json.tableFn? n.toLower argsJ with
-    | some (.ok (cols, rows)) =>
-      modify fun c => { c with db := Pragma.registerModule c.db n }
-      return (cols.toArray.map fun c => ⟨c, none, .binary⟩, rows.toArray.map (·.toArray))
-    | some (.error e) => throw e
-    | none => err s!"no such table: {n}"
+/-- The source of a table-valued function (its columns; `json` and `root` of
+    json_each/json_tree are hidden, as are `arg` and `schema` of the
+    pragma_<name> tables). -/
+partial def tableFnSrc (n : Name) (alias : Option Name) : M Src := do
+  if Json.tableFns.contains n.toLower then
+    let cols : Array ColMeta := Json.eachColumns.toArray.map fun c => ⟨c, none, .binary⟩
+    return { metaSrc (alias.getD n) cols with hiddenStar := [8, 9] }
+  if let some (cols, nVisible) := Pragma.vtabColumns n then
+    let cols : Array ColMeta := cols.toArray.map fun c => ⟨c, none, .binary⟩
+    return { metaSrc (alias.getD n) cols with hiddenStar := (List.range cols.size).drop nVisible }
+  err s!"no such table: {n}"
+
+/-- The rows of a table-valued function. -/
+partial def tableFunction (n : Name) (argsJ : List (Value × Bool)) : M (Array Row) := do
+  -- pragma_<name>(arg, schema): the eponymous virtual tables of pragma.c
+  match Pragma.tableValued (← viewCols) (← getDb) n (argsJ.map (·.1)) with
+  | some (.ok (db', rows)) =>
+    modify fun c => { c with db := db' }
+    return rows.mapIdx fun i vs => { rowid := i + 1, vals := vs }
+  | some (.error e) => throw e
+  | none =>
+  match Json.tableFnST? n.toLower argsJ with
+  | some (.ok (_, rows)) =>
+    modify fun c => { c with db := Pragma.registerModule c.db n }
+    return rows.toArray.mapIdx fun i (vs, j) => { rowid := i + 1, vals := vs.toArray, jsonCols := if j then [1] else [] }
+  | some (.error e) => throw e
+  | none => err s!"no such table: {n}"
 
 -- SELECT
 
@@ -1285,14 +1372,16 @@ partial def expandCols (srcs : Array Src) (cols : List ResultCol) : M (List Resu
       if srcs.isEmpty then err "no tables specified"
       for s in srcs do
         for h : i in [0:s.cols.size] do
-          if !s.hidden.contains i then
+          if !s.hidden.contains i && !s.hiddenStar.contains i then
             let (nm, _, _) := s.cols[i]
             out := out.push (.expr (.col none (some s.alias) nm) (some nm) nm)
     | .tableStar t =>
       match srcs.toList.find? (fun s => nameEq s.alias t) with
       | some s =>
-        for (nm, _, _) in s.cols do
-          out := out.push (.expr (.col none (some s.alias) nm) (some nm) nm)
+        for h : i in [0:s.cols.size] do
+          if !s.hiddenStar.contains i then
+            let (nm, _, _) := s.cols[i]
+            out := out.push (.expr (.col none (some s.alias) nm) (some nm) nm)
       | none => err s!"no such table: {t}"
     | c => out := out.push c
   return out.toList

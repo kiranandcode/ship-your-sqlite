@@ -40,6 +40,8 @@ structure ForeignKey where
 structure Row where
   rowid : Int
   vals : Array Value
+  /-- columns whose value carries the JSON subtype (`json_each.value`) -/
+  jsonCols : List Nat := []
   deriving Inhabited
 
 structure Table where

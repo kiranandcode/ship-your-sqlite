@@ -13,6 +13,7 @@
   CTEs, SQLite's own depth limits) is Phase 2.5 (PHASES.md).
 -/
 import Sql.Db
+import Sql.Json.Funcs
 
 namespace Sql
 
@@ -27,6 +28,8 @@ structure Src where
   rowidCol : Option Nat := none
   /-- columns hidden from `*` (USING/NATURAL duplicates) -/
   hidden : List Nat := []
+  /-- HIDDEN columns: resolvable by name, not part of `*` -/
+  hiddenStar : List Nat := []
   /-- only reachable by qualified names (`excluded.` of an UPSERT) -/
   qualOnly : Bool := false
   deriving Inhabited
@@ -58,6 +61,8 @@ structure Env where
 
 structure Ctx where
   db : Db
+  /-- json.c's cache of parsed JSON texts, per statement (`Sql.Json`) -/
+  jsonCache : Json.Cache := {}
   deriving Inhabited
 
 abbrev M := ExceptT Err (StateM Ctx)

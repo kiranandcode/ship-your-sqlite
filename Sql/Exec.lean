@@ -4,6 +4,7 @@
 import Sql.Select
 import Sql.ParseStmt
 import Sql.Pragma
+import Sql.Resolve
 
 namespace Sql
 
@@ -255,7 +256,7 @@ def insertRow (tname : Name) (vals : Array Value) (rowidV : Option Value) (oc : 
     | none => 0
   let rid := if t.autoinc && rowidV.all (·.isNull) then max (maxRowid + 1) (seqOf db.main + 1) else rid
   if let some ci := t.rowidCol then vals := vals.set! ci (.int rid)
-  let mut row ← withGenerated t ⟨rid, vals⟩
+  let mut row ← withGenerated t { rowid := rid, vals }
   -- NOT NULL with conflict resolution
   for h : i in [0:t.cols.size] do
     let c := t.cols[i]
@@ -297,7 +298,7 @@ def insertRow (tname : Name) (vals : Array Value) (rowidV : Option Value) (oc : 
           | some (Value.text n) => nameEq (String.fromUTF8! n) t.name | _ => false
         let rows := if st.rows.any mine then
             st.rows.map fun r => if mine r then { r with vals := r.vals.set! 1 (.int (max cur rid)) } else r
-          else st.rows.push ⟨(st.rows.foldl (fun m r => max m r.rowid) 0) + 1, #[.ofString t.name, .int (max cur rid)]⟩
+          else st.rows.push { rowid := (st.rows.foldl (fun m r => max m r.rowid) 0) + 1, vals := #[.ofString t.name, .int (max cur rid)] }
         s.setTable { st with rows }
   return some row
 
@@ -505,7 +506,7 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
           | some .integer => "INT" | some .real => "REAL" | some .text => "TEXT" | some .numeric => "NUM" | _ => "", constraints := [] } : ColumnDef)
         let t ← mkTable name cds [] false false ""
         let sqlText := "CREATE TABLE " ++ name ++ "(" ++ ",".intercalate (cds.map fun c => c.name ++ (if c.type.isEmpty then "" else " " ++ c.type)) ++ ")"
-        pure { t with sql := sqlText, rows := rows.mapIdx fun i r => ⟨i + 1, r⟩ }
+        pure { t with sql := sqlText, rows := rows.mapIdx fun i r => ({ rowid := i + 1, vals := r } : Row) }
       | none => mkTable name cols cons wr strict sql
     let t := { t with temp, attachedTo := att }
     -- automatic indexes for UNIQUE and non-rowid PRIMARY KEY constraints
@@ -621,7 +622,7 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
         let mut nvals := vals
         for h : i in [0:t.cols.size] do nvals := nvals.set! i (← storeValue t i (vals[i]?.getD .null))
         let rid := match rowidV.map (applyAffinity .integer) with | some (.int i) => i | _ => -1
-        runTriggers q .before .insert tname none (some ⟨rid, nvals⟩)
+        runTriggers q .before .insert tname none (some { rowid := rid, vals := nvals })
       -- UPSERT: a conflict on the target runs the DO clause instead
       let r? : Option Row ← try (insertRow tname vals rowidV (if upserts.isEmpty then oc else .abort))
         catch e => do
@@ -638,7 +639,7 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
             let mut vals' := vals
             for h : i in [0:t.cols.size] do
               vals' := vals'.set! i (← storeValue t i vals[i]!)
-            let probe : Row := ⟨(rowidV.map (·.toInt)).getD 0, vals'⟩
+            let probe : Row := { rowid := (rowidV.map (·.toInt)).getD 0, vals := vals' }
             let uq := allUniques (← getDb) t
             let conflict := t.rows.find? fun old =>
               (t.rowidCol.isSome && rowidV.isSome && old.rowid == probe.rowid) ||
@@ -719,7 +720,7 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
               | .int ri => newRowid := ri
               | _ => err "datatype mismatch" SQLITE_MISMATCH
             else err s!"no such column: {nm}"
-      let newRow ← withGenerated t ⟨newRowid, nv⟩
+      let newRow ← withGenerated t { rowid := newRowid, vals := nv }
       runTriggers q .before (.update (sets.flatMap (·.1))) tname (some old) (some newRow)
       let t ← currentTable tname
       checkRow t newRow
@@ -963,7 +964,7 @@ partial def insertView (q : QEnv) (vname : Name) (cols : List Name) (src : Inser
   for r in rows do
     let mut vals := Array.replicate n Value.null
     for (ci, k) in idx.zipIdx do vals := vals.set! ci (r[k]?.getD .null)
-    runViewTriggers q vname .insert none (some ⟨-1, vals⟩) vsrc
+    runViewTriggers q vname .insert none (some { rowid := -1, vals }) vsrc
   return #[]
 
 partial def updateView (q : QEnv) (vname : Name) (sets : List (List Name × Expr)) (wh : Option Expr) : M (Array (Array Value)) := do
@@ -1039,9 +1040,13 @@ end
     (except for what SQLite keeps: `OR FAIL` rows, and the counters). The
     error is returned, not thrown, so that the state after it is kept. -/
 def runStmt (s : Stmt) : M (Except Err (Array (Array Value))) := do
+  -- json.c's parse cache lives for one statement
+  modify fun c => { c with jsonCache := {} }
   let saved ← get
   try
     let before := fkOrphans saved.db
+    -- prepare: names and functions are resolved before anything runs
+    staticStmt s
     let rows ← execStmt {} s
     let db ← getDb
     -- immediate foreign keys: the violation counter at the end of the statement

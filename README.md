@@ -24,22 +24,32 @@ siblings for TinyCC and libtommath.
 
 ## Status (2026-11-03)
 
-- Pilot: Certora/clean's `ccomp` and `clightgen` build for x86_64-linux;
-  `c/pilot/hello.c` goes through `clightgen -lean` and our runner (Clean's
-  `doStep` plus an executable libc model) prints the same bytes as gcc.
-- The **full** `sqlite3.c` of SQLite 3.54.1 (default build, plus the math
-  functions) is accepted by `clightgen -lean` with `-fstruct-passing` and two
-  preprocessor-only flags (`config/sqlite.flags`): 2,642 functions, 47 MB of
-  Lean.
-- The export **runs**: Clean's interpreter, with an explicit external model
-  and three stated extensions of Clight (variadic calls, and pointers used as
-  integers under a flat placement of blocks; BRIEF.md D8, PHASES.md O1/O2),
-  gives byte-identical output to the gcc and ccomp builds on all six
-  differential scripts of `tests/sql/` (`scripts/difftest.sh`), which cover
-  joins, CTEs, window functions, triggers, constraints, UPSERT, transactions,
-  pragmas and the JSON, date and math functions.
-- Two places where SQLite relies on behaviour CompCert leaves undefined,
-  one of them undefined in ISO C too (BUGS.md).
+- **The export.** The **full** `sqlite3.c` of SQLite 3.54.1 (default build,
+  plus the math functions; 2,642 functions, 47 MB of Lean) goes through
+  Certora/clean's `clightgen -lean` and builds with Lean's default limits. It
+  **runs** under Clean's interpreter with an explicit libc model and the three
+  extensions of Clight described in [TRUST.md](TRUST.md) (variadic calls, and
+  pointers used as integers under a flat placement of blocks). Its output is
+  byte-identical to the gcc and ccomp builds on the differential scripts
+  (`scripts/difftest.sh`).
+- **The semantics.** `Sql/` is a semantics of SQLite's SQL in Lean 4, written
+  against `sqlite3` as the criterion and run as `sql_run`. It covers:
+  - every statement kind except EXPLAIN and VACUUM INTO;
+  - joins of every kind, subqueries, compound selects, recursive CTEs and window functions;
+  - triggers, including INSTEAD OF, foreign keys with their actions, UPSERT and RETURNING;
+  - ALTER TABLE with SQLite's rewriting of the stored SQL, transactions and savepoints, TEMP and attached in-memory databases;
+  - prepare-time name resolution, and the core, math, printf, date/time and JSON/JSONB function libraries.
+- **Differential results** against `sqlite3`:
+  - `tests/sem` + `tests/sql`: 35 of 36 scripts agree (the other is the PRAGMA probe; that lane is in progress);
+  - sqllogictest: `select1`–`select3` and `evidence/` agree on all 5,653 queries;
+  - REAL rendering: 0 mismatches on 1.6M doubles;
+  - printf/round/quote: 0 in 1.8M random calls;
+  - date/time: 0 in 181k;
+  - JSON: 1 in 50k (the remaining cases are listed in PHASES.md).
+- **Coverage:** `python3 scripts/coverage.py`.
+- **SQLite behaviour found:** places where SQLite relies on behaviour that is
+  undefined in CompCert's memory model, one of them undefined in ISO C too
+  ([BUGS.md](BUGS.md)).
 
 ## Building
 

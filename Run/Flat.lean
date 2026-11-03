@@ -71,7 +71,7 @@ def concretize (a : Expr) (v : Val) : Expr :=
 
 /-- Replace each comparison of `x` that Clean cannot evaluate, and the flat
     placement can, by its value. Returns the expression and whether it changed. -/
-partial def flatRewrite (ge : CGenv) (e : Env) (le : TempEnv) (m : Mem) : Expr → Expr × Bool
+def flatRewrite (ge : CGenv) (e : Env) (le : TempEnv) (m : Mem) : Expr → Expr × Bool
   | .Ebinop op a1 a2 ty =>
     let (a1', c1) := flatRewrite ge e le m a1
     let (a2', c2) := flatRewrite ge e le m a2

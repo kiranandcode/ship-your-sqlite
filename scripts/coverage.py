@@ -8,7 +8,7 @@ export    functions of sqlite3.c that are definitions of the built Lean program
           produces for sqlite3.c alone (build/export/Sqlite3.lean; checked to
           contain every function of a gcc -O0 object, see PHASES.md 1.1)
 run       differential scripts passing (build/diff, scripts/difftest.sh) /
-          scripts in tests/sql
+          scripts in tests/sql and tests/sem
 semantics rows of coverage/features.tsv marked `semantics` and `diff` in
           coverage/status.tsv / rows of features.tsv
 proof     functions with a proved specification (Proof/**: `theorem spec_<fn>`)
@@ -30,7 +30,7 @@ built_ok = os.path.exists('.lake/build/lib/lean/Sqlprog.olean')
 in_prog = defs(glob.glob('build/gen/Sqlprog/*.lean')) if built_ok else set()
 exported = total & in_prog
 
-scripts = sorted(glob.glob('tests/sql/*.sql'))
+scripts = sorted(glob.glob('tests/sql/*.sql') + glob.glob('tests/sem/*.sql'))
 passed = 0
 for s in scripts:
     n = os.path.splitext(os.path.basename(s))[0]

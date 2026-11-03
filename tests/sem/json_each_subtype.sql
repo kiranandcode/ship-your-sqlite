@@ -1,0 +1,1 @@
+select json, root from json_each('[1]'); select * from json_each('[1]') limit 1; select json_array(value) from json_each('[[1,2],3]'); select json_group_array(value) from json_each('[[1],{"a":2},3]');

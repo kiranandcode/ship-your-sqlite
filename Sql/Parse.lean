@@ -169,7 +169,11 @@ partial def parseOr : P Expr := do
 partial def parseAnd : P Expr := do
   let mut e ← parseNot
   while ← eatKw "AND" do
-    e := .binop .and e (← parseNot)
+    let r ← parseNot
+    -- sqlite3ExprAnd: an AND with an integer literal 0 on either side is FALSE
+    -- at parse time (the other side is never resolved)
+    let isZero (x : Expr) : Bool := match x with | .lit (.int 0) => true | _ => false
+    e := if isZero e || isZero r then .lit (.int 0) else .binop .and e r
   return e
 
 partial def parseNot : P Expr := do

@@ -1108,16 +1108,24 @@ def registerModule (db : Db) (m : String) : Db :=
   let mods := (pvStr db "modules" "").splitOn "\x00" |>.filter (!·.isEmpty)
   if mods.any (nameEq · m) then db else setPv db "modules" (txt ("\x00".intercalate (mods ++ [m.toLower])))
 
+/-- The columns of `pragma_<name>` (`pragmaVtabConnect`): the result columns,
+    then the hidden `arg` and `schema`; and how many are visible. -/
+def vtabColumns (fname : String) : Option (List String × Nat) := do
+  let lname := fname.toLower
+  if !lname.startsWith "pragma_" then none
+  let (hasArg, hasSchema, cols) ← vtabShape (lname.drop 7).toString
+  some (cols ++ (if hasArg then ["arg"] else []) ++ (if hasSchema then ["schema"] else []), cols.length)
+
 /-- `SELECT … FROM pragma_<name>(args)`: the module is registered, the
     arguments are the pragma's argument and schema (as text), and the rows
-    are those of `PRAGMA 'schema'.name='arg'`. `none` if there is no such
-    eponymous table. -/
+    are those of `PRAGMA 'schema'.name='arg'`, followed by the hidden `arg`
+    and `schema` columns. `none` if there is no such eponymous table. -/
 def tableValued (vc : ViewCols) (db : Db) (fname : String) (args : List Value) :
-    Option (Except Err (Db × List String × Rows)) := do
+    Option (Except Err (Db × Rows)) := do
   let lname := fname.toLower
   if !lname.startsWith "pragma_" then none
   let name := (lname.drop 7).toString
-  let (hasArg, hasSchema, cols) ← vtabShape name
+  let (hasArg, hasSchema, _) ← vtabShape name
   let db := registerModule db lname
   let nHidden := (if hasArg then 1 else 0) + (if hasSchema then 1 else 0)
   some do
@@ -1131,6 +1139,8 @@ def tableValued (vc : ViewCols) (db : Db) (fname : String) (args : List Value) :
       if !(databases db).any (nameEq ·.2 s) then
         throw ({ code := SQLITE_ERROR, msg := s!"unknown database '{s}'" } : Err)
     let (db, rows) ← runWith vc db schT name (argT.map fun a => .blob a.toUTF8)
-    return (db, cols, rows)
+    let opt (o : Option String) : Value := match o with | some s => txt s | none => .null
+    let hidden : Array Value := (if hasArg then #[opt argT] else #[]) ++ (if hasSchema then #[opt schT] else #[])
+    return (db, rows.map (· ++ hidden))
 
 end Sql.Pragma
