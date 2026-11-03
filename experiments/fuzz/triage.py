@@ -3,6 +3,7 @@
 output differs, with the schema statements and both outputs.
     experiments/fuzz/triage.py [N]"""
 import glob, os, subprocess, sys
+sys.stdout.reconfigure(line_buffering=True)
 os.environ['TZ'] = 'UTC'
 n = int(sys.argv[1]) if len(sys.argv) > 1 else 10
 D = sys.argv[2] if len(sys.argv) > 2 else 'build/fuzz'

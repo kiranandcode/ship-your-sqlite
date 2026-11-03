@@ -241,6 +241,13 @@ def SumCtx.finish (p : SumCtx) : Float := if p.approx then p.real else intToReal
 /-- SQLITE_LIMIT_LENGTH (SQLITE_MAX_LENGTH of the default build) -/
 def maxLength : Int := 1000000000
 
+/-- A TEXT read through `sqlite3_value_text` as a C string: up to its first NUL. -/
+def cstrOf (b : ByteArray) : ByteArray := ⟨(b.data.toList.takeWhile (· != 0)).toArray⟩
+
+/-- quote() of a text: single quotes doubled. -/
+def quoteText (b : ByteArray) : ByteArray :=
+  ByteArray.mk (#[39] ++ (b.data.foldl (fun acc c => if c == 39 then (acc.push 39).push 39 else acc.push c) #[]) ++ #[39])
+
 def windowParamBase : Nat := 1000000000
 
 /-- The arity rules of `pragma function_list` for the lazy built-ins. -/
@@ -729,7 +736,8 @@ partial def scalarFn (n : Name) (vs : List Value) (colls : List (Option (Coll ×
     match a0 with
     | .null => return .null
     | .blob b => return .int b.size
-    | .text s => return .int (utf8Len s)
+    -- a TEXT is read as a C string (up to its first NUL)
+    | .text s => return .int (utf8Len (cstrOf s))
     | v => return .int (utf8Len (textOf v))
   | "octet_length" =>
     if nargs != 1 then wrong
@@ -762,6 +770,7 @@ partial def scalarFn (n : Name) (vs : List Value) (colls : List (Option (Coll ×
     if nargs != 1 then wrong
     match a0 with
     | .real r => return .ofString ((Printf.quoteReal? r).getD (quoteValue a0))
+    | .text t => return .text (quoteText (cstrOf t))
     | _ => return .ofString (quoteValue a0)
   | "hex" =>
     if nargs != 1 then wrong
@@ -791,10 +800,10 @@ partial def scalarFn (n : Name) (vs : List Value) (colls : List (Option (Coll ×
     return .text (String.ofList cs).toUTF8
   | "unicode" =>
     if nargs != 1 then wrong
-    if a0.isNull then return .null
-    match (String.fromUTF8? (textOf a0)).bind (·.toList.head?) with
-    | some c => return .int c.toNat
-    | none => return .null
+    -- the first code point of the text (read up to its first NUL), as sqlite3Utf8Read
+    let bs := (textOf a0).toList.takeWhile (· != 0)
+    if a0.isNull || bs.isEmpty then return .null
+    return .int (utf8Read bs).1
   | "instr" =>
     if nargs != 2 then wrong
     if a0.isNull || a1.isNull then return .null
@@ -821,7 +830,7 @@ partial def scalarFn (n : Name) (vs : List Value) (colls : List (Option (Coll ×
       let units := b.toList.map ([·])
       return .blob ⟨((substrOf units y z).flatten).toArray⟩
     | _ =>
-      let units := utf8Chars (textOf a0)
+      let units := utf8Chars (cstrOf (textOf a0))
       return .text ⟨((substrOf units y z).flatten).toArray⟩
   | "trim" | "ltrim" | "rtrim" =>
     if nargs < 1 || nargs > 2 then wrong

@@ -10,10 +10,6 @@ namespace Sql
 
 /-! ## Output in the driver's format -/
 
-def quoteText (b : ByteArray) : ByteArray :=
-  let q : UInt8 := 39
-  ByteArray.mk (#[q] ++ (b.data.foldl (fun acc c => if c == q then acc.push q |>.push q else acc.push c) #[]) ++ #[q])
-
 def renderValue : Value → ByteArray
   | .null => "NULL".toUTF8
   | .int i => intText i

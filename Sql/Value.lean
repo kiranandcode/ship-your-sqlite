@@ -250,6 +250,28 @@ def Value.toInt (v : Value) : Int :=
   | .text s | .blob s => atoiPrefix s
   | .null => 0
 
+/-! ## SQLite's lenient UTF-8 -/
+
+/-- `sqlite3Utf8Trans1`: the payload bits of a lead byte `0xC0 + i`. -/
+def utf8Trans1 (i : Nat) : Nat :=
+  if i < 32 then i else if i < 48 then i - 32 else if i < 56 then i - 48
+  else [0, 1, 2, 3, 0, 1, 0, 0][i - 56]!
+
+/-- `sqlite3Utf8Read`: the code point at the start of `bs` and the bytes it
+    used. A lead byte takes every continuation byte that follows; an overlong,
+    surrogate or 0xFFFE/0xFFFF result is U+FFFD; a stray byte is itself. -/
+def utf8Read (bs : List UInt8) : Nat × List UInt8 :=
+  match bs with
+  | [] => (0, [])
+  | c :: rest =>
+    if c.toNat < 0xC0 then (c.toNat, rest) else
+    let rec go (acc : Nat) : List UInt8 → Nat × List UInt8
+      | d :: r => if d &&& 0xC0 == 0x80 then go (acc * 64 + (d &&& 0x3F).toNat) r else (acc, d :: r)
+      | [] => (acc, [])
+    let (v, r) := go (utf8Trans1 (c.toNat - 0xC0)) rest
+    let v := if v < 0x80 || v &&& 0xFFFFF800 == 0xD800 || v &&& 0xFFFFFFFE == 0xFFFE then 0xFFFD else v
+    (v, r)
+
 /-! ## Comparison -/
 
 /-- Collating sequences. -/
