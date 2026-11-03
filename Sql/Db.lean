@@ -54,6 +54,8 @@ structure Table where
   cols : Array Column
   /-- the INTEGER PRIMARY KEY column, which is the rowid -/
   rowidCol : Option Nat := none
+  /-- its ON CONFLICT clause -/
+  rowidConflict : Option ConflictRes := none
   withoutRowid : Bool := false
   strict : Bool := false
   autoinc : Bool := false
@@ -218,6 +220,8 @@ structure Err where
   keep : Bool := false
   /-- the rows a SELECT handed out before the error (the driver has printed them) -/
   printed : Array (Array Value) := #[]
+  /-- the transaction is rolled back (ON CONFLICT ROLLBACK) -/
+  rollback : Bool := false
   deriving Inhabited
 
 def SQLITE_ERROR : Nat := 1

@@ -91,7 +91,7 @@ def mkTable (name : Name) (cols : List ColumnDef) (cons : List (Option Name × T
         pkSet := true
         t := { t with pk := [i] }
         if isIntegerType cd.type && dir != some .desc && !withoutRowid then
-          t := { t with rowidCol := some i, autoinc := ai }
+          t := { t with rowidCol := some i, autoinc := ai, rowidConflict := oc }
         else
           if ai then err "AUTOINCREMENT is only allowed on an INTEGER PRIMARY KEY"
           t := { t with uniques := ← addKey t.uniques { cols := [(i, cs[i]!.coll)], onConflict := oc, isPk := true } }
@@ -112,7 +112,7 @@ def mkTable (name : Name) (cols : List ColumnDef) (cons : List (Option Name × T
       t := { t with pk := idxs }
       if idxs.length == 1 && isIntegerType cs[idxs[0]!]!.type && !withoutRowid &&
          (kcols[0]!.2.2 != .desc) then
-        t := { t with rowidCol := some idxs[0]!, autoinc := ai }
+        t := { t with rowidCol := some idxs[0]!, autoinc := ai, rowidConflict := oc }
       else
         let kc ← kcols.mapM (fun (n, c, _) => do
           let i ← colIdx n; pure (i, (c.bind collOfName).getD cs[i]!.coll))
@@ -200,8 +200,19 @@ def withGenerated (fuel : Nat) (t : Table) (r : Row) : M Row := do
       r := { r with vals := r.vals.set! i (applyAffinity t.cols[i].aff v) }
   return r
 
-/-- NOT NULL and CHECK constraints. -/
-def checkRow (fuel : Nat) (t : Table) (r : Row) : M Unit := do
+/-- The conflict resolution of a constraint: the statement's `OR …` if it has
+    one, else the constraint's own ON CONFLICT, else ABORT. -/
+def resolveConflict (ovr own : Option ConflictRes) : ConflictRes := ovr.getD (own.getD .abort)
+
+/-- A constraint error under resolution `r` (other than IGNORE and REPLACE,
+    which the caller handles): FAIL keeps the statement's earlier changes,
+    ROLLBACK rolls the transaction back. -/
+def throwConflict {α} (r : ConflictRes) (msg : String) (code : Nat) : M α :=
+  throw { code, msg, keep := r == .fail, rollback := r == .rollback }
+
+/-- NOT NULL and CHECK constraints; false: the row is ignored (a CHECK
+    failing under OR IGNORE). REPLACE is ABORT for CHECK. -/
+def checkRow (fuel : Nat) (t : Table) (r : Row) (ovr : Option ConflictRes := none) : M Bool := do
   for h : i in [0:t.cols.size] do
     let c := t.cols[i]
     if c.notNull && (r.vals[i]?.getD .null).isNull then
@@ -209,7 +220,11 @@ def checkRow (fuel : Nat) (t : Table) (r : Row) : M Unit := do
   for (nm, e) in (if Pragma.flag (← getDb) "ignore_check_constraints" then [] else t.checks) do
     -- sqlite3ExprIfTrue(check, ok, SQLITE_JUMPIFNULL): true or NULL passes
     if !(← condJump fuel (qOfRow t r) e true true) then
-      err s!"CHECK constraint failed: {nm.getD ""}" SQLITE_CONSTRAINT_CHECK
+      match ovr.getD .abort with
+      | .ignore => return false
+      | .replace | .abort => err s!"CHECK constraint failed: {nm.getD ""}" SQLITE_CONSTRAINT_CHECK
+      | res => throwConflict res s!"CHECK constraint failed: {nm.getD ""}" SQLITE_CONSTRAINT_CHECK
+  return true
 
 /-- Unique keys of the table, including UNIQUE indexes. -/
 def allUniques (db : Db) (t : Table) : List (UniqueKey × Option Name) :=
@@ -254,7 +269,7 @@ def currentTable (n : Name) : M Table := do
 
 /-- Insert one row (values for every column, rowid value or none), applying
     conflict resolution. Returns the inserted row, or none if ignored. -/
-def insertRow (fuel : Nat) (tname : Name) (vals : Array Value) (rowidV : Option Value) (oc : ConflictRes) :
+def insertRow (fuel : Nat) (tname : Name) (vals : Array Value) (rowidV : Option Value) (ovr : Option ConflictRes) :
     M (Option Row) := do
   let t ← currentTable tname
   let db ← getDb
@@ -302,31 +317,31 @@ def insertRow (fuel : Nat) (tname : Name) (vals : Array Value) (rowidV : Option 
   for h : i in [0:t.cols.size] do
     let c := t.cols[i]
     if c.notNull && (row.vals[i]?.getD .null).isNull then
-      match c.notNullConflict.getD oc with
+      match resolveConflict ovr c.notNullConflict with
       | .ignore => return none
       | .replace =>
         match c.dflt with
         | some d => row := { row with vals := row.vals.set! i (← storeValue t i (← evalExpr fuel {} d)) }
         | none => err s!"NOT NULL constraint failed: {t.name}.{c.name}" SQLITE_CONSTRAINT_NOTNULL
-      | _ => err s!"NOT NULL constraint failed: {t.name}.{c.name}" SQLITE_CONSTRAINT_NOTNULL
-  checkRow fuel t row
+      | res => throwConflict res s!"NOT NULL constraint failed: {t.name}.{c.name}" SQLITE_CONSTRAINT_NOTNULL
+  if !(← checkRow fuel t row ovr) then return none
   -- uniqueness: the rowid, then the unique keys
   let mut rows := t.rows
   if !t.withoutRowid then
     if rows.any (·.rowid == rid) then
-      match oc with
+      match resolveConflict ovr t.rowidConflict with
       | .ignore => return none
       | .replace => rows := rows.filter (·.rowid != rid)
-      | _ =>
+      | res =>
         let cname := match t.rowidCol with | some ci => t.cols[ci]!.name | none => "rowid"
-        err s!"UNIQUE constraint failed: {t.name}.{cname}" SQLITE_CONSTRAINT_PRIMARYKEY
+        throwConflict res s!"UNIQUE constraint failed: {t.name}.{cname}" SQLITE_CONSTRAINT_PRIMARYKEY
   for (k, _) in allUniques db t do
     let key := keyOf row k
     if rows.any (fun r => keyEq k (keyOf r k) key) then
-      match k.onConflict.getD oc with
+      match resolveConflict ovr k.onConflict with
       | .ignore => return none
       | .replace => rows := rows.filter (fun r => !keyEq k (keyOf r k) key)
-      | _ => err (uniqueMsg t k) (if k.isPk then SQLITE_CONSTRAINT_PRIMARYKEY else SQLITE_CONSTRAINT_UNIQUE)
+      | res => throwConflict res (uniqueMsg t k) (if k.isPk then SQLITE_CONSTRAINT_PRIMARYKEY else SQLITE_CONSTRAINT_UNIQUE)
   let t' := { t with rows := sortRows t (rows.push row) }
   modifyMain fun s => s.setTable t'
   if t.autoinc then
@@ -676,15 +691,19 @@ def execStmt (fuel : Nat) (q : QEnv) (s : Stmt) : M (Array (Array Value)) :=
             let mut nvals := vals
             for h : i in [0:t.cols.size] do nvals := nvals.set! i (← storeValue t i (vals[i]?.getD .null))
             let rid := match rowidV.map (applyAffinity .integer) with | some (.int i) => i | _ => -1
-            runTriggers fuel q .before .insert tname none (some { rowid := rid, vals := nvals })
+            -- RAISE(FAIL) keeps the rows inserted so far, and counts them
+            tryCatch (runTriggers fuel q .before .insert tname none (some { rowid := rid, vals := nvals }))
+              fun e => do
+                if e.keep then modify fun c => { c with db := { c.db with changes := n, totalChanges := c.db.totalChanges + n } }
+                throw e
           -- UPSERT: a conflict on the target runs the DO clause instead
-          let r? : Option Row ← try (insertRow fuel tname vals rowidV (if upserts.isEmpty then oc else .abort))
+          let r? : Option Row ← try (insertRow fuel tname vals rowidV (if upserts.isEmpty then orC else some .abort))
             catch e => do
-              -- OR FAIL keeps the earlier rows on a constraint conflict only
-              -- (SQLITE_CONSTRAINT_*); any other error rolls the statement back
-              if oc == .fail && upserts.isEmpty && e.code % 256 == 19 then
+              -- FAIL keeps the earlier rows on a constraint conflict (insertRow
+              -- marks it); any other error rolls the statement back
+              if e.keep && upserts.isEmpty then
                 modify fun c => { c with db := { c.db with changes := n, totalChanges := c.db.totalChanges + n } }
-                throw { e with keep := true }
+                throw e
               if upserts.isEmpty || !(e.code == SQLITE_CONSTRAINT_UNIQUE || e.code == SQLITE_CONSTRAINT_PRIMARYKEY) then throw e
               let some up := upserts.head? | throw e
               match up.action with
@@ -717,7 +736,7 @@ def execStmt (fuel : Nat) (q : QEnv) (s : Stmt) : M (Array (Array Value)) :=
                       | some i => nv := nv.set! i (← storeValue t i v)
                       | none => err s!"no such column: {nm}"
                   let newRow ← withGenerated fuel t { old with vals := nv }
-                  checkRow fuel t newRow
+                  let _ ← checkRow fuel t newRow
                   let others := t.rows.filter (·.rowid != old.rowid)
                   for (k, _) in allUniques (← getDb) t do
                     if others.any (fun r => keyEq k (keyOf r k) (keyOf newRow k)) then
@@ -729,7 +748,10 @@ def execStmt (fuel : Nat) (q : QEnv) (s : Stmt) : M (Array (Array Value)) :=
             n := n + 1
             inserted := inserted.push row
             modify fun c => { c with db := { c.db with lastRowid := row.rowid } }
-            runTriggers fuel q .after (.insert) tname none (some row)
+            tryCatch (runTriggers fuel q .after (.insert) tname none (some row))
+              fun e => do
+                if e.keep then modify fun c => { c with db := { c.db with changes := n, totalChanges := c.db.totalChanges + n } }
+                throw e
           | _ => pure ()
         countChanges q n
         resultRows fuel q (← currentTable tname) tname inserted ret
@@ -781,47 +803,42 @@ def execStmt (fuel : Nat) (q : QEnv) (s : Stmt) : M (Array (Array Value)) :=
           let newRow ← withGenerated fuel t { rowid := newRowid, vals := nv }
           runTriggers fuel q .before (.update (sets.flatMap (·.1))) tname (some old) (some newRow)
           let t ← currentTable tname
-          -- NOT NULL, resolved by UPDATE OR <oc> (or the column's ON CONFLICT)
-          let ocU := orC.getD .abort
+          -- a constraint error under resolution `r` (FAIL keeps the rows
+          -- updated so far, ROLLBACK rolls the transaction back)
+          let conflictErr (r : ConflictRes) (m : String) (code : Nat) : M Unit := do
+            if r == .fail then countChanges q updated.size
+            throwConflict r m code
+          -- NOT NULL, resolved by UPDATE OR <oc> (else the column's ON CONFLICT)
           let mut newRow := newRow
           let mut skipNN := false
           for h : i in [0:t.cols.size] do
             let c := t.cols[i]
             if c.notNull && (newRow.vals[i]?.getD .null).isNull then
-              match c.notNullConflict.getD ocU with
+              match resolveConflict orC c.notNullConflict with
               | .ignore => skipNN := true
               | .replace =>
                 match c.dflt with
                 | some d => newRow := { newRow with vals := newRow.vals.set! i (← storeValue t i (← evalExpr fuel {} d)) }
                 | none => err s!"NOT NULL constraint failed: {t.name}.{c.name}" SQLITE_CONSTRAINT_NOTNULL
-              | .fail =>
-                countChanges q updated.size
-                throw { code := SQLITE_CONSTRAINT_NOTNULL, msg := s!"NOT NULL constraint failed: {t.name}.{c.name}", keep := true }
-              | _ => err s!"NOT NULL constraint failed: {t.name}.{c.name}" SQLITE_CONSTRAINT_NOTNULL
+              | r => conflictErr r s!"NOT NULL constraint failed: {t.name}.{c.name}" SQLITE_CONSTRAINT_NOTNULL
           if skipNN then continue
-          checkRow fuel t newRow
-          -- conflicts, resolved by UPDATE OR <oc> (or the constraint's own ON CONFLICT)
-          let oc := orC.getD .abort
+          if !(← checkRow fuel t newRow orC) then continue
+          -- conflicts, resolved by UPDATE OR <oc> (else the constraint's own ON CONFLICT)
           let mut others := t.rows.filter (·.rowid != old.rowid)
           let mut skip := false
-          let conflictErr (m : String) (code : Nat) : M Unit := do
-            if oc == .fail then
-              countChanges q updated.size
-              throw { code, msg := m, keep := true }
-            err m code
           if others.any (·.rowid == newRowid) && !t.withoutRowid then
             let cname := match t.rowidCol with | some ci => t.cols[ci]!.name | none => "rowid"
-            match oc with
+            match resolveConflict orC t.rowidConflict with
             | .replace => others := others.filter (·.rowid != newRowid)
             | .ignore => skip := true
-            | _ => conflictErr s!"UNIQUE constraint failed: {t.name}.{cname}" SQLITE_CONSTRAINT_PRIMARYKEY
+            | r => conflictErr r s!"UNIQUE constraint failed: {t.name}.{cname}" SQLITE_CONSTRAINT_PRIMARYKEY
           if !skip then
             for (k, _) in allUniques (← getDb) t do
               if others.any (fun r => keyEq k (keyOf r k) (keyOf newRow k)) then
-                match k.onConflict.getD oc with
+                match resolveConflict orC k.onConflict with
                 | .replace => others := others.filter (fun r => !keyEq k (keyOf r k) (keyOf newRow k))
                 | .ignore => skip := true
-                | _ => conflictErr (uniqueMsg t k) (if k.isPk then SQLITE_CONSTRAINT_PRIMARYKEY else SQLITE_CONSTRAINT_UNIQUE)
+                | r => conflictErr r (uniqueMsg t k) (if k.isPk then SQLITE_CONSTRAINT_PRIMARYKEY else SQLITE_CONSTRAINT_UNIQUE)
           if skip then continue
           modifyMain fun s => s.setTable { t with rows := sortRows t (others.push newRow) }
           fkOnParentUpdate fuel tname old newRow
@@ -1205,8 +1222,13 @@ def runStmt (fuel : Nat) (s : Stmt) : M (Except Err (Array (Array Value))) := do
       -- leave it (vdbeHalt: sqlite3VdbeSetChanges only when changeCntOn)
       let isDml := match s with | .insert .. | .update .. | .delete .. => true | _ => false
       let changes := if isDml then 0 else saved.db.changes
+      -- ON CONFLICT ROLLBACK: back to the transaction's start, which ends it
+      let base := if e.rollback then
+          { saved.db with main := (saved.db.savepoints.getLast?.map (·.2)).getD saved.db.main,
+                          inTxn := false, savepoints := [] }
+        else saved.db
       -- the choices made and the fuel spent are not rolled back
-      set { saved with db := Pragma.keepModules failed.db { saved.db with changes },
+      set { saved with db := Pragma.keepModules failed.db { base with changes },
                        orderPos := failed.orderPos, exhausted := failed.exhausted }
     return .error e
 

@@ -458,6 +458,48 @@ def eqKey (coll : Coll) (v : Value) : Option String :=
 def mergeAsc (a b : Array Nat) : Array Nat :=
   (a.toList ++ b.toList).mergeSort (· ≤ ·) |>.toArray
 
+/-- `unistrFunc`: `\\` is a backslash; `\XXXX`, `\uXXXX`, `\+XXXXXX` and
+    `\UXXXXXXXX` are code points (sqlite3AppendOneUtf8Character); none: an
+    invalid escape. The scan for the next backslash stops at a NUL byte
+    (`strchr`), after which the rest is copied as it is. -/
+def unistrBytes (z : ByteArray) : Option ByteArray := Id.run do
+  let at_ (i : Nat) : UInt8 := if i < z.size then z[i]! else 0
+  let isHex (c : UInt8) : Bool := (48 ≤ c && c ≤ 57) || (65 ≤ c && c ≤ 70) || (97 ≤ c && c ≤ 102)
+  let hexv (c : UInt8) : Nat := if c ≤ 57 then (c - 48).toNat else if c ≤ 70 then (c - 55).toNat else (c - 87).toNat
+  let hexN (i n : Nat) : Option Nat :=
+    (List.range n).foldl (fun acc k => acc.bind fun v => if isHex (at_ (i + k)) then some (v * 16 + hexv (at_ (i + k))) else none) (some 0)
+  let utf8 (v : Nat) : Array UInt8 :=
+    let v := v % 2 ^ 32
+    if v < 0x80 then #[v.toUInt8]
+    else if v < 0x800 then #[(0xc0 + (v >>> 6) % 32).toUInt8, (0x80 + v % 64).toUInt8]
+    else if v < 0x10000 then #[(0xe0 + (v >>> 12) % 16).toUInt8, (0x80 + (v >>> 6) % 64).toUInt8, (0x80 + v % 64).toUInt8]
+    else #[(0xf0 + (v >>> 18) % 8).toUInt8, (0x80 + (v >>> 12) % 64).toUInt8, (0x80 + (v >>> 6) % 64).toUInt8, (0x80 + v % 64).toUInt8]
+  let mut out : Array UInt8 := #[]
+  let mut i := 0
+  -- each round consumes at least one byte
+  for _ in [0:z.size + 1] do
+    if i ≥ z.size then break
+    let mut j := i
+    for _ in [i:z.size] do
+      if at_ j == 92 || at_ j == 0 then break
+      j := j + 1
+    if at_ j != 92 then
+      out := out ++ (z.extract i z.size).data
+      break
+    out := out ++ (z.extract i j).data
+    i := j
+    let c := at_ (i + 1)
+    if c == 92 then out := out.push 92; i := i + 2
+    else
+      let (start, n, len) :=
+        if isHex c then (i + 1, 4, 5) else if c == 43 then (i + 2, 6, 8)
+        else if c == 117 then (i + 2, 4, 6) else if c == 85 then (i + 2, 8, 10) else (0, 0, 0)
+      if len == 0 then return none
+      match hexN start n with
+      | some v => out := out ++ utf8 v; i := i + len
+      | none => return none
+  return some ⟨out⟩
+
 /-- The state of a streamed SELECT (`runCore`): its rows so far, the keys
     DISTINCT has seen, the rows OFFSET has skipped, and the result columns
     with their collations once the sources are known. -/
@@ -749,6 +791,10 @@ def evalExpr (fuel : Nat) (q : QEnv) (e : Expr) : M Value :=
           | none => pure ""
         match kind with
         | .ignore => throw { code := 0, msg := "RAISE(IGNORE)" }
+        -- ROLLBACK rolls the transaction back; FAIL keeps the statement's
+        -- changes so far; ABORT undoes the statement
+        | .rollback => throw { code := SQLITE_CONSTRAINT_TRIGGER, msg := m, rollback := true }
+        | .fail => throw { code := SQLITE_CONSTRAINT_TRIGGER, msg := m, keep := true }
         | _ => throw { code := SQLITE_CONSTRAINT_TRIGGER, msg := m }
 
 def compareRows (fuel : Nat) (q : QEnv) (op : BinOp) (xs ys : List Expr) : M Value :=
@@ -933,6 +979,11 @@ def callFnST (fuel : Nat) (q : QEnv) (n : Name) (args : List Expr) (_distinct : 
       -- coalesce/ifnull/iif are compiled to jumps: later arguments are evaluated
       -- only if needed
       let low := n.toLower
+      -- subtype(X): 74 ('J') for a value with the JSON subtype, else 0
+      if low == "subtype" then
+        let [x] := args | err s!"wrong number of arguments to function {n}()"
+        let (_, j) ← evalExprST fuel q x
+        return (.int (if j then 74 else 0), false)
       if low == "coalesce" || low == "ifnull" then
         checkArity n args.length
         for a in args do
@@ -1148,6 +1199,22 @@ def scalarFn (fuel : Nat) (n : Name) (vs : List Value) (colls : List (Option (Co
         if nargs < 2 then wrong
         -- iif(c1, v1, c2, v2, …, else)
         return iifPick vs
+      | "unistr" =>
+        if nargs != 1 then wrong
+        if a0.isNull then return .null
+        match unistrBytes (textOf a0) with
+        | some b => return .text b
+        | none => err "invalid Unicode escape"
+      | "unistr_quote" =>
+        if nargs != 1 then wrong
+        -- quote(), with %#Q for text: control characters through unistr()
+        match a0 with
+        | .text _ => match Printf.scalar? "printf" [.ofString "%#Q", a0] with
+          | some (.ok v) => return v
+          | some (.error e) => throw e
+          | none => return .ofString (quoteValue a0)
+        | .real r => return .ofString ((Printf.quoteReal? r).getD (quoteValue a0))
+        | _ => return .ofString (quoteValue a0)
       | "quote" =>
         if nargs != 1 then wrong
         match a0 with
