@@ -8,6 +8,7 @@ at the `'Q<n>'` markers; a query whose order is unspecified (rowsort,
 valuesort) is compared as a multiset of lines. Prints per-file counts and the
 first mismatches; writes build/slt/out/<name>.{sql,order,want,got}."""
 import os, subprocess, sys
+os.environ['TZ'] = 'UTC'
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, 'build/slt/out')
 

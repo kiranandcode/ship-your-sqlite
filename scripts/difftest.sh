@@ -5,6 +5,8 @@
 # build/diff/<name>.{gcc,ccomp,lean,lean.err}.
 #   scripts/difftest.sh [script.sql ...]      (default: tests/sql/*.sql)
 set -uo pipefail
+# the semantics takes the time zone to be UTC (Sql/DateTime.lean)
+export TZ=UTC
 . "$(dirname "$0")/env.sh"
 out="$SYS_ROOT/build/diff"; mkdir -p "$out"
 run="$SYS_ROOT/.lake/build/bin/sqlite_run"
