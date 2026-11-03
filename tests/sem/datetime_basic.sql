@@ -1,0 +1,27 @@
+-- date(), time(), datetime(), julianday(), unixepoch() on the time-value formats
+SELECT date('2000-01-01'), time('2000-01-01'), datetime('2000-01-01'), julianday('2000-01-01'), unixepoch('2000-01-01');
+SELECT date('2013-10-07 08:23:19.120'), time('2013-10-07 08:23:19.120'), datetime('2013-10-07T08:23:19.120'), julianday('2013-10-07 08:23:19.120');
+SELECT datetime('2013-10-07 08:23'), datetime('2013-10-07 08:23:19'), datetime('2013-10-07T08:23:19.1234567'), datetime('2013-10-07  T T 08:23');
+SELECT time('08:23'), time('08:23:19'), time('08:23:19.999'), datetime('08:23:19.5'), julianday('12:00'), date('12:00');
+SELECT datetime('2013-10-07 08:23:19+05:30'), datetime('2013-10-07 08:23:19-05:30'), datetime('2013-10-07 08:23:19Z'), datetime('2013-10-07 08:23:19 z'), datetime('2013-10-07 08:23:19 +00:00');
+SELECT datetime('2013-10-07 08:23:19+14:00'), datetime('2013-10-07 08:23:19+15:00'), datetime('2013-10-07 08:23:19+05:60'), datetime('2013-10-07 08:23:19+0530'), datetime('2013-10-07 08:23:19 + 05:30');
+SELECT time('12:00+01:00'), time('12:00-11:30'), datetime('12:00Z'), datetime('23:59:59.999+00:01'), datetime('2013-10-07 08:23:19+05:30 '), datetime('2013-10-07 08:23:19Z junk');
+SELECT datetime(2451545), datetime(2451545.25), datetime('2451545.5'), julianday(2451545), datetime(0), datetime(0.0), datetime(-1), datetime(5373484.4999), datetime(5373484.5), datetime(1e100);
+SELECT datetime(1700000000, 'unixepoch'), datetime('1700000000', 'unixepoch'), datetime(1700000000.5, 'unixepoch', 'subsec'), datetime(-1, 'unixepoch'), datetime(-210866760000, 'unixepoch'), datetime(-210866760001, 'unixepoch'), datetime(253402300799, 'unixepoch'), datetime(253402300800, 'unixepoch');
+SELECT datetime(1700000000, 'auto'), datetime(2451545, 'auto'), datetime(5373484, 'auto'), datetime(5373485, 'auto'), datetime(-1, 'auto'), datetime(1e12, 'auto'), datetime(253402300799, 'auto'), datetime(253402300800, 'auto');
+SELECT datetime(2451545, 'julianday'), datetime(1700000000, 'julianday'), datetime('2000-01-01', 'julianday'), datetime(2451545, '+1 day', 'julianday'), datetime(1700000000, '+1 day', 'unixepoch'), datetime(1700000000, '+1 day', 'auto');
+SELECT date(NULL), date('2000-01-01', NULL), date(''), date('junk'), date('2000-1-1'), date('2000-01-1'), date('2000-13-01'), date('2000-00-01'), date('2000-01-32'), date('2000-01-00'), date('20000-01-01');
+SELECT date('2000-02-30'), date('2001-02-29'), date('2000-02-31'), date('2023-04-31'), datetime('2023-02-31 12:00'), date('2000-01-01 '), date(' 2000-01-01'), date('2000-01-01x'), date('2000-01-01 12:00x');
+SELECT datetime('2000-01-01 24:00'), datetime('2000-01-31 24:00:00'), datetime('2000-12-31 24:00'), datetime('2000-01-01 24:00:01'), datetime('2000-01-01 24:01'), time('24:00'), datetime('24:00'), datetime('2000-02-29 24:00');
+SELECT date('-0001-01-01'), date('-4713-11-24'), date('-4713-11-24 12:00'), datetime('-4713-11-24 12:00'), julianday('-4713-11-24 12:00'), date('-4713-11-23'), date('-4714-01-01'), date('0000-01-01'), date('9999-12-31'), datetime('9999-12-31 23:59:59.999');
+SELECT datetime('9999-12-31 23:59:59.999', 'subsec'), datetime('9999-12-31 23:59:59.9999', 'subsec'), julianday('9999-12-31 23:59:59.999'), unixepoch('9999-12-31 23:59:59'), unixepoch('-4713-11-24 12:00');
+SELECT date(X'323030302d30312d3031'), date(CAST(X'323030302d30312d303100' AS TEXT)), typeof(date('now')), typeof(time()), typeof(datetime()), typeof(julianday('now')), typeof(unixepoch()), typeof(CURRENT_DATE), typeof(CURRENT_TIME), typeof(CURRENT_TIMESTAMP);
+SELECT date('NOW') IS NOT NULL, typeof(datetime('subsec')), typeof(unixepoch('subsecond')), typeof(unixepoch('now','subsec')), length(datetime('now','subsec')), length(CURRENT_TIMESTAMP), length(CURRENT_TIME), length(CURRENT_DATE);
+SELECT datetime('2000-01-01 12:00:00.5', 'subsec'), time('12:00:00.12345', 'subsec'), unixepoch('2000-01-01 12:00:00.5', 'subsec'), unixepoch('1969-12-31 23:59:59.5'), unixepoch('1969-12-31 23:59:59.5', 'subsecond'), julianday('2000-01-01 12:00:00.001');
+SELECT time('12:00:00.' || '9999999999999999999999999999'), time('12:00:00.' || replace(hex(zeroblob(200)), '0', '9'), 'subsec'), datetime('2000-01-01 00:00:00.0005', 'subsec'), datetime('2000-01-01 00:00:00.0004999', 'subsec');
+SELECT date(2451545.0), date(CAST(2451545 AS TEXT)), date(' 2451545 '), date('2451545x'), date('1e6'), date('.5'), date('5.'), date('-0.5'), date('+2451545');
+SELECT julianday(2451545.123456789), julianday('2451545.123456789'), julianday(0.0000001), julianday('2000-01-01 00:00:00.0001'), julianday(5373484.49999999);
+SELECT timediff('2023-02-15', '2023-03-15'), timediff('2023-03-15', '2023-02-15'), timediff('2000-01-01', '2000-01-01'), timediff('2024-03-31 12:00', '2023-02-28 06:30:15.5'), timediff('2023-02-28 06:30:15.5', '2024-03-31 12:00');
+SELECT timediff('2000-03-31', '2000-02-29'), timediff('2000-01-31', '2000-02-29'), timediff('-0100-01-01', '2000-06-15 12:34:56.789'), timediff(2451545, '2000-01-01'), timediff(NULL, '2000-01-01'), timediff('x', '2000-01-01'), timediff('9999-12-31', '-4713-11-24 12:00');
+SELECT timediff('2000-01-01'), 1;
+SELECT timediff('2000-01-01', '2000-01-01', '2000-01-01'), 1;
