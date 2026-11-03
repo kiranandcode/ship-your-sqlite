@@ -127,6 +127,39 @@ def spanText (i j : Nat) : P String := do
   | some a, some b => return String.fromUTF8! (s.src.extract a.start b.stop)
   | _, _ => return ""
 
+/-! ### Bounds
+
+The parser is total: its mutually recursive functions take a `fuel` that
+decreases on every call, and its loops are bounded by the tokens left. Both
+bounds are chosen so that they are never reached (see `parseNextTok`); running
+out is the internal error `exhausted`, distinct from every SQLite error. -/
+
+/-- Running out of fuel or of loop iterations: never happens for the bounds
+    the parser is started with (`parseNextTok`). -/
+def exhausted {α} : P α := do
+  throw ⟨"internal error: parser bound exhausted", (← get).src.size⟩
+
+/-- The iterations of a parser loop (`for _ in steps do …`): at most one more
+    than the tokens left when the loop starts. Every loop of the parser
+    consumes at least one token in each iteration that does not leave it, so
+    the bound is never reached. -/
+structure Steps where
+def steps : Steps := ⟨⟩
+
+/-- `k` iterations at most of `f`. -/
+def loopN {β} (k : Nat) (b : β) (f : Unit → β → P (ForInStep β)) : P β :=
+  match k with
+  | 0 => exhausted
+  | k + 1 => do
+    match ← f () b with
+    | .done b => pure b
+    | .yield b => loopN k b f
+
+instance : ForIn P Steps Unit where
+  forIn _ b f := do
+    let s ← get
+    loopN (s.toks.size - s.pos + 1) b f
+
 end P
 
 open P
@@ -156,36 +189,78 @@ def hexBlob (s : String) : ByteArray :=
     | _ => []
   ⟨(go h).toArray⟩
 
+/-- A type name: words, optionally `(n)` or `(n, m)`; returned as written. -/
+def parseTypeName : P String := do
+  let s0 := (← get).pos
+  let mut any := false
+  for _ in steps do
+    match ← nameOpt with
+    | some _ => any := true
+    | none => break
+  if any && (← isOp "LP") then
+    advance
+    let signed : P Unit := do
+      let _ ← eatOp "PLUS" <||> eatOp "MINUS"
+      match ← peek with
+      | some t => if t.tk == .integer || t.tk == .float || t.tk == .qnumber then advance else failHere
+      | none => failHere
+    signed
+    if ← eatOp "COMMA" then signed
+    op "RP"
+  spanText s0 (← get).pos
+
+def parseAlias : P (Option Name) := do
+  if ← eatKw "AS" then return some (← name)
+  -- an alias may not be a keyword that can start the rest of the clause
+  if (← isKw "JOIN_KW") then return none
+  nameOpt
+
+/-! The recursive descent. Each function takes the fuel first and passes one
+less to every function of the block it calls (see `parseNextTok` for why the
+initial fuel suffices). -/
+
 mutual
 
-partial def parseExpr : P Expr := parseOr
+def parseExpr : Nat → P Expr
+  | 0 => exhausted
+  | n + 1 => parseOr n
 
-partial def parseOr : P Expr := do
-  let mut e ← parseAnd
-  while ← eatKw "OR" do
-    e := .binop .or e (← parseAnd)
+def parseOr : Nat → P Expr
+  | 0 => exhausted
+  | n + 1 => do
+  let mut e ← parseAnd n
+  for _ in steps do
+    if !(← eatKw "OR") then break
+    e := .binop .or e (← parseAnd n)
   return e
 
-partial def parseAnd : P Expr := do
-  let mut e ← parseNot
-  while ← eatKw "AND" do
-    let r ← parseNot
+def parseAnd : Nat → P Expr
+  | 0 => exhausted
+  | n + 1 => do
+  let mut e ← parseNot n
+  for _ in steps do
+    if !(← eatKw "AND") then break
+    let r ← parseNot n
     -- sqlite3ExprAnd: an AND with an integer literal 0 on either side is FALSE
     -- at parse time (the other side is never resolved)
     let isZero (x : Expr) : Bool := match x with | .lit (.int 0) => true | _ => false
     e := if isZero e || isZero r then .lit (.int 0) else .binop .and e r
   return e
 
-partial def parseNot : P Expr := do
-  if ← eatKw "NOT" then return .unop .not (← parseNot)
-  parseEquality
+def parseNot : Nat → P Expr
+  | 0 => exhausted
+  | n + 1 => do
+  if ← eatKw "NOT" then return .unop .not (← parseNot n)
+  parseEquality n
 
 /-- IS, MATCH, LIKE, BETWEEN, IN, ISNULL, NOTNULL, NE, EQ (one level, left assoc) -/
-partial def parseEquality : P Expr := do
-  let mut e ← parseComparison
-  repeat
-    if ← eatOp "EQ" then e := .binop .eq e (← parseComparison)
-    else if ← eatOp "NE" then e := .binop .ne e (← parseComparison)
+def parseEquality : Nat → P Expr
+  | 0 => exhausted
+  | n + 1 => do
+  let mut e ← parseComparison n
+  for _ in steps do
+    if ← eatOp "EQ" then e := .binop .eq e (← parseComparison n)
+    else if ← eatOp "NE" then e := .binop .ne e (← parseComparison n)
     else if ← eatKw "ISNULL" then e := .isNull false e
     else if ← eatKw "NOTNULL" then e := .isNull true e
     else if ← isKw "IS" then
@@ -193,10 +268,10 @@ partial def parseEquality : P Expr := do
       let neg ← eatKw "NOT"
       if ← eatKw "DISTINCT" then
         kw "FROM"
-        let r ← parseComparison
+        let r ← parseComparison n
         e := .binop (if neg then .is else .isNot) e r
       else
-        let r ← parseComparison
+        let r ← parseComparison n
         e := .binop (if neg then .isNot else .is) e r
     else if (← isKw "NOT") && ((← isKwAt 1 "NULL")) then
       advance; advance; e := .isNull true e
@@ -205,121 +280,146 @@ partial def parseEquality : P Expr := do
                   (← isKwAt 1 "LIKE_KW") || (← isKwAt 1 "MATCH"))
       if neg then advance
       if ← eatKw "BETWEEN" then
-        let lo ← parseComparison
+        let lo ← parseComparison n
         kw "AND"
-        let hi ← parseComparison
+        let hi ← parseComparison n
         e := .between neg e lo hi
       else if ← eatKw "IN" then
-        e ← parseInRhs neg e
+        e ← parseInRhs n neg e
       else if ← isKw "LIKE_KW" then
         let w ← kwWord
         advance
         let opk := if w == "GLOB" then LikeOp.glob else if w == "REGEXP" then .regexp else .like
-        let pat ← parseComparison
-        let esc ← if ← eatKw "ESCAPE" then some <$> parseComparison else pure none
+        let pat ← parseComparison n
+        let esc ← if ← eatKw "ESCAPE" then some <$> parseComparison n else pure none
         e := .like opk neg e pat esc
       else if ← eatKw "MATCH" then
-        let pat ← parseComparison
+        let pat ← parseComparison n
         e := .like .match_ neg e pat none
       else if neg then failHere
       else break
   return e
 
-partial def parseInRhs (neg : Bool) (e : Expr) : P Expr := do
+def parseInRhs : Nat → Bool → Expr → P Expr
+  | 0, _, _ => exhausted
+  | n + 1, neg, e => do
   if ← eatOp "LP" then
     if ← eatOp "RP" then return .inList neg e []
     if (← isKw "SELECT") || (← isKw "VALUES") || (← isKw "WITH") then
-      let q ← parseSelect
+      let q ← parseSelect n
       op "RP"
       return .inSelect neg e q
-    let items ← parseExprList
+    let items ← parseExprList n
     op "RP"
     return .inList neg e items
   else
     let n1 ← name
     let (sch, t) ← if ← eatOp "DOT" then do pure (some n1, ← name) else pure (none, n1)
     let args ← if ← eatOp "LP" then do
-        if ← eatOp "RP" then pure [] else do let a ← parseExprList; op "RP"; pure a
+        if ← eatOp "RP" then pure [] else do let a ← parseExprList n; op "RP"; pure a
       else pure []
     return .inTable neg e sch t args
 
-partial def parseComparison : P Expr := do
-  let mut e ← parseEscape
-  repeat
-    if ← eatOp "LT" then e := .binop .lt e (← parseEscape)
-    else if ← eatOp "LE" then e := .binop .le e (← parseEscape)
-    else if ← eatOp "GT" then e := .binop .gt e (← parseEscape)
-    else if ← eatOp "GE" then e := .binop .ge e (← parseEscape)
+def parseComparison : Nat → P Expr
+  | 0 => exhausted
+  | n + 1 => do
+  let mut e ← parseEscape n
+  for _ in steps do
+    if ← eatOp "LT" then e := .binop .lt e (← parseEscape n)
+    else if ← eatOp "LE" then e := .binop .le e (← parseEscape n)
+    else if ← eatOp "GT" then e := .binop .gt e (← parseEscape n)
+    else if ← eatOp "GE" then e := .binop .ge e (← parseEscape n)
     else break
   return e
 
-partial def parseEscape : P Expr := parseBits
+def parseEscape : Nat → P Expr
+  | 0 => exhausted
+  | n + 1 => parseBits n
 
-partial def parseBits : P Expr := do
-  let mut e ← parseAdd
-  repeat
-    if ← eatOp "BITAND" then e := .binop .bitand e (← parseAdd)
-    else if ← eatOp "BITOR" then e := .binop .bitor e (← parseAdd)
-    else if ← eatOp "LSHIFT" then e := .binop .shl e (← parseAdd)
-    else if ← eatOp "RSHIFT" then e := .binop .shr e (← parseAdd)
+def parseBits : Nat → P Expr
+  | 0 => exhausted
+  | n + 1 => do
+  let mut e ← parseAdd n
+  for _ in steps do
+    if ← eatOp "BITAND" then e := .binop .bitand e (← parseAdd n)
+    else if ← eatOp "BITOR" then e := .binop .bitor e (← parseAdd n)
+    else if ← eatOp "LSHIFT" then e := .binop .shl e (← parseAdd n)
+    else if ← eatOp "RSHIFT" then e := .binop .shr e (← parseAdd n)
     else break
   return e
 
-partial def parseAdd : P Expr := do
-  let mut e ← parseMul
-  repeat
-    if ← eatOp "PLUS" then e := .binop .add e (← parseMul)
-    else if ← eatOp "MINUS" then e := .binop .sub e (← parseMul)
+def parseAdd : Nat → P Expr
+  | 0 => exhausted
+  | n + 1 => do
+  let mut e ← parseMul n
+  for _ in steps do
+    if ← eatOp "PLUS" then e := .binop .add e (← parseMul n)
+    else if ← eatOp "MINUS" then e := .binop .sub e (← parseMul n)
     else break
   return e
 
-partial def parseMul : P Expr := do
-  let mut e ← parseConcat
-  repeat
-    if ← eatOp "STAR" then e := .binop .mul e (← parseConcat)
-    else if ← eatOp "SLASH" then e := .binop .div e (← parseConcat)
-    else if ← eatOp "REM" then e := .binop .rem e (← parseConcat)
+def parseMul : Nat → P Expr
+  | 0 => exhausted
+  | n + 1 => do
+  let mut e ← parseConcat n
+  for _ in steps do
+    if ← eatOp "STAR" then e := .binop .mul e (← parseConcat n)
+    else if ← eatOp "SLASH" then e := .binop .div e (← parseConcat n)
+    else if ← eatOp "REM" then e := .binop .rem e (← parseConcat n)
     else break
   return e
 
-partial def parseConcat : P Expr := do
-  let mut e ← parseCollate
-  repeat
-    if ← eatOp "CONCAT" then e := .binop .concat e (← parseCollate)
+def parseConcat : Nat → P Expr
+  | 0 => exhausted
+  | n + 1 => do
+  let mut e ← parseCollate n
+  for _ in steps do
+    if ← eatOp "CONCAT" then e := .binop .concat e (← parseCollate n)
     else if ← isOp "PTR" then
       let s ← get
       let t := s.toks[s.pos]!
       advance
       let two := t.stop - t.start == 3
-      e := .binop (if two then .ptr2 else .ptr) e (← parseCollate)
+      e := .binop (if two then .ptr2 else .ptr) e (← parseCollate n)
     else break
   return e
 
-partial def parseCollate : P Expr := do
-  let mut e ← parseUnary
-  while ← eatKw "COLLATE" do
+def parseCollate : Nat → P Expr
+  | 0 => exhausted
+  | n + 1 => do
+  let mut e ← parseUnary n
+  for _ in steps do
+    if !(← eatKw "COLLATE") then break
     e := .collate e (← name)
   return e
 
-partial def parseUnary : P Expr := do
+def parseUnary : Nat → P Expr
+  | 0 => exhausted
+  | n + 1 => do
   if ← eatOp "MINUS" then
     -- -9223372036854775808 is an integer
     match ← peek with
     | some t =>
       if t.tk == .integer && (← text t) == "9223372036854775808" then
         advance; return .lit (.int minI64)
-      return .unop .neg (← parseUnary)
-    | none => return .unop .neg (← parseUnary)
-  if ← eatOp "PLUS" then return .unop .pos (← parseUnary)
-  if ← eatOp "BITNOT" then return .unop .bitnot (← parseUnary)
-  parsePrimary
+      return .unop .neg (← parseUnary n)
+    | none => return .unop .neg (← parseUnary n)
+  if ← eatOp "PLUS" then return .unop .pos (← parseUnary n)
+  if ← eatOp "BITNOT" then return .unop .bitnot (← parseUnary n)
+  parsePrimary n
 
-partial def parseExprList : P (List Expr) := do
-  let mut l := #[← parseExpr]
-  while ← eatOp "COMMA" do l := l.push (← parseExpr)
+def parseExprList : Nat → P (List Expr)
+  | 0 => exhausted
+  | n + 1 => do
+  let mut l := #[← parseExpr n]
+  for _ in steps do
+    if !(← eatOp "COMMA") then break
+    l := l.push (← parseExpr n)
   return l.toList
 
-partial def parsePrimary : P Expr := do
+def parsePrimary : Nat → P Expr
+  | 0 => exhausted
+  | n + 1 => do
   let some t ← peek | failHere
   match t.tk with
   | .integer | .float | .qnumber =>
@@ -340,10 +440,10 @@ partial def parsePrimary : P Expr := do
   | .op "LP" =>
     advance
     if (← isKw "SELECT") || (← isKw "VALUES") || (← isKw "WITH") then
-      let q ← parseSelect
+      let q ← parseSelect n
       op "RP"
       return .subquery q
-    let items ← parseExprList
+    let items ← parseExprList n
     op "RP"
     match items with
     | [e] => return e
@@ -351,26 +451,27 @@ partial def parsePrimary : P Expr := do
   | .kw "NULL" => advance; return .lit .null
   | .kw "CAST" =>
     advance; op "LP"
-    let e ← parseExpr
+    let e ← parseExpr n
     kw "AS"
     let ty ← parseTypeName
     op "RP"
     return .cast e ty
   | .kw "CASE" =>
     advance
-    let base ← if ← isKw "WHEN" then pure none else some <$> parseExpr
+    let base ← if ← isKw "WHEN" then pure none else some <$> parseExpr n
     let mut whens := #[]
-    while ← eatKw "WHEN" do
-      let c ← parseExpr
+    for _ in steps do
+      if !(← eatKw "WHEN") then break
+      let c ← parseExpr n
       kw "THEN"
-      whens := whens.push (c, ← parseExpr)
+      whens := whens.push (c, ← parseExpr n)
     if whens.isEmpty then failHere
-    let els ← if ← eatKw "ELSE" then some <$> parseExpr else pure none
+    let els ← if ← eatKw "ELSE" then some <$> parseExpr n else pure none
     kw "END"
     return .case_ base whens.toList els
   | .kw "EXISTS" =>
     advance; op "LP"
-    let q ← parseSelect
+    let q ← parseSelect n
     op "RP"
     return .exists_ q
   | .kw "NOT" =>
@@ -384,7 +485,7 @@ partial def parsePrimary : P Expr := do
       else if ← eatKw "ABORT" then pure .abort
       else if ← eatKw "FAIL" then pure .fail else failHere
     let _ := w
-    let msg ← if k == .ignore then pure none else do op "COMMA"; some <$> parseExpr
+    let msg ← if k == .ignore then pure none else do op "COMMA"; some <$> parseExpr n
     op "RP"
     return .raise k msg
   | .kw "CTIME_KW" =>
@@ -396,20 +497,22 @@ partial def parsePrimary : P Expr := do
     -- identifiers, qualified names, function calls
     match ← nameOpt (allowString := false) with
     | none => failHere
-    | some n =>
+    | some nm =>
       if ← isOp "LP" then
         advance
-        parseCall n
+        parseCall n nm
       else if ← eatOp "DOT" then
         let n2 ← name
         if ← eatOp "DOT" then
           let n3 ← name
-          return .col (some n) (some n2) n3
-        return .col none (some n) n2
-      else if t.tk == .id && (← text t).startsWith "\"" then return .dqcol n
-      else return .col none none n
+          return .col (some nm) (some n2) n3
+        return .col none (some nm) n2
+      else if t.tk == .id && (← text t).startsWith "\"" then return .dqcol nm
+      else return .col none none nm
 
-partial def parseCall (fname : Name) : P Expr := do
+def parseCall : Nat → Name → P Expr
+  | 0, _ => exhausted
+  | n + 1, fname => do
   let mut distinct := false
   let mut args := []
   let mut star := false
@@ -419,29 +522,33 @@ partial def parseCall (fname : Name) : P Expr := do
   else
     distinct ← eatKw "DISTINCT"
     if !distinct then let _ ← eatKw "ALL"
-    args ← parseExprList
+    args ← parseExprList n
     if ← eatKw "ORDER" then
       kw "BY"
-      orderBy ← parseOrderList
+      orderBy ← parseOrderList n
     op "RP"
   let filter ← if ← eatKw "FILTER" then do
-      op "LP"; kw "WHERE"; let e ← parseExpr; op "RP"; pure (some e)
+      op "LP"; kw "WHERE"; let e ← parseExpr n; op "RP"; pure (some e)
     else pure none
   let over ← if ← eatKw "OVER" then do
-      if ← eatOp "LP" then do let w ← parseWindowBody; op "RP"; pure (some w)
-      else do let n ← name; pure (some (Window.mk (some n) [] [] none))
+      if ← eatOp "LP" then do let w ← parseWindowBody n; op "RP"; pure (some w)
+      else do let nm ← name; pure (some (Window.mk (some nm) [] [] none))
     else pure none
   return .call fname distinct args star orderBy filter over
 
-partial def parseWindowBody : P Window := do
+def parseWindowBody : Nat → P Window
+  | 0 => exhausted
+  | n + 1 => do
   let base ← if (← isKw "PARTITION") || (← isKw "ORDER") || (← isKw "RANGE") || (← isKw "ROWS") || (← isKw "GROUPS") || (← isOp "RP") then pure none
     else nameOpt
-  let part ← if ← eatKw "PARTITION" then do kw "BY"; parseExprList else pure []
-  let ord ← if ← eatKw "ORDER" then do kw "BY"; parseOrderList else pure []
-  let frame ← if (← isKw "RANGE") || (← isKw "ROWS") || (← isKw "GROUPS") then some <$> parseFrame else pure none
+  let part ← if ← eatKw "PARTITION" then do kw "BY"; parseExprList n else pure []
+  let ord ← if ← eatKw "ORDER" then do kw "BY"; parseOrderList n else pure []
+  let frame ← if (← isKw "RANGE") || (← isKw "ROWS") || (← isKw "GROUPS") then some <$> parseFrame n else pure none
   return .mk base part ord frame
 
-partial def parseFrame : P Frame := do
+def parseFrame : Nat → P Frame
+  | 0 => exhausted
+  | n + 1 => do
   let unit ← if ← eatKw "RANGE" then pure FrameUnit.range else if ← eatKw "ROWS" then pure .rows
     else do kw "GROUPS"; pure .groups
   let bound : P FrameBound := do
@@ -449,7 +556,7 @@ partial def parseFrame : P Frame := do
       if ← eatKw "PRECEDING" then return .unboundedPreceding
       kw "FOLLOWING"; return .unboundedFollowing
     if ← eatKw "CURRENT" then kw "ROW"; return .currentRow
-    let e ← parseExpr
+    let e ← parseExpr n
     if ← eatKw "PRECEDING" then return .preceding e
     kw "FOLLOWING"; return .following e
   let (start, stop) ← if ← eatKw "BETWEEN" then do
@@ -463,88 +570,74 @@ partial def parseFrame : P Frame := do
     else pure .noOthers
   return .mk unit start stop excl
 
-partial def parseOrderList : P (List OrderTerm) := do
+def parseOrderList : Nat → P (List OrderTerm)
+  | 0 => exhausted
+  | n + 1 => do
   let one : P OrderTerm := do
-    let e ← parseExpr
+    let e ← parseExpr n
     let dir ← if ← eatKw "DESC" then pure SortDir.desc else do let _ ← eatKw "ASC"; pure .asc
     let nulls ← if ← eatKw "NULLS" then do
         if ← eatKw "FIRST" then pure NullsOrder.first else do kw "LAST"; pure .last
       else pure .default
     return .mk e dir nulls
   let mut l := #[← one]
-  while ← eatOp "COMMA" do l := l.push (← one)
+  for _ in steps do
+    if !(← eatOp "COMMA") then break
+    l := l.push (← one)
   return l.toList
 
-/-- A type name: words, optionally `(n)` or `(n, m)`; returned as written. -/
-partial def parseTypeName : P String := do
-  let s0 := (← get).pos
-  let mut any := false
-  repeat
-    match ← nameOpt with
-    | some _ => any := true
-    | none => break
-  if any && (← isOp "LP") then
-    advance
-    let signed : P Unit := do
-      let _ ← eatOp "PLUS" <||> eatOp "MINUS"
-      match ← peek with
-      | some t => if t.tk == .integer || t.tk == .float || t.tk == .qnumber then advance else failHere
-      | none => failHere
-    signed
-    if ← eatOp "COMMA" then signed
-    op "RP"
-  spanText s0 (← get).pos
-
-partial def parseResultCols : P (List ResultCol) := do
+def parseResultCols : Nat → P (List ResultCol)
+  | 0 => exhausted
+  | n + 1 => do
   let one : P ResultCol := do
     if ← eatOp "STAR" then return .star
     -- table.*
     match ← peekAt 0, ← peekAt 1, ← peekAt 2 with
     | some _, some { tk := .op "DOT", .. }, some { tk := .op "STAR", .. } =>
-      let n ← name; advance; advance; return .tableStar n
+      let nm ← name; advance; advance; return .tableStar nm
     | _, _, _ =>
       let s0 := (← get).pos
-      let e ← parseExpr
+      let e ← parseExpr n
       let txt ← spanText s0 (← get).pos
       if ← eatKw "AS" then return .expr e (some (← name)) txt
       match ← nameOpt with
       | some a => return .expr e (some a) txt
       | none => return .expr e none txt
   let mut l := #[← one]
-  while ← eatOp "COMMA" do l := l.push (← one)
+  for _ in steps do
+    if !(← eatOp "COMMA") then break
+    l := l.push (← one)
   return l.toList
 
-partial def parseAlias : P (Option Name) := do
-  if ← eatKw "AS" then return some (← name)
-  -- an alias may not be a keyword that can start the rest of the clause
-  if (← isKw "JOIN_KW") then return none
-  nameOpt
-
-partial def parseFromTerm : P FromItem := do
+def parseFromTerm : Nat → P FromItem
+  | 0 => exhausted
+  | n + 1 => do
   if ← eatOp "LP" then
     if (← isKw "SELECT") || (← isKw "VALUES") || (← isKw "WITH") then
-      let q ← parseSelect
+      let q ← parseSelect n
       op "RP"
       return .subquery q (← parseAlias)
-    let f ← parseFrom
+    let f ← parseFrom n
     op "RP"
     match ← parseAlias with
     | some a => return .subquery (.mk [] false (.select false [.star] (some f) none [] none []) [] [] none none) (some a)
     | none => return f
   let n1 ← name
-  let (sch, n) ← if ← eatOp "DOT" then do pure (some n1, ← name) else pure (none, n1)
+  let (sch, nm) ← if ← eatOp "DOT" then do pure (some n1, ← name) else pure (none, n1)
   if ← eatOp "LP" then
-    let args ← if ← eatOp "RP" then pure [] else do let a ← parseExprList; op "RP"; pure a
-    return .tableFn sch n args (← parseAlias)
+    let args ← if ← eatOp "RP" then pure [] else do let a ← parseExprList n; op "RP"; pure a
+    return .tableFn sch nm args (← parseAlias)
   let alias ← parseAlias
   let indexed ← if ← eatKw "INDEXED" then do kw "BY"; pure (some (some (← name)))
     else if (← isKw "NOT") && (← isKwAt 1 "INDEXED") then do advance; advance; pure (some none)
     else pure none
-  return .table sch n alias indexed
+  return .table sch nm alias indexed
 
-partial def parseFrom : P FromItem := do
-  let mut left ← parseFromTerm
-  repeat
+def parseFrom : Nat → P FromItem
+  | 0 => exhausted
+  | n + 1 => do
+  let mut left ← parseFromTerm n
+  for _ in steps do
     let mut kind := JoinKind.inner
     let mut natural := false
     if ← eatOp "COMMA" then
@@ -552,60 +645,74 @@ partial def parseFrom : P FromItem := do
     else if (← isKw "JOIN_KW") || (← isKw "JOIN") then
       -- [NATURAL] [LEFT|RIGHT|FULL] [OUTER] | INNER | CROSS  JOIN
       let mut words := #[]
-      while ← isKw "JOIN_KW" do words := words.push (← kwWord); advance
+      for _ in steps do
+        if !(← isKw "JOIN_KW") then break
+        words := words.push (← kwWord); advance
       kw "JOIN"
       natural := words.contains "NATURAL"
       kind := if words.contains "LEFT" then .left else if words.contains "RIGHT" then .right
         else if words.contains "FULL" then .full else if words.contains "CROSS" then .cross else .inner
       if words.contains "CROSS" then kind := .inner
     else break
-    let right ← parseFromTerm
-    let on ← if ← eatKw "ON" then some <$> parseExpr else pure none
+    let right ← parseFromTerm n
+    let on ← if ← eatKw "ON" then some <$> parseExpr n else pure none
     let usingCols ← if ← eatKw "USING" then do
         op "LP"
         let mut l := #[← name]
-        while ← eatOp "COMMA" do l := l.push (← name)
+        for _ in steps do
+          if !(← eatOp "COMMA") then break
+          l := l.push (← name)
         op "RP"; pure l.toList
       else pure []
     left := .join left kind natural right on usingCols
   return left
 
-partial def parseSelectCore : P SelectCore := do
+def parseSelectCore : Nat → P SelectCore
+  | 0 => exhausted
+  | n + 1 => do
   if ← eatKw "VALUES" then
-    let row : P (List Expr) := do op "LP"; let l ← parseExprList; op "RP"; return l
+    let row : P (List Expr) := do op "LP"; let l ← parseExprList n; op "RP"; return l
     let mut rows := #[← row]
-    while ← eatOp "COMMA" do rows := rows.push (← row)
+    for _ in steps do
+      if !(← eatOp "COMMA") then break
+      rows := rows.push (← row)
     return .values rows.toList
   kw "SELECT"
   let distinct ← eatKw "DISTINCT"
   if !distinct then let _ ← eatKw "ALL"
-  let cols ← parseResultCols
-  let from_ ← if ← eatKw "FROM" then some <$> parseFrom else pure none
-  let where_ ← if ← eatKw "WHERE" then some <$> parseExpr else pure none
+  let cols ← parseResultCols n
+  let from_ ← if ← eatKw "FROM" then some <$> parseFrom n else pure none
+  let where_ ← if ← eatKw "WHERE" then some <$> parseExpr n else pure none
   let (groupBy, having) ← if ← eatKw "GROUP" then do
       kw "BY"
-      let g ← parseExprList
-      let h ← if ← eatKw "HAVING" then some <$> parseExpr else pure none
+      let g ← parseExprList n
+      let h ← if ← eatKw "HAVING" then some <$> parseExpr n else pure none
       pure (g, h)
-    else if ← eatKw "HAVING" then do pure ([], some (← parseExpr))
+    else if ← eatKw "HAVING" then do pure ([], some (← parseExpr n))
     else pure ([], none)
   let windows ← if ← eatKw "WINDOW" then do
       let one : P (Name × Window) := do
-        let n ← name; kw "AS"; op "LP"; let w ← parseWindowBody; op "RP"; return (n, w)
+        let nm ← name; kw "AS"; op "LP"; let w ← parseWindowBody n; op "RP"; return (nm, w)
       let mut l := #[← one]
-      while ← eatOp "COMMA" do l := l.push (← one)
+      for _ in steps do
+        if !(← eatOp "COMMA") then break
+        l := l.push (← one)
       pure l.toList
     else pure []
   return .select distinct cols from_ where_ groupBy having windows
 
-partial def parseWith : P (List Cte × Bool) := do
+def parseWith : Nat → P (List Cte × Bool)
+  | 0 => exhausted
+  | n + 1 => do
   if !(← eatKw "WITH") then return ([], false)
   let rec_ ← eatKw "RECURSIVE"
   let one : P Cte := do
-    let n ← name
+    let nm ← name
     let cols ← if ← eatOp "LP" then do
         let mut l := #[← name]
-        while ← eatOp "COMMA" do l := l.push (← name)
+        for _ in steps do
+          if !(← eatOp "COMMA") then break
+          l := l.push (← name)
         op "RP"; pure l.toList
       else pure []
     kw "AS"
@@ -613,29 +720,33 @@ partial def parseWith : P (List Cte × Bool) := do
       else if (← isKw "NOT") && (← isKwAt 1 "MATERIALIZED") then do advance; advance; pure (some false)
       else pure none
     op "LP"
-    let q ← parseSelect
+    let q ← parseSelect n
     op "RP"
-    return .mk n cols mat q
+    return .mk nm cols mat q
   let mut l := #[← one]
-  while ← eatOp "COMMA" do l := l.push (← one)
+  for _ in steps do
+    if !(← eatOp "COMMA") then break
+    l := l.push (← one)
   return (l.toList, rec_)
 
-partial def parseSelect : P Select := do
-  let (ctes, rec_) ← parseWith
-  let first ← parseSelectCore
+def parseSelect : Nat → P Select
+  | 0 => exhausted
+  | n + 1 => do
+  let (ctes, rec_) ← parseWith n
+  let first ← parseSelectCore n
   let mut rest := #[]
-  repeat
+  for _ in steps do
     if ← eatKw "UNION" then
       let all ← eatKw "ALL"
-      rest := rest.push (if all then CompoundOp.unionAll else .union, ← parseSelectCore)
-    else if ← eatKw "INTERSECT" then rest := rest.push (.intersect, ← parseSelectCore)
-    else if ← eatKw "EXCEPT" then rest := rest.push (.except, ← parseSelectCore)
+      rest := rest.push (if all then CompoundOp.unionAll else .union, ← parseSelectCore n)
+    else if ← eatKw "INTERSECT" then rest := rest.push (.intersect, ← parseSelectCore n)
+    else if ← eatKw "EXCEPT" then rest := rest.push (.except, ← parseSelectCore n)
     else break
-  let orderBy ← if ← eatKw "ORDER" then do kw "BY"; parseOrderList else pure []
+  let orderBy ← if ← eatKw "ORDER" then do kw "BY"; parseOrderList n else pure []
   let (limit, offset) ← if ← eatKw "LIMIT" then do
-      let a ← parseExpr
-      if ← eatKw "OFFSET" then pure (some a, some (← parseExpr))
-      else if ← eatOp "COMMA" then do let b ← parseExpr; pure (some b, some a)
+      let a ← parseExpr n
+      if ← eatKw "OFFSET" then pure (some a, some (← parseExpr n))
+      else if ← eatOp "COMMA" then do let b ← parseExpr n; pure (some b, some a)
       else pure (some a, none)
     else pure (none, none)
   return .mk ctes rec_ first rest.toList orderBy limit offset

@@ -28,7 +28,9 @@ def orConflict : P (Option ConflictRes) := do
 def nameList : P (List Name) := do
   op "LP"
   let mut l := #[← name]
-  while ← eatOp "COMMA" do l := l.push (← name)
+  for _ in steps do
+    if !(← eatOp "COMMA") then break
+    l := l.push (← name)
   op "RP"
   return l.toList
 
@@ -42,7 +44,7 @@ def foreignKeyClause : P (Name × List Name × List String) := do
   let t ← name
   let cols ← if ← isOp "LP" then nameList else pure []
   let mut acts := #[]
-  repeat
+  for _ in steps do
     if ← eatKw "ON" then
       let ev ← if ← eatKw "DELETE" then pure "DELETE" else do kw "UPDATE"; pure "UPDATE"
       let act ← if ← eatKw "SET" then do
@@ -62,11 +64,11 @@ def foreignKeyClause : P (Name × List Name × List String) := do
     else break
   return (t, cols, acts.toList)
 
-def columnDef : P ColumnDef := do
+def columnDef (fuel : Nat) : P ColumnDef := do
   let n ← name
   let ty ← parseTypeName
   let mut cs := #[]
-  repeat
+  for _ in steps do
     let cname ← if ← eatKw "CONSTRAINT" then some <$> name else pure none
     if ← eatKw "PRIMARY" then
       kw "KEY"
@@ -81,15 +83,15 @@ def columnDef : P ColumnDef := do
     else if ← eatKw "CHECK" then
       op "LP"
       let c0 := (← get).pos
-      let e ← parseExpr
+      let e ← parseExpr fuel
       let txt ← spanText c0 (← get).pos
       op "RP"; cs := cs.push (cname, .check e txt)
     else if ← eatKw "DEFAULT" then
       let s0 := (← get).pos
-      let e ← if ← eatOp "LP" then do let e ← parseExpr; op "RP"; pure e
-        else if ← eatOp "MINUS" then do let e ← parsePrimary; pure (Expr.unop .neg e)
-        else if ← eatOp "PLUS" then parsePrimary
-        else parsePrimary
+      let e ← if ← eatOp "LP" then do let e ← parseExpr fuel; op "RP"; pure e
+        else if ← eatOp "MINUS" then do let e ← parsePrimary fuel; pure (Expr.unop .neg e)
+        else if ← eatOp "PLUS" then parsePrimary fuel
+        else parsePrimary fuel
       cs := cs.push (cname, .default_ e (← spanText s0 (← get).pos))
     else if ← eatKw "COLLATE" then cs := cs.push (cname, .collate (← name))
     else if ← isKw "REFERENCES" then
@@ -97,7 +99,7 @@ def columnDef : P ColumnDef := do
       cs := cs.push (cname, .references t cols acts)
     else if (← isKw "GENERATED") || (← isKw "AS") then
       if ← eatKw "GENERATED" then kw "ALWAYS"
-      kw "AS"; op "LP"; let e ← parseExpr; op "RP"
+      kw "AS"; op "LP"; let e ← parseExpr fuel; op "RP"
       let word ← match ← peek with
         | some t => pure (← text t).toLower
         | none => pure ""
@@ -117,11 +119,13 @@ def indexedColumns : P (List (Name × Option Name × SortDir)) := do
     let d ← if ← eatKw "DESC" then pure SortDir.desc else do let _ ← eatKw "ASC"; pure .asc
     return (n, c, d)
   let mut l := #[← one]
-  while ← eatOp "COMMA" do l := l.push (← one)
+  for _ in steps do
+    if !(← eatOp "COMMA") then break
+    l := l.push (← one)
   op "RP"
   return l.toList
 
-def tableConstraint : P (Option (Option Name × TableConstraint)) := do
+def tableConstraint (fuel : Nat) : P (Option (Option Name × TableConstraint)) := do
   let cname ← if ← eatKw "CONSTRAINT" then some <$> name else pure none
   if ← eatKw "PRIMARY" then
     kw "KEY"
@@ -134,7 +138,7 @@ def tableConstraint : P (Option (Option Name × TableConstraint)) := do
   if ← eatKw "CHECK" then
     op "LP"
     let c0 := (← get).pos
-    let e ← parseExpr
+    let e ← parseExpr fuel
     let txt ← spanText c0 (← get).pos
     op "RP"
     return some (cname, .check e txt)
@@ -146,142 +150,62 @@ def tableConstraint : P (Option (Option Name × TableConstraint)) := do
   if cname.isSome then failHere
   return none
 
-def returningClause : P (List ResultCol) := do
-  if ← eatKw "RETURNING" then parseResultCols else return []
+def returningClause (fuel : Nat) : P (List ResultCol) := do
+  if ← eatKw "RETURNING" then parseResultCols fuel else return []
 
-def setList : P (List (List Name × Expr)) := do
+def setList (fuel : Nat) : P (List (List Name × Expr)) := do
   let one : P (List Name × Expr) := do
     let cols ← if ← isOp "LP" then nameList else do pure [← name]
     op "EQ"
-    return (cols, ← parseExpr)
+    return (cols, ← parseExpr fuel)
   let mut l := #[← one]
-  while ← eatOp "COMMA" do l := l.push (← one)
+  for _ in steps do
+    if !(← eatOp "COMMA") then break
+    l := l.push (← one)
   return l.toList
 
-def upsertClauses : P (List Upsert) := do
+def upsertClauses (fuel : Nat) : P (List Upsert) := do
   let mut l := #[]
-  while (← isKw "ON") && (← isKwAt 1 "CONFLICT") do
+  for _ in steps do
+    if !((← isKw "ON") && (← isKwAt 1 "CONFLICT")) then break
     advance; advance
     let target ← if ← eatOp "LP" then do
         let mut cols := #[]
-        repeat
-          let e ← parseExpr
+        for _ in steps do
+          let e ← parseExpr fuel
           let e ← if ← eatKw "COLLATE" then do pure (Expr.collate e (← name)) else pure e
           let _ ← eatKw "ASC" <||> eatKw "DESC"
           cols := cols.push e
           if !(← eatOp "COMMA") then break
         op "RP"
-        let w ← if ← eatKw "WHERE" then some <$> parseExpr else pure none
+        let w ← if ← eatKw "WHERE" then some <$> parseExpr fuel else pure none
         pure (some (cols.toList, w))
       else pure none
     kw "DO"
     let act ← if ← eatKw "NOTHING" then pure UpsertAction.nothing
       else do
         kw "UPDATE"; kw "SET"
-        let sets ← setList
-        let w ← if ← eatKw "WHERE" then some <$> parseExpr else pure none
+        let sets ← setList fuel
+        let w ← if ← eatKw "WHERE" then some <$> parseExpr fuel else pure none
         pure (.update sets w)
     l := l.push { target, action := act }
   return l.toList
 
-def orderLimit : P (List OrderTerm × Option Expr × Option Expr) := do
-  let ob ← if ← eatKw "ORDER" then do kw "BY"; parseOrderList else pure []
+def orderLimit (fuel : Nat) : P (List OrderTerm × Option Expr × Option Expr) := do
+  let ob ← if ← eatKw "ORDER" then do kw "BY"; parseOrderList fuel else pure []
   if ← eatKw "LIMIT" then
-    let a ← parseExpr
-    if ← eatKw "OFFSET" then return (ob, some a, some (← parseExpr))
-    if ← eatOp "COMMA" then do let b ← parseExpr; return (ob, some b, some a)
+    let a ← parseExpr fuel
+    if ← eatKw "OFFSET" then return (ob, some a, some (← parseExpr fuel))
+    if ← eatOp "COMMA" then do let b ← parseExpr fuel; return (ob, some b, some a)
     return (ob, some a, none)
   return (ob, none, none)
-
-mutual
-partial def parseStmt : P Stmt := do
-  let s0 := (← get).pos
-  if ← eatKw "EXPLAIN" then
-    let qp ← if ← eatKw "QUERY" then do kw "PLAN"; pure true else pure false
-    return .explain qp (← parseStmt)
-  if (← isKw "SELECT") || (← isKw "VALUES") then return .select (← parseSelect)
-  if ← isKw "WITH" then
-    let st := (← get).pos
-    let (ctes, rec_) ← parseWith
-    if (← isKw "SELECT") || (← isKw "VALUES") then
-      modify fun s => { s with pos := st }
-      return .select (← parseSelect)
-    if (← isKw "INSERT") || (← isKw "REPLACE") then return ← parseInsert ctes
-    if ← isKw "UPDATE" then return ← parseUpdate ctes
-    if ← isKw "DELETE" then return ← parseDelete ctes
-    let _ := rec_
-    failHere
-  if (← isKw "INSERT") || (← isKw "REPLACE") then return ← parseInsert []
-  if ← isKw "UPDATE" then return ← parseUpdate []
-  if ← isKw "DELETE" then return ← parseDelete []
-  if ← eatKw "CREATE" then return ← parseCreate s0
-  if ← eatKw "DROP" then
-    let kind ← if ← eatKw "TABLE" then pure "table" else if ← eatKw "INDEX" then pure "index"
-      else if ← eatKw "VIEW" then pure "view" else do kw "TRIGGER"; pure "trigger"
-    let ie ← if ← eatKw "IF" then do kw "EXISTS"; pure true else pure false
-    let (sch, n) ← qualifiedName
-    return .drop kind ie sch n
-  if ← eatKw "BEGIN" then
-    let mode ← if ← eatKw "DEFERRED" then pure "DEFERRED" else if ← eatKw "IMMEDIATE" then pure "IMMEDIATE"
-      else if ← eatKw "EXCLUSIVE" then pure "EXCLUSIVE" else pure ""
-    let _ ← eatKw "TRANSACTION"
-    return .begin_ mode
-  if (← eatKw "COMMIT") || (← eatKw "END") then
-    let _ ← eatKw "TRANSACTION"; return .commit
-  if ← eatKw "ROLLBACK" then
-    let _ ← eatKw "TRANSACTION"
-    if ← eatKw "TO" then
-      let _ ← eatKw "SAVEPOINT"
-      return .rollback (some (← name))
-    return .rollback none
-  if ← eatKw "SAVEPOINT" then return .savepoint (← name)
-  if ← eatKw "RELEASE" then
-    let _ ← eatKw "SAVEPOINT"; return .release (← name)
-  if ← eatKw "PRAGMA" then
-    let (sch, n) ← qualifiedName
-    if ← eatOp "EQ" then return .pragma sch n (some (← pragmaValue)) false
-    if ← eatOp "LP" then
-      let v ← pragmaValue
-      op "RP"; return .pragma sch n (some v) true
-    return .pragma sch n none false
-  if ← eatKw "ALTER" then
-    kw "TABLE"
-    let (sch, t) ← qualifiedName
-    if ← eatKw "RENAME" then
-      if ← eatKw "TO" then return .alterRename sch t (← name)
-      let _ ← eatKw "COLUMNKW"
-      let old ← name
-      kw "TO"
-      return .alterRenameColumn sch t old (← name)
-    if ← eatKw "ADD" then
-      let _ ← eatKw "COLUMNKW"
-      let c0 := (← get).pos
-      let cd ← columnDef
-      return .alterAddColumn sch t cd (← spanText c0 (← get).pos)
-    kw "DROP"
-    let _ ← eatKw "COLUMNKW"
-    return .alterDropColumn sch t (← name)
-  if ← eatKw "ATTACH" then
-    let _ ← eatKw "DATABASE"
-    let f ← parseExpr
-    kw "AS"
-    return .attach f (← parseExpr)
-  if ← eatKw "DETACH" then
-    let _ ← eatKw "DATABASE"; return .detach (← name)
-  if ← eatKw "VACUUM" then
-    let sch ← nameOpt
-    let into ← if ← eatKw "INTO" then some <$> parseExpr else pure none
-    return .vacuum sch into
-  if ← eatKw "REINDEX" then return .reindex (← nameOpt)
-  if ← eatKw "ANALYZE" then return .analyze (← nameOpt)
-  failHere
 
 /-- The value of a PRAGMA (`nmnum`, `plus_num`, `minus_num` of parse.y), as
     the text `sqlite3Pragma` sees: a number's token text (with its sign for
     `-`), an identifier's or keyword's name. A string literal is passed as a
     BLOB of its dequoted bytes, so that `integrity_check` can tell `'5'` from
     `5` (it reads the raw token). -/
-partial def pragmaValue : P Expr := do
+def pragmaValue : P Expr := do
   let number : P (Option String) := do
     match ← peek with
     | some t => if t.tk == .integer || t.tk == .float then advance; return some (← text t) else return none
@@ -301,7 +225,7 @@ partial def pragmaValue : P Expr := do
     | _ => return .lit (.ofString (← name))
   | none => failHere
 
-partial def parseInsert (ctes : List Cte) : P Stmt := do
+def parseInsert (fuel : Nat) (ctes : List Cte) : P Stmt := do
   let oc ← if ← eatKw "REPLACE" then pure (some ConflictRes.replace) else do kw "INSERT"; orConflict
   kw "INTO"
   let (sch, t) ← qualifiedName
@@ -311,18 +235,20 @@ partial def parseInsert (ctes : List Cte) : P Stmt := do
   if isDefault then kw "VALUES"
   let src ← if isDefault then pure InsertSource.defaults
     else if ← eatKw "VALUES" then do
-      let row : P (List Expr) := do op "LP"; let l ← parseExprList; op "RP"; return l
+      let row : P (List Expr) := do op "LP"; let l ← parseExprList fuel; op "RP"; return l
       let mut rows := #[← row]
-      while ← eatOp "COMMA" do rows := rows.push (← row)
+      for _ in steps do
+        if !(← eatOp "COMMA") then break
+        rows := rows.push (← row)
       -- a VALUES followed by compound/order is a SELECT
       if (← isKw "UNION") || (← isKw "INTERSECT") || (← isKw "EXCEPT") || (← isKw "ORDER") || (← isKw "LIMIT") then
         failHere
       pure (.values rows.toList)
-    else .select <$> parseSelect
-  let ups ← upsertClauses
-  return .insert ctes oc sch t alias cols src ups (← returningClause)
+    else .select <$> parseSelect fuel
+  let ups ← upsertClauses fuel
+  return .insert ctes oc sch t alias cols src ups (← returningClause fuel)
 
-partial def parseUpdate (ctes : List Cte) : P Stmt := do
+def parseUpdate (fuel : Nat) (ctes : List Cte) : P Stmt := do
   kw "UPDATE"
   let oc ← orConflict
   let (sch, t) ← qualifiedName
@@ -330,52 +256,144 @@ partial def parseUpdate (ctes : List Cte) : P Stmt := do
   if ← eatKw "INDEXED" then do kw "BY"; let _ ← name
   else if (← isKw "NOT") && (← isKwAt 1 "INDEXED") then advance; advance
   kw "SET"
-  let sets ← setList
-  let from_ ← if ← eatKw "FROM" then some <$> parseFrom else pure none
-  let w ← if ← eatKw "WHERE" then some <$> parseExpr else pure none
-  let ret ← returningClause
+  let sets ← setList fuel
+  let from_ ← if ← eatKw "FROM" then some <$> parseFrom fuel else pure none
+  let w ← if ← eatKw "WHERE" then some <$> parseExpr fuel else pure none
+  let ret ← returningClause fuel
   -- ORDER BY/LIMIT on UPDATE needs SQLITE_ENABLE_UPDATE_DELETE_LIMIT, off by default
   return .update ctes oc sch t alias sets from_ w ret [] none none
 
-partial def parseDelete (ctes : List Cte) : P Stmt := do
+def parseDelete (fuel : Nat) (ctes : List Cte) : P Stmt := do
   kw "DELETE"; kw "FROM"
   let (sch, t) ← qualifiedName
   let alias ← if ← eatKw "AS" then some <$> name else pure none
   if ← eatKw "INDEXED" then do kw "BY"; let _ ← name
   else if (← isKw "NOT") && (← isKwAt 1 "INDEXED") then advance; advance
-  let w ← if ← eatKw "WHERE" then some <$> parseExpr else pure none
-  let ret ← returningClause
+  let w ← if ← eatKw "WHERE" then some <$> parseExpr fuel else pure none
+  let ret ← returningClause fuel
   return .delete ctes sch t alias w ret [] none none
 
-partial def parseCreate (_s0 : Nat) : P Stmt := do
+/-! Statements nest through `EXPLAIN` and trigger bodies: `parseStmt` and
+`parseCreate` take the fuel first and pass one less to each other (the
+helpers above only pass it on to `Sql.Parse`'s functions). -/
+
+mutual
+def parseStmt : Nat → P Stmt
+  | 0 => exhausted
+  | n + 1 => do
+  let s0 := (← get).pos
+  if ← eatKw "EXPLAIN" then
+    let qp ← if ← eatKw "QUERY" then do kw "PLAN"; pure true else pure false
+    return .explain qp (← parseStmt n)
+  if (← isKw "SELECT") || (← isKw "VALUES") then return .select (← parseSelect n)
+  if ← isKw "WITH" then
+    let st := (← get).pos
+    let (ctes, rec_) ← parseWith n
+    if (← isKw "SELECT") || (← isKw "VALUES") then
+      modify fun s => { s with pos := st }
+      return .select (← parseSelect n)
+    if (← isKw "INSERT") || (← isKw "REPLACE") then return ← parseInsert n ctes
+    if ← isKw "UPDATE" then return ← parseUpdate n ctes
+    if ← isKw "DELETE" then return ← parseDelete n ctes
+    let _ := rec_
+    failHere
+  if (← isKw "INSERT") || (← isKw "REPLACE") then return ← parseInsert n []
+  if ← isKw "UPDATE" then return ← parseUpdate n []
+  if ← isKw "DELETE" then return ← parseDelete n []
+  if ← eatKw "CREATE" then return ← parseCreate n s0
+  if ← eatKw "DROP" then
+    let kind ← if ← eatKw "TABLE" then pure "table" else if ← eatKw "INDEX" then pure "index"
+      else if ← eatKw "VIEW" then pure "view" else do kw "TRIGGER"; pure "trigger"
+    let ie ← if ← eatKw "IF" then do kw "EXISTS"; pure true else pure false
+    let (sch, nm) ← qualifiedName
+    return .drop kind ie sch nm
+  if ← eatKw "BEGIN" then
+    let mode ← if ← eatKw "DEFERRED" then pure "DEFERRED" else if ← eatKw "IMMEDIATE" then pure "IMMEDIATE"
+      else if ← eatKw "EXCLUSIVE" then pure "EXCLUSIVE" else pure ""
+    let _ ← eatKw "TRANSACTION"
+    return .begin_ mode
+  if (← eatKw "COMMIT") || (← eatKw "END") then
+    let _ ← eatKw "TRANSACTION"; return .commit
+  if ← eatKw "ROLLBACK" then
+    let _ ← eatKw "TRANSACTION"
+    if ← eatKw "TO" then
+      let _ ← eatKw "SAVEPOINT"
+      return .rollback (some (← name))
+    return .rollback none
+  if ← eatKw "SAVEPOINT" then return .savepoint (← name)
+  if ← eatKw "RELEASE" then
+    let _ ← eatKw "SAVEPOINT"; return .release (← name)
+  if ← eatKw "PRAGMA" then
+    let (sch, nm) ← qualifiedName
+    if ← eatOp "EQ" then return .pragma sch nm (some (← pragmaValue)) false
+    if ← eatOp "LP" then
+      let v ← pragmaValue
+      op "RP"; return .pragma sch nm (some v) true
+    return .pragma sch nm none false
+  if ← eatKw "ALTER" then
+    kw "TABLE"
+    let (sch, t) ← qualifiedName
+    if ← eatKw "RENAME" then
+      if ← eatKw "TO" then return .alterRename sch t (← name)
+      let _ ← eatKw "COLUMNKW"
+      let old ← name
+      kw "TO"
+      return .alterRenameColumn sch t old (← name)
+    if ← eatKw "ADD" then
+      let _ ← eatKw "COLUMNKW"
+      let c0 := (← get).pos
+      let cd ← columnDef n
+      return .alterAddColumn sch t cd (← spanText c0 (← get).pos)
+    kw "DROP"
+    let _ ← eatKw "COLUMNKW"
+    return .alterDropColumn sch t (← name)
+  if ← eatKw "ATTACH" then
+    let _ ← eatKw "DATABASE"
+    let f ← parseExpr n
+    kw "AS"
+    return .attach f (← parseExpr n)
+  if ← eatKw "DETACH" then
+    let _ ← eatKw "DATABASE"; return .detach (← name)
+  if ← eatKw "VACUUM" then
+    let sch ← nameOpt
+    let into ← if ← eatKw "INTO" then some <$> parseExpr n else pure none
+    return .vacuum sch into
+  if ← eatKw "REINDEX" then return .reindex (← nameOpt)
+  if ← eatKw "ANALYZE" then return .analyze (← nameOpt)
+  failHere
+
+def parseCreate : Nat → Nat → P Stmt
+  | 0, _ => exhausted
+  | n + 1, _s0 => do
   let temp ← eatKw "TEMP"
   let unique ← eatKw "UNIQUE"
   if !unique && (← eatKw "TABLE") then
     let ine ← if ← eatKw "IF" then do kw "NOT"; kw "EXISTS"; pure true else pure false
     let s0 := (← get).pos
-    let (sch, n) ← qualifiedName
+    let (sch, nm) ← qualifiedName
     let curStop : P Nat := do
       match ← peek with
       | some t => return t.stop
       | none => return (← get).src.size
     let tailStart ← curStop
     if ← eatKw "AS" then
-      let q ← parseSelect
-      return .createTable temp ine sch n [] [] false false (some q) ("CREATE TABLE " ++ (← spanText s0 (← get).pos)) tailStart
+      let q ← parseSelect n
+      return .createTable temp ine sch nm [] [] false false (some q) ("CREATE TABLE " ++ (← spanText s0 (← get).pos)) tailStart
     op "LP"
     let colDefT : P ColumnDef := do
-      let c ← columnDef
+      let c ← columnDef n
       return { c with tailAt := ← curStop }
     let mut cols := #[← colDefT]
     let mut cons := #[]
-    while ← eatOp "COMMA" do
-      match ← tableConstraint with
+    for _ in steps do
+      if !(← eatOp "COMMA") then break
+      match ← tableConstraint n with
       | some c =>
         cons := cons.push c
         -- after the first table constraint, only constraints follow
-        repeat
+        for _ in steps do
           let _ ← eatOp "COMMA"
-          match ← tableConstraint with
+          match ← tableConstraint n with
           | some c => cons := cons.push c
           | none => break
         break
@@ -383,7 +401,7 @@ partial def parseCreate (_s0 : Nat) : P Stmt := do
     op "RP"
     let mut wr := false
     let mut strict := false
-    repeat
+    for _ in steps do
       if ← eatKw "WITHOUT" then
         let w ← name
         if w.toLower != "rowid" then throw ⟨s!"unknown table option: {w}", (← get).toks[(← get).pos - 1]!.stop⟩
@@ -394,31 +412,31 @@ partial def parseCreate (_s0 : Nat) : P Stmt := do
         advance; strict := true
       else break
       if !(← eatOp "COMMA") then break
-    return .createTable temp ine sch n cols.toList cons.toList wr strict none ("CREATE TABLE " ++ (← spanText s0 (← get).pos)) tailStart
+    return .createTable temp ine sch nm cols.toList cons.toList wr strict none ("CREATE TABLE " ++ (← spanText s0 (← get).pos)) tailStart
   if ← eatKw "INDEX" then
     let ine ← if ← eatKw "IF" then do kw "NOT"; kw "EXISTS"; pure true else pure false
     let s0 := (← get).pos
-    let (sch, n) ← qualifiedName
+    let (sch, nm) ← qualifiedName
     kw "ON"
     let t ← name
     op "LP"
-    let cols ← parseOrderList
+    let cols ← parseOrderList n
     op "RP"
-    let w ← if ← eatKw "WHERE" then some <$> parseExpr else pure none
-    return .createIndex unique ine sch n t cols w ((if unique then "CREATE UNIQUE INDEX " else "CREATE INDEX ") ++ (← spanText s0 (← get).pos))
+    let w ← if ← eatKw "WHERE" then some <$> parseExpr n else pure none
+    return .createIndex unique ine sch nm t cols w ((if unique then "CREATE UNIQUE INDEX " else "CREATE INDEX ") ++ (← spanText s0 (← get).pos))
   if unique then failHere
   if ← eatKw "VIEW" then
     let ine ← if ← eatKw "IF" then do kw "NOT"; kw "EXISTS"; pure true else pure false
     let s0 := (← get).pos
-    let (sch, n) ← qualifiedName
+    let (sch, nm) ← qualifiedName
     let cols ← if ← isOp "LP" then nameList else pure []
     kw "AS"
-    let q ← parseSelect
-    return .createView temp ine sch n cols q ("CREATE VIEW " ++ (← spanText s0 (← get).pos))
+    let q ← parseSelect n
+    return .createView temp ine sch nm cols q ("CREATE VIEW " ++ (← spanText s0 (← get).pos))
   if ← eatKw "TRIGGER" then
     let ine ← if ← eatKw "IF" then do kw "NOT"; kw "EXISTS"; pure true else pure false
     let s0 := (← get).pos
-    let (sch, n) ← qualifiedName
+    let (sch, nm) ← qualifiedName
     let time ← if ← eatKw "BEFORE" then pure TriggerTime.before
       else if ← eatKw "AFTER" then pure .after
       else if ← eatKw "INSTEAD" then do kw "OF"; pure .insteadOf
@@ -429,34 +447,36 @@ partial def parseCreate (_s0 : Nat) : P Stmt := do
         kw "UPDATE"
         if ← eatKw "OF" then do
           let mut l := #[← name]
-          while ← eatOp "COMMA" do l := l.push (← name)
+          for _ in steps do
+            if !(← eatOp "COMMA") then break
+            l := l.push (← name)
           pure (.update l.toList)
         else pure (.update [])
     kw "ON"
     let t ← name
     let fer ← if ← eatKw "FOR" then do kw "EACH"; kw "ROW"; pure true else pure false
-    let w ← if ← eatKw "WHEN" then some <$> parseExpr else pure none
+    let w ← if ← eatKw "WHEN" then some <$> parseExpr n else pure none
     let tailBegin ← match ← peek with
       | some t => pure t.stop
       | none => pure (← get).src.size
     kw "BEGIN"
     let mut body := #[]
-    repeat
-      body := body.push (← parseStmt)
+    for _ in steps do
+      body := body.push (← parseStmt n)
       op "SEMI"
       if ← eatKw "END" then break
-    return .createTrigger temp ine sch n time ev t fer w body.toList ("CREATE TRIGGER " ++ (← spanText s0 (← get).pos)) tailBegin
+    return .createTrigger temp ine sch nm time ev t fer w body.toList ("CREATE TRIGGER " ++ (← spanText s0 (← get).pos)) tailBegin
   if ← eatKw "VIRTUAL" then
     kw "TABLE"
     let ine ← if ← eatKw "IF" then do kw "NOT"; kw "EXISTS"; pure true else pure false
-    let (sch, n) ← qualifiedName
+    let (sch, nm) ← qualifiedName
     kw "USING"
     let m ← name
     let args ← if ← eatOp "LP" then do
         -- module arguments are kept as text
         let mut depth := 1
         let st := (← get).pos
-        repeat
+        for _ in steps do
           if ← isOp "LP" then depth := depth + 1
           if ← isOp "RP" then depth := depth - 1
           if depth == 0 then break
@@ -466,7 +486,7 @@ partial def parseCreate (_s0 : Nat) : P Stmt := do
         op "RP"
         pure ((txt.splitOn ",").map (·.trimAscii.toString))
       else pure []
-    return .createVirtualTable ine sch n m args
+    return .createVirtualTable ine sch nm m args
   failHere
 end
 
@@ -476,6 +496,32 @@ inductive Prepared where
   | empty
   | ok (s : Stmt) (tail : Nat)
   | error (msg : String) (tail : Nat)
+
+/-- The fuel per token for the parser's recursion (`fuelFor`).
+
+    Why it suffices. Call a call of a function of the recursive descent
+    (`Sql.Parse`'s mutual block, `parseStmt`, `parseCreate`) *silent* when its
+    caller has consumed no token since the caller itself was entered. Silent
+    calls never form a cycle (that would be left recursion), and the longest
+    chain of them is 16 calls: `parseCall → parseExprList → parseExpr →
+    parseOr → parseAnd → parseNot → parseEquality → parseComparison →
+    parseEscape → parseBits → parseAdd → parseMul → parseConcat →
+    parseCollate → parseUnary → parsePrimary`, and `parsePrimary` consumes a
+    token before every call it makes. So the chain of active calls at any
+    moment has at most 16 · (k + 1) members, where `k ≤ toks.size - i` is
+    the number of tokens consumed so far; fuel `32 · (toks.size - i + 1)`
+    never runs out (each call takes one). Loops do not take fuel: they are
+    bounded by the tokens left (`P.steps`).
+
+    SQLite's own limits are different and not modelled here (as before this
+    bound was introduced): its LALR parser reports `Recursion limit` when its
+    stack overflows (e.g. at about 500 nested subqueries or CASEs, or 3000
+    nested parentheses), and `Expression tree is too large (maximum depth
+    1000)` (SQLITE_MAX_EXPR_DEPTH) when an expression is too deep. -/
+def fuelPerToken : Nat := 32
+
+/-- The parser's fuel for the statement starting at token `i` of `toks`. -/
+def fuelFor (toks : Array Token) (i : Nat) : Nat := fuelPerToken * (toks.size - i + 1)
 
 /-- Prepare the statement starting at token `i0` of `toks`, the tokens of `src`
     (as `tokenize` gives them from the statement's start). -/
@@ -488,7 +534,7 @@ def parseNextTok (src : ByteArray) (toks : Array Token) (i0 : Nat) : Prepared :=
   if i ≥ toks.size then .empty else
   let st : PState := { src, toks, pos := i }
   match (do
-      let s ← parseStmt
+      let s ← parseStmt (fuelFor toks i)
       -- the statement ends at ';' or at the end of the text
       match ← peek with
       | none => pure (s, src.size)

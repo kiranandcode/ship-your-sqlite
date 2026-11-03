@@ -41,6 +41,26 @@ def affinityOfType (decl : String) : Aff :=
 def isSpaceV (c : UInt8) : Bool := c == 32 || c == 9 || c == 10 || c == 11 || c == 12 || c == 13
 def digitB (c : UInt8) : Option Nat := if 48 ≤ c && c ≤ 57 then some (c - 48).toNat else none
 
+/-! Scanning loops of the conversions, as recursion on the bytes left. -/
+namespace Num
+
+/-- The first index `≥ i` of `z` whose byte fails `p`, or the end of `z`. -/
+def skipWhileB (z : ByteArray) (p : UInt8 → Bool) (i : Nat) : Nat :=
+  if h : i < z.size then (if p z[i] then skipWhileB z p (i + 1) else i) else i
+termination_by z.size - i
+
+/-- The decimal digits of `z` from `i`: the index after them, and `v`
+    extended by them (`v · 10 + d` per digit). -/
+def digitsFrom (z : ByteArray) (i v : Nat) : Nat × Nat :=
+  if h : i < z.size then
+    match digitB z[i] with
+    | some d => digitsFrom z (i + 1) (v * 10 + d)
+    | none => (i, v)
+  else (i, v)
+termination_by z.size - i
+
+end Num
+
 /-- `sqlite3AtoF`: the double of the longest numeric prefix and a state:
     bit 0 a digit was seen, bit 1 a '.' or exponent, bit 2 exact zero, and
     `whole` = the text is that number with only surrounding whitespace.
@@ -54,13 +74,54 @@ structure AtoF where
 
 def bound : Nat := (2 ^ 64 - 1 - 9) / 10
 
+namespace Num
+
+/-- `sqlite3AtoF`'s integer part from `i` with mantissa `s`: digits are
+    accumulated until `s ≥ bound`, after which they only count as powers of
+    ten. Returns the index after the digits, the mantissa and that count. -/
+def atofInt (z : ByteArray) (i s : Nat) : Nat × Nat × Int :=
+  if h : i < z.size then
+    match digitB z[i] with
+    | some dg =>
+      let s := s * 10 + dg
+      if s ≥ bound then
+        let j := skipWhileB z (fun c => (digitB c).isSome) (i + 1)
+        (j, s, ((j - (i + 1) : Nat) : Int))
+      else atofInt z (i + 1) s
+    | none => (i, s, 0)
+  else (i, s, 0)
+termination_by z.size - i
+
+/-- `sqlite3AtoF`'s fraction digits from `i`: while `s < bound` each digit
+    extends the mantissa and lowers the decimal exponent `d`. -/
+def atofFrac (z : ByteArray) (i s : Nat) (d : Int) : Nat × Nat × Int :=
+  if h : i < z.size then
+    match digitB z[i] with
+    | some dg =>
+      if s < bound then atofFrac z (i + 1) (s * 10 + dg) (d - 1) else atofFrac z (i + 1) s d
+    | none => (i, s, d)
+  else (i, s, d)
+termination_by z.size - i
+
+/-- `sqlite3AtoF`'s exponent digits from `j` (saturating at 10000). -/
+def atofExp (z : ByteArray) (j e : Nat) : Nat × Nat :=
+  if h : j < z.size then
+    match digitB z[j] with
+    | some dg => atofExp z (j + 1) (if e < 10000 then e * 10 + dg else 10000)
+    | none => (j, e)
+  else (j, e)
+termination_by z.size - j
+
+end Num
+open Num
+
 def atof (z0 : ByteArray) : AtoF := Id.run do
   -- the text is read as a C string, up to its first NUL
   let z : ByteArray := ⟨(z0.data.toList.takeWhile (· != 0)).toArray⟩
   let n := z.size
   let at_ (k : Nat) : UInt8 := if k < n then z[k]! else 0
   let mut i := 0
-  while i < n && isSpaceV (at_ i) do i := i + 1
+  i := skipWhileB z isSpaceV i
   let mut neg := false
   if at_ i == 45 then neg := true; i := i + 1
   else if at_ i == 43 then i := i + 1
@@ -72,19 +133,14 @@ def atof (z0 : ByteArray) : AtoF := Id.run do
   if (digitB (at_ i)).isSome then
     digit := true
     s := (digitB (at_ i)).get!; i := i + 1
-    let mut stop := false
-    while !stop && (digitB (at_ i)).isSome do
-      s := s * 10 + (digitB (at_ i)).get!; i := i + 1
-      if s ≥ bound then
-        while (digitB (at_ i)).isSome do i := i + 1; d := d + 1
-        stop := true
+    let (i', s', d') := atofInt z i s
+    i := i'; s := s'; d := d'
   -- fraction
   if at_ i == 46 then
     if (digitB (at_ (i+1))).isSome then
       i := i + 1; digit := true
-      while (digitB (at_ i)).isSome do
-        if s < bound then s := s * 10 + (digitB (at_ i)).get!; d := d - 1
-        i := i + 1
+      let (i', s', d') := atofFrac z i s d
+      i := i'; s := s'; d := d'
       frac := true
     else if digit then i := i + 1; frac := true
   if !digit then return ⟨0.0, false, false, false⟩
@@ -94,18 +150,14 @@ def atof (z0 : ByteArray) : AtoF := Id.run do
     let (esign, j) : Int × Nat :=
       if at_ j0 == 45 then (-1, j0 + 1) else if at_ j0 == 43 then (1, j0 + 1) else (1, j0)
     if (digitB (at_ j)).isSome then
-      let mut e : Nat := 0
-      let mut j := j
-      while (digitB (at_ j)).isSome do
-        e := if e < 10000 then e * 10 + (digitB (at_ j)).get! else 10000
-        j := j + 1
+      let (j, e) := atofExp z j 0
       d := d + esign * e; i := j; frac := true
   let r := if s == 0 then 0.0
     else if d < -348 then 0.0
     else if d > 347 then 1.0 / 0.0
     else Real.ofDecimal s d
   let r := if neg then -r else r
-  while i < n && isSpaceV (at_ i) do i := i + 1
+  i := skipWhileB z isSpaceV i
   return ⟨r, true, frac, i == n⟩
 
 /-- `sqlite3Atoi64`: the integer of the text when it is an integer literal
@@ -115,15 +167,16 @@ def atoi64 (z0 : ByteArray) : Option Int := Id.run do
   let n := z.size
   let at_ (k : Nat) : UInt8 := if k < n then z[k]! else 0
   let mut i := 0
-  while i < n && isSpaceV (at_ i) do i := i + 1
+  i := skipWhileB z isSpaceV i
   let mut neg := false
   if at_ i == 45 then neg := true; i := i + 1
   else if at_ i == 43 then i := i + 1
   let start := i
   let mut v : Nat := 0
-  while (digitB (at_ i)).isSome do v := v * 10 + (digitB (at_ i)).get!; i := i + 1
+  let (i', v') := digitsFrom z i v
+  i := i'; v := v'
   if i == start then return none
-  while i < n && isSpaceV (at_ i) do i := i + 1
+  i := skipWhileB z isSpaceV i
   if i != n then return none
   let x : Int := if neg then -(v : Int) else v
   return if inI64 x then some x else none
@@ -135,23 +188,22 @@ def atoi64Code (z : ByteArray) : Int × Int := Id.run do
   let n := z.size
   let at_ (k : Nat) : UInt8 := if k < n then z[k]! else 0
   let mut i := 0
-  while i < n && isSpaceV (at_ i) do i := i + 1
+  i := skipWhileB z isSpaceV i
   let mut neg := false
   if i < n && at_ i == 45 then neg := true; i := i + 1
   else if i < n && at_ i == 43 then i := i + 1
   let start := i
-  while i < n && at_ i == 48 do i := i + 1
+  i := skipWhileB z (· == 48) i
   let digitsStart := i
   let mut u : Nat := 0
-  while i < n && (digitB (at_ i)).isSome do u := u * 10 + (digitB (at_ i)).get!; i := i + 1
+  let (i', u') := digitsFrom z i u
+  i := i'; u := u'
   let nd := i - digitsStart
   let mut rc : Int := 0
   if nd == 0 && start == digitsStart then rc := -1
   else if i < n then
-    let mut jj := i
-    while jj < n do
-      if !isSpaceV (at_ jj) then rc := 1; break
-      jj := jj + 1
+    -- trailing text that is not all whitespace
+    if skipWhileB z isSpaceV i < n then rc := 1
   let v : Int := if neg then -(u : Int) else u
   if nd < 19 then return (rc, v)
   if u < 2 ^ 63 then return (rc, v)
@@ -171,12 +223,13 @@ def atoiPrefix (z0 : ByteArray) : Int := Id.run do
   let n := z.size
   let at_ (k : Nat) : UInt8 := if k < n then z[k]! else 0
   let mut i := 0
-  while i < n && isSpaceV (at_ i) do i := i + 1
+  i := skipWhileB z isSpaceV i
   let mut neg := false
   if at_ i == 45 then neg := true; i := i + 1
   else if at_ i == 43 then i := i + 1
   let mut v : Nat := 0
-  while (digitB (at_ i)).isSome do v := v * 10 + (digitB (at_ i)).get!; i := i + 1
+  let (i', v') := digitsFrom z i v
+  i := i'; v := v'
   let x : Int := if neg then -(v : Int) else v
   return if x > maxI64 then maxI64 else if x < minI64 then minI64 else x
 
