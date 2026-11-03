@@ -49,17 +49,39 @@ otherwise.
 ## Phase 2: the SQL semantics
 
 Written against `sqlite3` as the criterion, tested before anything is proved.
-The semantics is a Lean definition `Sql.Derives` with an executable `Sql.run`
-proved equal to it.
+`Sql/`: `Real` (REAL rendering), `Value` (storage classes, affinity, atof/atoi,
+comparison, arithmetic), `Lex`/`Keywords` (generated from SQLite's tables),
+`Ast`, `Parse`/`ParseStmt` (with `sqlite3_prepare`'s tail positions),
+`Db`, `Eval`/`Query`/`Select` (expressions, joins, grouping, windows, CTEs),
+`Exec` (statements, constraints, triggers, transactions, ALTER, foreign keys),
+and the library lanes `Printf`, `DateTime`, `Json`, `Pragma`. The executable
+`sql_run` prints what `c/driver.c` prints.
 
 | step | exit criterion | status |
 |---|---|---|
-| 2.1 values | storage classes, affinity, comparison and collation, NULL and three-valued logic, numeric conversions and SQLite's text rendering of REAL | |
-| 2.2 core | CREATE TABLE, INSERT, SELECT with WHERE / ORDER BY / GROUP BY / aggregates, LIMIT/OFFSET (the pilot slice) | |
-| 2.3 the rest of the dialect | joins (all kinds), subqueries, compound selects, CTEs incl. recursive, window functions, views, triggers, indexes (as observable through ordering and constraints), constraints and ON CONFLICT, UPSERT, RETURNING, transactions/savepoints, ALTER TABLE, pragmas that affect results, the built-in function library, JSON, date/time | |
-| 2.4 differential | `scripts/difftest.sh`: `Sql.run` vs the native driver on sqllogictest, SQLite's pure-SQL tests and generated scripts; every disagreement classified | |
+| 2.1 values | storage classes, affinity, comparison and collation, NULL and three-valued logic, numeric conversions and SQLite's text rendering of REAL | done: REAL rendering is SQLite's integer algorithm (0 mismatches on 1.6M doubles); atof as `sqlite3AtoF` |
+| 2.2 core | CREATE TABLE, INSERT, SELECT with WHERE / ORDER BY / GROUP BY / aggregates, LIMIT/OFFSET | done |
+| 2.3 the rest of the dialect | joins, subqueries, compound selects, CTEs incl. recursive, window functions, views, triggers, indexes, constraints and ON CONFLICT, UPSERT, RETURNING, transactions/savepoints, ALTER TABLE, pragmas, the function library, JSON, date/time | most done (see coverage); lanes: printf **merged** (0 mismatches on 1.8M random calls), date/time, JSON and pragmas running; open: ATTACH, EXPLAIN (see Gaps), VACUUM INTO, virtual tables beyond the built-in table-valued functions |
+| 2.4 differential | `scripts/difftest_sem.sh` (tests/sem, tests/sql) and `scripts/difftest_slt.py` (sqllogictest) | tests/sem+tests/sql: 17/20 (the 3 others need date/JSON); sqllogictest: select1 1001/1001, select2 and select3 all agree, evidence/ 330/330 after fixes |
+| 2.5 total and relational | make `Sql` total (fuel = SQLite's own limits: recursion depth of triggers, a fuel for recursive CTEs), then define `Sql.Derives` with the unspecified orders and choices (row order without ORDER BY, random(), bare-column rows) as nondeterminism, and prove `Sql.run` sound for it | |
 
-### Phase 2 design (next)
+### Phase 2 lanes
+
+Independent libraries, each a sub-agent in its own worktree behind a fixed
+interface, merged when its own randomized differential reaches 0 mismatches:
+`Sql.Printf` (printf/format/round/quote: merged), `Sql.DateTime`, `Sql.Json`,
+`Sql.Pragma`.
+
+### Phase 2 debts
+
+- `partial def` throughout the evaluator (2.5).
+- A runtime error in the middle of a streaming SELECT: SQLite has already
+  printed the earlier rows; the semantics prints only the error.
+- The executable's choices where SQLite's are unspecified (row order without
+  ORDER BY, random()) are SQLite's in the cases tested; 2.5 makes them
+  nondeterministic choices in `Derives`.
+
+### Phase 2 design notes
 
 - `Sql/Value.lean`: `Value = null | int (i : Int64) | real (r : binary64) | text (UTF-8 bytes) | blob`;
   affinity (`TEXT`, `NUMERIC`, `INTEGER`, `REAL`, `BLOB`) by SQLite's name rules; the
