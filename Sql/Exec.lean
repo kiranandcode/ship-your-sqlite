@@ -630,25 +630,33 @@ def execStmt (fuel : Nat) (q : QEnv) (s : Stmt) : M (Array (Array Value)) :=
             | some i => pure i
             | none => if isRowidName c && !t.withoutRowid then pure t.cols.size else err s!"table {t.name} has no column named {c}"
         let ncols := if cols.isEmpty then (t.cols.toList.filter fun c => c.generated.isNone).length else cols.length
-        let srcRows ← match src with
-          | .values rows => rows.toArray.mapM fun r => do
-              if r.length != ncols then
-                if cols.isEmpty then err s!"table {t.name} has {ncols} columns but {r.length} values were supplied"
-                err s!"{r.length} values for {ncols} columns"
-              r.toArray.mapM (evalExpr fuel q)
+        -- the rows to insert, each computed when the loop reaches it (a VALUES
+        -- list is a co-routine: a row is evaluated, then inserted, then the
+        -- next; its arity is checked at prepare)
+        let srcRows : Array (M (Array Value)) ← match src with
+          | .values rows => do
+              -- the parser's check (sqlite3MultiValues) comes first
+              if let r0 :: _ := rows then
+                if rows.any (·.length != r0.length) then err "all VALUES must have the same number of terms"
+              for r in rows do
+                if r.length != ncols then
+                  if cols.isEmpty then err s!"table {t.name} has {ncols} columns but {r.length} values were supplied"
+                  err s!"{r.length} values for {ncols} columns"
+              pure (rows.toArray.map fun r => r.toArray.mapM (evalExpr fuel q))
           | .select sel => do
               let (cm, rows) ← runSelect fuel q sel
               if cm.size != ncols then
                 if cols.isEmpty then err s!"table {t.name} has {ncols} columns but {cm.size} values were supplied"
                 err s!"{cm.size} values for {ncols} columns"
-              pure rows
-          | .defaults => pure #[#[]]
+              pure (rows.map pure)
+          | .defaults => pure #[pure #[]]
         let colIdx := match src with
           | .defaults => []
           | _ => if cols.isEmpty then (List.range t.cols.size).filter fun (i : Nat) => (t.cols[i]!).generated.isNone else colIdx
         let mut inserted := #[]
         let mut n : Int := 0
-        for r in srcRows do
+        for rM in srcRows do
+          let r ← rM
           -- defaults for the other columns
           let mut vals := Array.replicate t.cols.size Value.null
           let mut given := Array.replicate t.cols.size false
