@@ -56,6 +56,8 @@ structure Table where
   fks : List ForeignKey := []
   rows : Array Row := #[]
   sql : String
+  /-- in the `temp` database -/
+  temp : Bool := false
   deriving Inhabited
 
 structure Index where
@@ -73,6 +75,7 @@ structure View where
   cols : List Name
   q : Select
   sql : String
+  temp : Bool := false
   deriving Inhabited
 
 structure Trigger where
@@ -124,11 +127,17 @@ namespace Schema
 def tables (s : Schema) : List Table :=
   s.objs.toList.filterMap fun | .table t => some t | _ => none
 
+/-- A table by name: the `temp` one first, as SQLite searches temp before main. -/
 def findTable (s : Schema) (n : Name) : Option Table :=
-  s.tables.find? (nameEq ·.name n)
+  (s.tables.find? fun t => t.temp && nameEq t.name n).orElse fun _ => s.tables.find? (nameEq ·.name n)
+
+/-- A table of one database: `temp` (true) or `main` (false). -/
+def findTableIn (s : Schema) (temp : Bool) (n : Name) : Option Table :=
+  s.tables.find? fun t => t.temp == temp && nameEq t.name n
 
 def findView (s : Schema) (n : Name) : Option View :=
-  s.objs.toList.findSome? fun | .view v => if nameEq v.name n then some v else none | _ => none
+  let vs := s.objs.toList.filterMap fun | .view v => if nameEq v.name n then some v else none | _ => none
+  (vs.find? (·.temp)).orElse fun _ => vs.head?
 
 def indexes (s : Schema) : List Index :=
   s.objs.toList.filterMap fun | .index i => some i | _ => none
@@ -141,7 +150,7 @@ def objName : SchemaObj → Name
 
 def setTable (s : Schema) (t : Table) : Schema :=
   { s with objs := s.objs.map fun o => match o with
-      | .table u => if nameEq u.name t.name then .table t else o
+      | .table u => if nameEq u.name t.name && u.temp == t.temp then .table t else o
       | _ => o }
 
 end Schema

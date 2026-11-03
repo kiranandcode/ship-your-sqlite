@@ -996,32 +996,47 @@ partial def namedSource (q : QEnv) (sch : Option Name) (n : Name) (alias : Name)
       let (cols, rows) ← cteRows q n cv
       return (metaSrc alias cols, rows.mapIdx fun i r => ⟨i + 1, r⟩)
   let db ← getDb
-  if let some sch := sch then
-    if !(nameEq sch "main") then err s!"unknown database {sch}"
-  if let some t := db.main.findTable n then
+  let tbl ← match sch with
+    | none => pure (db.main.findTable n)
+    | some s =>
+      if nameEq s "main" then pure (db.main.findTableIn false n)
+      else if nameEq s "temp" then pure (db.main.findTableIn true n)
+      else err s!"no such table: {s}.{n}"
+  if let some t := tbl then
     return (tableSrc alias t, t.rows)
   if let some v := db.main.findView n then
     let (cols, rows) ← runSelect { q with ctes := [] } v.q
     let cols := if v.cols.isEmpty then cols else
       (cols.zip v.cols.toArray).map fun (c, nm) => { c with name := nm }
     return (metaSrc alias cols, rows.mapIdx fun i r => ⟨i + 1, r⟩)
-  if nameEq n "sqlite_schema" || nameEq n "sqlite_master" then
-    let rows := schemaRows db
+  if nameEq n "sqlite_schema" || nameEq n "sqlite_master" || nameEq n "sqlite_temp_schema" || nameEq n "sqlite_temp_master" then
+    let rows := schemaRows db (nameEq n "sqlite_temp_schema" || nameEq n "sqlite_temp_master")
     let cols : Array ColMeta := #["type", "name", "tbl_name", "rootpage", "sql"].map fun c => ⟨c, none, .binary⟩
     return (metaSrc alias cols, rows.mapIdx fun i r => ⟨i + 1, r⟩)
   err s!"no such table: {n}"
 
-/-- Rows of `sqlite_schema`. -/
-partial def schemaRows (db : Db) : Array (Array Value) :=
-  let objs := db.main.objs
-  objs.mapIdx fun i o =>
-    let root : Value := .int (i + 2)
+/-- Rows of `sqlite_schema` (or `sqlite_temp_schema`): tables and indexes take
+    root pages 2, 3, … in creation order; views and triggers have 0. -/
+partial def schemaRows (db : Db) (temp : Bool := false) : Array (Array Value) := Id.run do
+  let mut out := #[]
+  let mut page : Int := 1
+  for o in db.main.objs do
+    let isTemp := match o with
+      | .table t => t.temp | .view v => v.temp
+      | .index ix => ((db.main.findTable ix.table).map (·.temp)).getD false
+      | .trigger tr => ((db.main.findTable tr.table).map (·.temp)).getD false
+    if isTemp != temp then continue
     match o with
-    | .table t => #[.ofString "table", .ofString t.name, .ofString t.name, root, .ofString t.sql]
-    | .index ix => #[.ofString "index", .ofString ix.name, .ofString ix.table,
-        root, match ix.sql with | some s => .ofString s | none => .null]
-    | .view v => #[.ofString "view", .ofString v.name, .ofString v.name, .int 0, .ofString v.sql]
-    | .trigger tr => #[.ofString "trigger", .ofString tr.name, .ofString tr.table, .int 0, .ofString tr.sql]
+    | .table t =>
+      page := page + 1
+      out := out.push #[.ofString "table", .ofString t.name, .ofString t.name, .int page, .ofString t.sql]
+    | .index ix =>
+      page := page + 1
+      out := out.push #[.ofString "index", .ofString ix.name, .ofString ix.table, .int page,
+        match ix.sql with | some s => .ofString s | none => .null]
+    | .view v => out := out.push #[.ofString "view", .ofString v.name, .ofString v.name, .int 0, .ofString v.sql]
+    | .trigger tr => out := out.push #[.ofString "trigger", .ofString tr.name, .ofString tr.table, .int 0, .ofString tr.sql]
+  return out
 
 partial def cteRows (q : QEnv) (n : Name) : CteVal → M (Array ColMeta × Array (Array Value))
   | .rows cols rows => return (cols, rows)

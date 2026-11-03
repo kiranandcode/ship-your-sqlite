@@ -129,8 +129,13 @@ def countChanges (q : QEnv) (n : Int) : M Unit :=
 def modifyMain (f : Schema → Schema) : M Unit :=
   modify fun c => { c with db := { c.db with main := f c.db.main } }
 
-def objExists (db : Db) (n : Name) : Bool :=
-  db.main.objs.any fun o => nameEq (Schema.objName o) n
+/-- Is the name taken in the database (`temp` or `main`) an object would go to? -/
+def objExists (db : Db) (n : Name) (temp : Bool := false) : Bool :=
+  db.main.objs.any fun o => nameEq (Schema.objName o) n && (match o with
+    | .table t => t.temp == temp
+    | .view v => v.temp == temp
+    | .index ix => (((db.main.findTable ix.table).map (·.temp)).getD false) == temp
+    | .trigger tr => (((db.main.findTable tr.table).map (·.temp)).getD false) == temp)
 
 /-- The sources of a single table, for evaluating its constraints and defaults. -/
 def rowScope (t : Table) (alias : Name) (r : Row) : Scope :=
@@ -475,11 +480,10 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
     return rows
   | .explain _ _ => err "EXPLAIN is not modelled"
   | .createTable temp ine sch name cols cons wr strict asSel sql tailStart =>
-    let _ := sch
-    if temp then err "TEMP tables are not modelled yet"
+    let temp := temp || sch.any (nameEq · "temp")
     let db ← getDb
     let errAt {α} (m : String) (t : Nat) : M α := throw { code := SQLITE_ERROR, msg := m, tail := some t }
-    if objExists db name then
+    if objExists db name temp then
       if ine then return #[]
       if (db.main.findTable name).isSome || (db.main.findView name).isSome then errAt s!"table {name} already exists" tailStart
       errAt s!"there is already an index named {name}" tailStart
@@ -498,6 +502,7 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
         let sqlText := "CREATE TABLE " ++ name ++ "(" ++ ",".intercalate (cds.map fun c => c.name ++ (if c.type.isEmpty then "" else " " ++ c.type)) ++ ")"
         pure { t with sql := sqlText, rows := rows.mapIdx fun i r => ⟨i + 1, r⟩ }
       | none => mkTable name cols cons wr strict sql
+    let t := { t with temp }
     -- automatic indexes for UNIQUE and non-rowid PRIMARY KEY constraints
     let nAuto := t.uniques.length
     modifyMain fun s => { s with objs := s.objs.push (.table t) ++
@@ -528,13 +533,12 @@ partial def execStmt (q : QEnv) (s : Stmt) : M (Array (Array Value)) := do
             if keyEq k keys[i] keys[j]! then err (uniqueMsg t k) SQLITE_CONSTRAINT_UNIQUE
     return #[]
   | .createView temp ine _ name cols sel sql =>
-    if temp then err "TEMP views are not modelled yet"
     let db ← getDb
-    if objExists db name then
+    if objExists db name temp then
       if ine then return #[]
       err s!"view {name} already exists"
     let _ ← runSelect q sel
-    modifyMain fun s => { s with objs := s.objs.push (.view { name, cols, q := sel, sql }) }
+    modifyMain fun s => { s with objs := s.objs.push (.view { name, cols, q := sel, sql, temp }) }
     return #[]
   | .createTrigger _ ine _ name time ev tname _ w body sql tailBegin =>
     let db ← getDb
