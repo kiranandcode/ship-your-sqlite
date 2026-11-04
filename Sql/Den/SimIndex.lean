@@ -93,19 +93,30 @@ theorem compileTerm_shape {env : Env} {e : Expr} {t : PTerm} (h : compileTerm en
     exact .inr ⟨v, rfl, rfl⟩
   · contradiction
 
-/-- A compiled term's affinity needs no subquery. -/
+/-- A compiled term's affinity (needing no subquery). -/
 theorem exprAff_term {env : Env} {e : Expr} {t : PTerm} (h : compileTerm env e = some t)
-    (sub : Env → Select → Option Aff) : exprAff env e sub = exprAff env e := by
+    (sub : Env → Select → Option Aff) : exprAff env e sub = t.aff env := by
   rcases compileTerm_shape h with ⟨sch, tn, c, si, ci, rfl, hr, rfl⟩ | ⟨v, rfl, rfl⟩
-  · unfold exprAff
-    rw [syntaxFuel_succ]
-    simp only [exprAff.go, hr]
-  · unfold exprAff
-    rw [syntaxFuel_succ]
-    simp only [exprAff.go]
+  · rw [exprAff]
+    simp only [hr, PTerm.aff]
+    cases colMetaOf env (.col 0 si ci) <;> rfl
+  · rw [exprAff.eq_def]; rfl
+
+/-- A compiled term's collation. -/
+theorem exprColl_term {env : Env} {e : Expr} {t : PTerm} (h : compileTerm env e = some t) :
+    exprColl env e = t.coll env := by
+  rcases compileTerm_shape h with ⟨sch, tn, c, si, ci, rfl, hr, rfl⟩ | ⟨v, rfl, rfl⟩
+  · rw [exprColl]
+    simp only [hr, PTerm.coll]
+    cases colMetaOf env (.col 0 si ci) <;> rfl
+  · rw [exprColl.eq_def]; rfl
+
+theorem cmpColl_terms {env : Env} {a b : Expr} {ta tb : PTerm} (ha : compileTerm env a = some ta)
+    (hb : compileTerm env b = some tb) : cmpColl env a b = cmpCollOf (ta.coll env) (tb.coll env) := by
+  simp only [cmpColl, exprColl_term ha, exprColl_term hb]
 
 theorem ret_affOf_term {env : Env} {e : Expr} {t : PTerm} (h : compileTerm env e = some t) :
-    Ret (Den.affOf env e) (exprAff env e) :=
+    Ret (Den.affOf env e) (t.aff env) :=
   ret_affOf env e _ (exprAff_term h)
 
 /-- A comparison of compiled terms. -/
@@ -113,14 +124,15 @@ theorem ret_cmp (q : QEnv) (sc : Scope) (hf : q.env.frames[0]? = some sc) (op : 
     (ta tb : PTerm) (hop : op = .lt ∨ op = .le ∨ op = .gt ∨ op = .ge ∨ op = .eq ∨ op = .ne)
     (ha : compileTerm q.env a = some ta) (hb : compileTerm q.env b = some tb) :
     Ret (Den.evalExpr q (.binop op a b))
-      (compareOp op (cmpAff (exprAff q.env a) (exprAff q.env b)) (cmpColl q.env a b) (ta.eval sc.cur) (tb.eval sc.cur)) := by
+      (compareOp op (cmpAff (ta.aff q.env) (tb.aff q.env)) (cmpCollOf (ta.coll q.env) (tb.coll q.env)) (ta.eval sc.cur) (tb.eval sc.cur)) := by
+  rw [← cmpColl_terms ha hb]
   have k : Ret (do
       let x ← Den.evalExpr q a
       let y ← Den.evalExpr q b
       let a' ← Den.affOf q.env a
       let b' ← Den.affOf q.env b
       return compareOp op (cmpAff a' b') (cmpColl q.env a b) x y)
-      (compareOp op (cmpAff (exprAff q.env a) (exprAff q.env b)) (cmpColl q.env a b) (ta.eval sc.cur) (tb.eval sc.cur)) :=
+      (compareOp op (cmpAff (ta.aff q.env) (tb.aff q.env)) (cmpColl q.env a b) (ta.eval sc.cur) (tb.eval sc.cur)) :=
     Ret.bind (ret_term q sc hf a ta ha) (Ret.bind (ret_term q sc hf b tb hb)
       (Ret.bind (ret_affOf_term ha) (Ret.bind (ret_affOf_term hb) (Ret.pure _))))
   rcases compileTerm_shape ha with ⟨_, _, _, _, _, rfl, _, rfl⟩ | ⟨_, rfl, rfl⟩ <;>
@@ -173,13 +185,31 @@ theorem ret_inList_loop (q : QEnv) (sc : Scope) (hf : q.env.frames[0]? = some sc
         · simp only [h1, h2, if_false, Bool.false_eq_true]
           exact ih ts hts _
 
+/-- The collations of an IN list's comparisons, from the compiled terms. -/
+theorem zip_colls {env : Env} {x : Expr} {tx : PTerm} (hx : compileTerm env x = some tx) :
+    ∀ (items : List Expr) (tis : List PTerm), items.mapM (compileTerm env) = some tis →
+      tis.zip (items.map (cmpColl env x)) = tis.map fun t => (t, cmpCollOf (tx.coll env) (t.coll env)) := by
+  intro items
+  induction items with
+  | nil =>
+    intro tis h
+    simp only [List.mapM_nil, Option.pure_def, Option.some.injEq] at h
+    subst h; rfl
+  | cons it its ih =>
+    intro tis h
+    simp only [List.mapM_cons, Option.bind_eq_bind, Option.bind_eq_some_iff, Option.pure_def,
+      Option.some.injEq] at h
+    obtain ⟨t, ht, ts, hts, rfl⟩ := h
+    simp only [List.map_cons, List.zip_cons_cons, ih ts hts, cmpColl_terms hx ht]
+
 /-- An IN list of compiled terms. -/
 theorem ret_inList (q : QEnv) (sc : Scope) (hf : q.env.frames[0]? = some sc) (x : Expr) (items : List Expr)
     (tx : PTerm) (tis : List PTerm) (hx : compileTerm q.env x = some tx)
     (hits : items.mapM (compileTerm q.env) = some tis) (hne : items.isEmpty = false) :
     Ret (Den.evalExpr q (.inList false x items))
-      (inListValue (tx.eval sc.cur) (exprAff q.env x)
-        ((tis.zip (items.map (cmpColl q.env x))).map fun (t, c) => (t.eval sc.cur, c))) := by
+      (inListValue (tx.eval sc.cur) (tx.aff q.env)
+        ((tis.map fun t => (t, cmpCollOf (tx.coll q.env) (t.coll q.env))).map fun (t, c) => (t.eval sc.cur, c))) := by
+  rw [← zip_colls hx items tis hits]
   rw [Den.evalExpr.eq_def]
   simp only []
   refine Ret.bind (ret_term q sc hf x tx hx) ?_
@@ -326,22 +356,11 @@ namespace SameScope
 variable {env1 env2 : Env} (h : SameScope env1 env2)
 include h
 
-theorem exprAff_go : ∀ k x, exprAff.go k env1 x (fun _ _ => none) = exprAff.go k env2 x (fun _ _ => none) := by
-  intro k
-  induction k with
-  | zero => intro x; rfl
-  | succ k ih => intro x; simp only [exprAff.go, h.res, h.colMeta, ih]
+theorem termAff (t : PTerm) : t.aff env1 = t.aff env2 := by
+  cases t <;> simp only [PTerm.aff, h.colMeta]
 
-theorem exprAff (x : Expr) : Sql.exprAff env1 x = Sql.exprAff env2 x := h.exprAff_go _ x
-
-theorem exprColl_go : ∀ k x, exprColl.go k env1 x = exprColl.go k env2 x := by
-  intro k
-  induction k with
-  | zero => intro x; rfl
-  | succ k ih => intro x; simp only [exprColl.go, h.res, h.colMeta, ih]
-
-theorem cmpColl (a b : Expr) : Sql.cmpColl env1 a b = Sql.cmpColl env2 a b := by
-  simp only [Sql.cmpColl, exprColl, h.exprColl_go]
+theorem termColl (t : PTerm) : t.coll env1 = t.coll env2 := by
+  cases t <;> simp only [PTerm.coll, h.colMeta]
 
 theorem alwaysTF (x : Expr) : Sql.alwaysTF env1 x = Sql.alwaysTF env2 x := by
   unfold Sql.alwaysTF
@@ -365,8 +384,7 @@ theorem compileCondK : ∀ k x, Sql.compileCondK env1 k x = Sql.compileCondK env
   | succ k ih =>
     intro x
     have hct : Sql.compileTerm env1 = Sql.compileTerm env2 := funext h.compileTerm
-    have hcc : Sql.cmpColl env1 = Sql.cmpColl env2 := funext fun a => funext (h.cmpColl a)
-    simp only [Sql.compileCondK, ih, h.andOrAlt, hct, h.exprAff, hcc]
+    simp only [Sql.compileCondK, ih, h.andOrAlt, hct, h.termAff, h.termColl]
 
 end SameScope
 

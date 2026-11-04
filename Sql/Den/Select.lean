@@ -691,7 +691,7 @@ def valueOf (q : QEnv) (r0 : Resolved) : D Value :=
       | .newRowid => return (q.env.newRow.map fun (_, r) => Value.int r.rowid).getD .null
       | .old ci => return (q.env.oldRow.bind fun (_, r) => r.vals[ci]?).getD .null
       | .oldRowid => return (q.env.oldRow.map fun (_, r) => Value.int r.rowid).getD .null
-      | .alias e => evalExpr q e
+      | .alias fi e => evalExpr { q with env := q.env.aliasScope fi } e
 partial_fixpoint monotonicity by (try simp only []); repeat' monotonicity
 
 /-- An aggregate call over the current group. -/

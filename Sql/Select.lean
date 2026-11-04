@@ -1322,6 +1322,16 @@ def PTerm.eval (cur : Array Cur) : PTerm → Value
   | .col si ci => curValue cur si ci
   | .lit v => v
 
+/-- A term's affinity (`exprAff` of the column or literal). -/
+def PTerm.aff (env : Env) : PTerm → Option Aff
+  | .col si ci => (colMetaOf env (.col 0 si ci)).bind (·.1)
+  | .lit _ => none
+
+/-- A term's collation (`exprColl` of the column or literal). -/
+def PTerm.coll (env : Env) : PTerm → Option (Coll × Bool)
+  | .col si ci => (colMetaOf env (.col 0 si ci)).map fun (_, c) => (c, false)
+  | .lit _ => none
+
 /-- A column of the join's own scope `env`, or a literal, as a term. -/
 def compileTerm (env : Env) (e : Expr) : Option PTerm :=
   match e with
@@ -1394,14 +1404,14 @@ def compileCondK (env : Env) : Nat → Expr → Option PCond
         else none
       | .lt | .le | .gt | .ge | .eq | .ne =>
         match compileTerm env a, compileTerm env b with
-        | some ta, some tb => some (.cmp op (cmpAff (exprAff env a) (exprAff env b)) (cmpColl env a b) ta tb)
+        | some ta, some tb => some (.cmp op (cmpAff (ta.aff env) (tb.aff env)) (cmpCollOf (ta.coll env) (tb.coll env)) ta tb)
         | _, _ => none
       | _ => none
     | .unop .not a => (compileCondK env k a).map .not
     | .inList false x items =>
       if items.isEmpty then none else
       match compileTerm env x, items.mapM (compileTerm env) with
-      | some tx, some tis => some (.inList tx (exprAff env x) (tis.zip (items.map (cmpColl env x))))
+      | some tx, some tis => some (.inList tx (tx.aff env) (tis.map fun t => (t, cmpCollOf (tx.coll env) (t.coll env))))
       | _, _ => none
     | _ => none
 
@@ -1791,7 +1801,7 @@ def valueOf (fuel : Nat) (q : QEnv) (r0 : Resolved) : M Value :=
       | .newRowid => return (q.env.newRow.map fun (_, r) => Value.int r.rowid).getD .null
       | .old ci => return (q.env.oldRow.bind fun (_, r) => r.vals[ci]?).getD .null
       | .oldRowid => return (q.env.oldRow.map fun (_, r) => Value.int r.rowid).getD .null
-      | .alias e => evalExpr fuel q e
+      | .alias fi e => evalExpr fuel { q with env := q.env.aliasScope fi } e
 
 /-- An aggregate call over the current group. -/
 def evalAgg (fuel : Nat) (q : QEnv) (n : Name) (distinct : Bool) (args : List Expr) (star : Bool)

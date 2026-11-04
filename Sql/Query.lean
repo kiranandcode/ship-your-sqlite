@@ -80,7 +80,8 @@ inductive Resolved where
   | rowid (frame : Nat) (src : Nat)
   | new (col : Nat) | newRowid
   | old (col : Nat) | oldRowid
-  | alias (e : Expr)
+  /-- a result-column alias (of the SELECT of frame `frame`) and its expression -/
+  | alias (frame : Nat) (e : Expr)
   deriving Inhabited
 
 def isRowidName (n : Name) : Bool := nameEq n "rowid" || nameEq n "oid" || nameEq n "_rowid_"
@@ -131,7 +132,7 @@ def resolveCol (env : Env) (tbl : Option Name) (col : Name) : Except String Reso
         | [] => pure ()
       -- result-column aliases (only unqualified)
       if tbl.isNone then
-        if let some (_, e) := f.aliases.find? (fun (n, _) => nameEq n col) then return .alias e
+        if let some (_, e) := f.aliases.find? (fun (n, _) => nameEq n col) then return .alias fi e
       go rest (fi + 1)
   go env.frames 0
 
@@ -145,63 +146,103 @@ def colMetaOf (env : Env) : Resolved → Option (Option Aff × Coll)
   | .rowid .. | .newRowid | .oldRowid => some (some .integer, .binary)
   | .new ci => env.newRow.bind fun (s, _) => s.cols[ci]?.map fun (_, a, c) => (a, c)
   | .old ci => env.oldRow.bind fun (s, _) => s.cols[ci]?.map fun (_, a, c) => (a, c)
-  | .alias _ => none
+  | .alias .. => none
 
-/-- Expression affinity (`sqlite3ExprAffinity`): `none` is "no affinity". -/
-def exprAff.go (k : Nat) (env : Env) (x : Expr) (sub : Env → Select → Option Aff) : Option Aff :=
-  match k with
-  | 0 => none
-  | k + 1 =>
+/-- The scope an alias's expression is resolved in: SQLite resolves a result
+    column's expression in its SELECT's scope, where the aliases are not
+    visible. The frames from the alias's on, that frame's aliases removed (and
+    no group, unless it is the innermost). -/
+def Env.aliasScope (env : Env) (fi : Nat) : Env :=
+  { env with
+    frames := match env.frames.drop fi with
+      | f :: rest => { f with aliases := [] } :: rest
+      | [] => []
+    group := if fi == 0 then env.group else none }
+
+/-- The number of aliases visible in an environment. -/
+def Env.aliasCount (env : Env) : Nat := (env.frames.map (·.aliases.length)).sum
+
+/-- Expression affinity (`sqlite3ExprAffinity`): `none` is "no affinity".
+    `sub` gives a scalar subquery's affinity (that of its first result
+    column, which needs the schema: `Sql.subqueryAff`); by default none. An
+    alias's affinity is its expression's in the alias's scope (where fewer
+    aliases are visible). -/
+def exprAff (env : Env) (x : Expr) (sub : Env → Select → Option Aff := fun _ _ => none) : Option Aff :=
   match x with
   | .col _ t c => match resolveCol env t c with
     | .ok r => match colMetaOf env r with
       | some (a, _) => a
-      | none => match r with | .alias e => exprAff.go k env e sub | _ => none
+      | none => match r with
+        | .alias fi e =>
+          if (env.aliasScope fi).aliasCount < env.aliasCount then exprAff (env.aliasScope fi) e sub else none
+        | _ => none
     | .error _ => none
-  | .dqcol c => exprAff.go k env (.col none none c) sub
+  | .dqcol c => match resolveCol env none c with
+    | .ok r => match colMetaOf env r with
+      | some (a, _) => a
+      | none => match r with
+        | .alias fi e =>
+          if (env.aliasScope fi).aliasCount < env.aliasCount then exprAff (env.aliasScope fi) e sub else none
+        | _ => none
+    | .error _ => none
   | .cast _ ty => some (affinityOfType ty)
-  | .collate e _ => exprAff.go k env e sub
+  | .collate e _ => exprAff env e sub
   | .subquery q => sub env q
-  | .row (e :: _) => exprAff.go k env e sub
+  | .row (e :: _) => exprAff env e sub
   | _ => none
+termination_by (env.aliasCount, sizeOf x)
+decreasing_by
+  all_goals first
+    | (apply Prod.Lex.left; assumption)
+    | (apply Prod.Lex.right; simp_wf <;> omega)
 
-/-- `sub` gives a scalar subquery's affinity (that of its first result
-    column, which needs the schema: `Sql.subqueryAff`); by default none. -/
-def exprAff (env : Env) (x : Expr) (sub : Env → Select → Option Aff := fun _ _ => none) : Option Aff :=
-  exprAff.go syntaxFuel env x sub
-
-/-- Collation of an expression: explicit (`COLLATE`) or from a column. -/
-def exprColl.go (k : Nat) (env : Env) (x : Expr) : Option (Coll × Bool) :=
-  match k with
-  | 0 => none
-  | k + 1 =>
+/-- Collation of an expression: explicit (`COLLATE`) or from a column (an
+    alias's: its expression's in the alias's scope). -/
+def exprColl (env : Env) (x : Expr) : Option (Coll × Bool) :=
   match x with
   | .collate _ c => some ((collOfName c).getD .binary, true)
   | .col _ t c => match resolveCol env t c with
     | .ok r => match colMetaOf env r with
       | some (_, coll) => some (coll, false)
-      | none => match r with | .alias e => (exprColl.go k) env e | _ => none
+      | none => match r with
+        | .alias fi e =>
+          if (env.aliasScope fi).aliasCount < env.aliasCount then exprColl (env.aliasScope fi) e else none
+        | _ => none
     | .error _ => none
-  | .dqcol c => (exprColl.go k) env (.col none none c)
-  | .unop .pos e | .cast e _ => (exprColl.go k) env e
+  | .dqcol c => match resolveCol env none c with
+    | .ok r => match colMetaOf env r with
+      | some (_, coll) => some (coll, false)
+      | none => match r with
+        | .alias fi e =>
+          if (env.aliasScope fi).aliasCount < env.aliasCount then exprColl (env.aliasScope fi) e else none
+        | _ => none
+    | .error _ => none
+  | .unop .pos e | .cast e _ => exprColl env e
   | .binop _ a b =>
-    match (exprColl.go k) env a with
+    match exprColl env a with
     | some (c, true) => some (c, true)
-    | x => match (exprColl.go k) env b with
+    | x => match exprColl env b with
       | some (c, true) => some (c, true)
       | _ => x
   | _ => none
+termination_by (env.aliasCount, sizeOf x)
+decreasing_by
+  all_goals first
+    | (apply Prod.Lex.left; assumption)
+    | (apply Prod.Lex.right; simp_wf <;> omega)
 
-def exprColl (env : Env) (x : Expr) : Option (Coll × Bool) := exprColl.go syntaxFuel env x
-
-/-- The collation of a binary comparison (`sqlite3BinaryCompareCollSeq`). -/
-def cmpColl (env : Env) (a b : Expr) : Coll :=
-  match exprColl env a, exprColl env b with
+/-- The collation of a binary comparison of operands with collations `x`,
+    `y` (explicit ones first, then the left's). -/
+def cmpCollOf (x y : Option (Coll × Bool)) : Coll :=
+  match x, y with
   | some (c, true), _ => c
   | _, some (c, true) => c
   | some (c, false), _ => c
   | _, some (c, false) => c
   | _, _ => .binary
+
+/-- The collation of a binary comparison (`sqlite3BinaryCompareCollSeq`). -/
+def cmpColl (env : Env) (a b : Expr) : Coll := cmpCollOf (exprColl env a) (exprColl env b)
 
 /-- The affinity of a comparison (`sqlite3CompareAffinity`). -/
 def cmpAff (a1 a2 : Option Aff) : Option Aff :=

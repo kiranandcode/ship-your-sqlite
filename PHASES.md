@@ -181,8 +181,11 @@ sound for the denotation: if it finishes, its output is in the denotation.
   well-founded recursions on the term (`sizeOf`, list elements through
   `List.attach`, `syntax_wf`): `hasAgg`, `hasWindow`, `hasSubquery`, the
   name references (`exprRefs` …), `coreRefers`, `replaceWindows`,
-  `simplifyAndOr` (structural), PRAGMA's `dataType`. Three bounds remain in
-  shared functions, each cutting a recursion that is not over syntax (Gaps).
+  `simplifyAndOr` (structural), PRAGMA's `dataType`. An alias's expression
+  is resolved in its own SELECT's scope without the aliases (as SQLite
+  resolves result columns: `Env.aliasScope`), so `exprAff`/`exprColl`
+  terminate on (visible aliases, size). Two bounds remain in shared
+  functions, each cutting a recursion that is not over syntax (Gaps).
 - **Scripts.** `⟦src⟧ : Set ByteArray`: the driver's loop over the statements
   the parser finds, each statement's meaning applied to the state.
 
@@ -243,7 +246,6 @@ SQL to VDBE bytecode and runs it over a B-tree. Three layers, one theorem:
 |---|---|---|---|
 | SQLite's parser limits: "Recursion limit" (parser stack, ~500 nested subqueries/CASEs, ~3000 nested parentheses) and "Expression tree is too large (maximum depth 1000)" are not modelled: the semantics accepts deeper input | 2.5 | the descent parser's depth does not match yacc's stack; never modelled | model both limits as checks (stack depth of SQLite's LALR automaton, SQLITE_MAX_EXPR_DEPTH on the built tree) |
 | a scalar subquery whose FROM names a CTE or a table-valued function has no affinity in comparisons (SQLite: its first column's) | 2.5 | `subqueryAffK` resolves tables, views and FROM subqueries only | carry the CTEs in `Env` |
-| `exprAff`/`exprColl` follow result-column aliases (`Resolved.alias`) with a bound (`syntaxFuel`, 10⁶): an alias's expression is resolved in the scope that has the aliases, so a chain of aliases (or a cycle) is followed up to the bound; SQLite resolves a result column's expression without the aliases | 2.6 (fuel in the spec) | the walk follows the environment, not the syntax | resolve an alias's expression without the frame's aliases (as SQLite does, also in `valueOf`); then the recursion decreases (frames with aliases, size) |
 | the affinity of a scalar subquery (`subqueryAffK`/`selectMetaK`) resolves views with a bound (`syntaxFuel`) | 2.6 (fuel in the spec) | the recursion goes through the schema's view definitions | a measure on the views not yet entered (SQLite rejects circular views) |
 | the parser's fuel (`32 · (tokens left + 1)`, never exhausted: argued in `fuelPerToken`'s doc comment) is in the denotation's driver | 2.5/2.6 (fuel in the spec) | the descent parser is total by that bound | prove the bound sufficient (each recursive call consumes a token within 16 silent calls), or a lexicographic measure |
 
