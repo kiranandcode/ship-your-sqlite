@@ -1268,14 +1268,27 @@ def evalFrom (q : QEnv) (f0 : FromItem) : D (Array Src × Array (Array Cur)) :=
         return (srcs'', out)
 partial_fixpoint monotonicity by (try simp only []); repeat' monotonicity
 
-/-- The columns of views for `Sql.Pragma`: the interpreter's (deterministic)
-    computation on the corresponding state. Debt (PHASES 2.6): it runs the
-    view's SELECT with the interpreter's fuel; to be replaced by the static
-    column analysis. -/
-def viewCols : D Pragma.ViewCols := do
-  let c ← get
-  let ctx : Ctx := { db := c.db, jsonCache := c.jsonCache }
-  return ((Sql.viewCols evalFuel).run.run ctx).1.toOption.getD (fun _ => .error { code := SQLITE_ERROR, msg := "internal: view columns" })
+/-- The columns of views for `Sql.Pragma`: their SELECT run on the current state. -/
+def viewCols : D Pragma.ViewCols :=
+    do
+      -- each view's SELECT run on the current state, which is then restored
+      -- (its outcome kept: the columns, or the error)
+      let saved ← get
+      let mut table : List (View × Except Err (Array (Name × Option Aff))) := []
+      for o in saved.db.main.objs do
+        if let .view v := o then
+          let r ← tryCatch (do
+              let (cols, _) ← runSelect {} v.q
+              pure (Except.ok (cols.map fun c => (c.name, c.aff))))
+            (fun e => pure (Except.error e))
+          restoreTo saved saved.db
+          table := table ++ [(v, r)]
+      let found := table
+      return fun v =>
+        match found.find? fun (w, _) => nameEq w.name v.name && w.temp == v.temp && w.attachedTo == v.attachedTo with
+        | some (_, r) => r
+        | none => .error { code := SQLITE_ERROR, msg := s!"no such view: {v.name}" }
+partial_fixpoint monotonicity by (try simp only []); repeat' monotonicity
 
 /-- The source of a table-valued function (its columns; `json` and `root` of
     json_each/json_tree are hidden, as are `arg` and `schema` of the

@@ -2105,10 +2105,23 @@ def viewCols (fuel : Nat) : M Pragma.ViewCols :=
   | 0 => outOfFuel
   | fuel + 1 =>
     do
-      let ctx ← get
-      return fun v => match ((runSelect fuel {} v.q).run).run ctx with
-        | (.ok (cols, _), _) => .ok (cols.map fun c => (c.name, c.aff))
-        | (.error e, _) => .error e
+      -- each view's SELECT run on the current state, which is then restored
+      -- (its outcome kept: the columns, or the error)
+      let saved ← get
+      let mut table : List (View × Except Err (Array (Name × Option Aff))) := []
+      for o in saved.db.main.objs do
+        if let .view v := o then
+          let r ← tryCatch (do
+              let (cols, _) ← runSelect fuel {} v.q
+              pure (Except.ok (cols.map fun c => (c.name, c.aff))))
+            (fun e => pure (Except.error e))
+          restoreTo saved saved.db
+          table := table ++ [(v, r)]
+      let found := table
+      return fun v =>
+        match found.find? fun (w, _) => nameEq w.name v.name && w.temp == v.temp && w.attachedTo == v.attachedTo with
+        | some (_, r) => r
+        | none => .error { code := SQLITE_ERROR, msg := s!"no such view: {v.name}" }
 
 /-- The source of a table-valued function (its columns; `json` and `root` of
     json_each/json_tree are hidden, as are `arg` and `schema` of the

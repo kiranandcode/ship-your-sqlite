@@ -169,20 +169,7 @@ s = open(p).read()
 s = re.sub(r'(?<![.\w«])alias(?![\w»])', '«alias»', s)
 open(p, 'w').write(s)
 
-# --- view columns: the interpreter's deterministic computation (debt: static) ---
-s = open(p).read()
-i = s.index('/-- The columns of views for `Sql.Pragma`')
-j = s.index('partial_fixpoint', i); j = s.index('\n', j) + 1
-s = s[:i] + '''/-- The columns of views for `Sql.Pragma`: the interpreter's (deterministic)
-    computation on the corresponding state. Debt (PHASES 2.6): it runs the
-    view's SELECT with the interpreter's fuel; to be replaced by the static
-    column analysis. -/
-def viewCols : D Pragma.ViewCols := do
-  let c ← get
-  let ctx : Ctx := { db := c.db, jsonCache := c.jsonCache }
-  return ((Sql.viewCols evalFuel).run.run ctx).1.toOption.getD (fun _ => .error { code := SQLITE_ERROR, msg := "internal: view columns" })
-''' + s[j:]
-open(p, 'w').write(s)
+
 
 # --- the join as a plan (data) and closures over it, run by joinLoops ---
 s = open(p).read()
