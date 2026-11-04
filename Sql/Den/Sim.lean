@@ -287,6 +287,20 @@ theorem filterMapM_array {α β : Type} {ch : Choices} (xs : Array α) {f : α �
   rw [← Array.foldlM_toList, ← Array.foldlM_toList]
   exact foldlM_list _ _ fun b a => bind (h a) fun o => by cases o <;> exact pure _
 
+/-- An early `return` tunnelled through `try` (the `do` elaborator's
+    `EarlyReturn.runK`). -/
+theorem earlyReturn_runK {ρ α β : Type} {ch : Choices} (x : Except ρ α) {r : ρ → M β} {r' : ρ → D β}
+    {p : α → M β} {p' : α → D β} (hr : ∀ a, Sim ch (r a) (r' a)) (hp : ∀ a, Sim ch (p a) (p' a)) :
+    Sim ch (EarlyReturn.runK x r p) (EarlyReturn.runK x r' p') := by
+  cases x
+  · exact hr _
+  · exact hp _
+
+/-- The early `return` itself. -/
+theorem earlyReturn_return {ρ α : Type} {ch : Choices} (r : ρ) :
+    Sim ch (EarlyReturnT.return r : EarlyReturnT ρ M α) (EarlyReturnT.return r : EarlyReturnT ρ D α) :=
+  Sim.pure (Except.error r)
+
 /-! ### Loops over collections equal up to unfolding
 
 The interpreter's and the denotation's loops run over the same collection,
@@ -644,7 +658,9 @@ macro_rules
       | (with_reducible apply Sim.forM_list; intro _)
       | (with_reducible apply Sim.forM_option; intro _)
       | ((with_reducible apply Sim.forM_list_eq); rfl; intro _)
-      | (with_reducible apply Sim.filterMapM_array; intro _))
+      | (with_reducible apply Sim.filterMapM_array; intro _)
+      | ((with_reducible apply Sim.earlyReturn_runK) <;> intro _)
+      | (with_reducible exact Sim.earlyReturn_return _))
 
 /-- A simulation proof by lockstep. Last, the goals where the two sides'
     matches were split apart (after the interpreter's catch-all case the

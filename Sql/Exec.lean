@@ -1450,49 +1450,75 @@ structure RunResult where
   out : ByteArray
   exhausted : Bool
 
+/-- The driver's state between statements: the output so far, the
+    executor's state, whether the script has ended, the byte offset of the
+    next statement, the tokens and the index of the next one. -/
+structure DriverState (σ : Type) where
+  out : ByteArray
+  ctx : σ
+  finished : Bool := false
+  pos : Nat := 0
+  toks : Array Token
+  ti : Nat := 0
+
+/-- The token a statement at byte offset `pos` starts at: the script is
+    tokenized once, and a statement starts at the first token at or after its
+    offset, unless the offset falls inside a token (after the driver's skip to
+    the next ';'), when the rest is tokenized again from there. -/
+def seekTok (src : ByteArray) (toks : Array Token) (ti pos : Nat) : Array Token × Nat := Id.run do
+  let mut ti := ti
+  let mut toks := toks
+  for _ in [ti:toks.size] do
+    if toks[ti]!.start < pos then ti := ti + 1 else break
+  if ti > 0 && toks[ti - 1]!.stop > pos then
+    toks := toks.extract 0 (ti - 1) ++ tokenize src pos
+    ti := ti - 1
+  return (toks, ti)
+
+/-- Where the driver goes on after a parse error at `pos` that ends at
+    `tail`: there, or with no progress after the next ';'. -/
+def skipErr (src : ByteArray) (pos tail : Nat) : Nat := Id.run do
+  if tail ≤ pos then
+    let mut i := pos
+    for _ in [pos:src.size] do
+      if src[i]! != 59 then i := i + 1 else break
+    return if i < src.size then i + 1 else src.size
+  else return tail
+
+/-- A statement's outcome printed after `out` (its rows; an error's rows
+    printed before it, then the error), and where the next statement starts
+    (an error may carry prepare's tail). -/
+def renderOutcome (r : Except Err (Except Err (Array (Array Value)))) (out : ByteArray) (pos : Nat) :
+    ByteArray × Nat :=
+  match r with
+  | .ok (.ok rows) => (rows.foldl (fun o row => o ++ renderRow row) out, pos)
+  | .ok (.error e) | .error e => (e.printed.foldl (fun o row => o ++ renderRow row) out ++ renderErr e, e.tail.getD pos)
+
+/-- One round of the driver: the next statement, parsed and run (`runS`: the
+    executor, in any monad), or the parse error, or the end of the script. -/
+def driverStep {m : Type → Type} [Monad m] {σ : Type} (src : ByteArray)
+    (runS : Stmt → σ → m (Except Err (Except Err (Array (Array Value))) × σ))
+    (st : DriverState σ) : m (ForInStep (DriverState σ)) := do
+  let (toks, ti) := seekTok src st.toks st.ti st.pos
+  match parseNextTok src toks ti with
+  | .empty => return .done { st with toks, ti, finished := true }
+  | .error msg tail =>
+    return .yield { st with toks, ti, out := st.out ++ renderErr { code := SQLITE_ERROR, msg },
+                            pos := skipErr src st.pos tail }
+  | .ok stmt tail =>
+    let (r, ctx) ← runS stmt st.ctx
+    let (out, pos) := renderOutcome r st.out tail
+    return .yield { st with toks, ti, ctx, out, pos }
+
 /-- Run a script as the driver does, with the implementation's choices `ch`
-    and evaluator fuel `fuel`: statement by statement, printing rows and errors. -/
+    and evaluator fuel `fuel`: statement by statement, printing rows and
+    errors. One round per statement or skipped error: every round but the
+    last moves past at least one byte, so `src.size + 1` rounds suffice. -/
 def runScriptWith (ch : Choices) (fuel : Nat) (src : ByteArray) : RunResult := Id.run do
-  let mut out := ByteArray.empty
-  let mut ctx : Ctx := { db := {}, choices := ch }
-  let mut finished := false
-  let mut pos := 0
-  -- the script is tokenized once; a statement starts at the first token at or
-  -- after its byte offset, unless the offset falls inside a token (after the
-  -- driver's skip to the next ';'), when the rest is tokenized again from there
-  let mut toks := tokenize src 0
-  let mut ti := 0
-  -- one round per statement or skipped error: every round but the last
-  -- moves `pos` forward, so `src.size + 1` rounds suffice
-  for _ in [0:src.size + 1] do
-    for _ in [ti:toks.size] do
-      if toks[ti]!.start < pos then ti := ti + 1 else break
-    if ti > 0 && toks[ti - 1]!.stop > pos then
-      toks := toks.extract 0 (ti - 1) ++ tokenize src pos
-      ti := ti - 1
-    match parseNextTok src toks ti with
-    | .empty => finished := true; break
-    | .error msg tail =>
-      out := out ++ renderErr { code := SQLITE_ERROR, msg }
-      if tail ≤ pos then
-        -- no progress: skip to after the next ';'
-        let mut i := pos
-        for _ in [pos:src.size] do
-          if src[i]! != 59 then i := i + 1 else break
-        pos := if i < src.size then i + 1 else src.size
-      else pos := tail
-    | .ok stmt tail =>
-      pos := tail
-      match (runStmt fuel stmt).run.run ctx with
-      | (.ok (.ok rows), ctx') =>
-        ctx := ctx'
-        for r in rows do out := out ++ renderRow r
-      | (.ok (.error e), ctx') | (.error e, ctx') =>
-        ctx := ctx'
-        for r in e.printed do out := out ++ renderRow r
-        out := out ++ renderErr e
-        if let some t := e.tail then pos := t
-  return { out, exhausted := ctx.exhausted || !finished }
+  let st ← forIn (List.range (src.size + 1))
+    ({ out := ByteArray.empty, ctx := { db := {}, choices := ch }, toks := tokenize src 0 } : DriverState Ctx)
+    fun _ st => driverStep src (fun stmt ctx => (runStmt fuel stmt).run.run ctx) st
+  return { out := st.out, exhausted := st.ctx.exhausted || !st.finished }
 
 /-- The executable semantics: the default choices, `evalFuel`. -/
 def runScript (src : ByteArray) : ByteArray := (runScriptWith {} evalFuel src).out

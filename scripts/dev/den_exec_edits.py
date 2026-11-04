@@ -24,44 +24,12 @@ s = s[:i] + '''/-- ⟦src⟧: the outputs of a script, run as the driver runs it
     last moves past at least one byte); were the bound reached, the run would
     have no outcome. -/
 def runScript (src : ByteArray) : Nd ByteArray := do
-  let mut out := ByteArray.empty
-  let mut ctx : DCtx := { db := {} }
-  let mut finished := false
-  let mut pos := 0
-  -- the script is tokenized once; a statement starts at the first token at or
-  -- after its byte offset, unless the offset falls inside a token (after the
-  -- driver's skip to the next ';'), when the rest is tokenized again from there
-  let mut toks := tokenize src 0
-  let mut ti := 0
-  for _ in [0:src.size + 1] do
-    for _ in [ti:toks.size] do
-      if toks[ti]!.start < pos then ti := ti + 1 else break
-    if ti > 0 && toks[ti - 1]!.stop > pos then
-      toks := toks.extract 0 (ti - 1) ++ tokenize src pos
-      ti := ti - 1
-    match parseNextTok src toks ti with
-    | .empty => finished := true; break
-    | .error msg tail =>
-      out := out ++ renderErr { code := SQLITE_ERROR, msg }
-      if tail ≤ pos then
-        -- no progress: skip to after the next ';'
-        let mut i := pos
-        for _ in [pos:src.size] do
-          if src[i]! != 59 then i := i + 1 else break
-        pos := if i < src.size then i + 1 else src.size
-      else pos := tail
-    | .ok stmt tail =>
-      pos := tail
-      match ← (runStmt stmt).run.run ctx with
-      | (.ok (.ok rows), ctx') =>
-        ctx := ctx'
-        for r in rows do out := out ++ renderRow r
-      | (.ok (.error e), ctx') | (.error e, ctx') =>
-        ctx := ctx'
-        for r in e.printed do out := out ++ renderRow r
-        out := out ++ renderErr e
-        if let some t := e.tail then pos := t
-  if !finished then Nd.any fun _ => False else return out
+  -- the clock before the first statement is never read (each statement picks its own)
+  let clockMs ← Nd.any fun (_ : Int) => True
+  let st ← forIn (List.range (src.size + 1))
+    ({ out := ByteArray.empty, ctx := ({ db := {}, clockMs } : DCtx), toks := tokenize src 0 } : DriverState DCtx)
+    fun _ st => driverStep src (fun stmt ctx => (runStmt stmt).run.run ctx) st
+  if !st.finished then Nd.any fun _ => False else return st.out
 
 /-- `out` is an output of the script `src` (the denotation). -/
 def Derives (src out : ByteArray) : Prop := out ∈ runScript src
