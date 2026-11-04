@@ -458,6 +458,26 @@ def eqKey (coll : Coll) (v : Value) : Option String :=
 def mergeAsc (a b : Array Nat) : Array Nat :=
   (a.toList ++ b.toList).mergeSort (· ≤ ·) |>.toArray
 
+/-- An expression without function calls, subqueries, RAISE or parameters
+    of windows: its value depends on the row only, and evaluating it changes
+    no state (so a repeated evaluation can be remembered). -/
+def pureExprK (k : Nat) (e : Expr) : Bool :=
+  match k with
+  | 0 => false
+  | k + 1 =>
+  match e with
+  | .lit _ | .col .. | .dqcol _ => true
+  | .unop _ a | .collate a _ | .cast a _ | .isNull _ a => pureExprK k a
+  | .binop _ a b => pureExprK k a && pureExprK k b
+  | .between _ a b c => pureExprK k a && pureExprK k b && pureExprK k c
+  | .inList _ a l => pureExprK k a && l.all (pureExprK k)
+  | .like _ _ a b c => pureExprK k a && pureExprK k b && c.all (pureExprK k)
+  | .case_ b ws el => b.all (pureExprK k) && ws.all (fun (x, y) => pureExprK k x && pureExprK k y) && el.all (pureExprK k)
+  | .row l => l.all (pureExprK k)
+  | _ => false
+
+def pureExpr (e : Expr) : Bool := pureExprK syntaxFuel e
+
 /-- `unistrFunc`: `\\` is a backslash; `\XXXX`, `\uXXXX`, `\+XXXXXX` and
     `\UXXXXXXXX` are code points (sqlite3AppendOneUtf8Character); none: an
     invalid escape. The scan for the next backslash stops at a NUL byte
@@ -1309,8 +1329,8 @@ def scalarFn (fuel : Nat) (n : Name) (vs : List Value) (colls : List (Option (Co
         let pat := (textOf a1).toList
         let rep := (textOf vs[2]!).toList
         if pat.isEmpty then return .text (textOf a0)
-        let rec goRep (s : List UInt8) (fuel : Nat) : List UInt8 :=
-          match fuel with
+        let rec goRep (s : List UInt8) (k : Nat) : List UInt8 :=
+          match k with
           | 0 => s
           | f + 1 =>
             match s with
@@ -1684,14 +1704,25 @@ def evalFromWhereS {σ : Type} (fuel : Nat) (q : QEnv) (f : FromItem) (where_ : 
         let mut c := cur
         for h : j in [0:r.size] do c := c.set! (offsets[k]! + j) r[j]
         return c
-      -- a leaf's own conjuncts on one of its rows
-      let localHolds (k : Nat) (r : Array Cur) : M Bool := do
+      -- a leaf's own conjuncts on one of its rows: the pure ones (`pureExpr`:
+      -- deterministic, no effect on the state), then the others
+      let localPure (k : Nat) (r : Array Cur) : M Bool := do
         let qr := frameQ (place empty k r)
         for (loc, e) in locOf do
-          if loc == some k then
+          if loc == some k && pureExpr e then
             if hasAgg e then err "misuse of aggregate function"
             if !(← condHolds fuel qr e) then return false
         return true
+      let localImpure (k : Nat) (r : Array Cur) : M Bool := do
+        let qr := frameQ (place empty k r)
+        for (loc, e) in locOf do
+          if loc == some k && !pureExpr e then
+            if hasAgg e then err "misuse of aggregate function"
+            if !(← condHolds fuel qr e) then return false
+        return true
+      let localHolds (k : Nat) (r : Array Cur) : M Bool := do
+        if !(← localPure k r) then return false
+        localImpure k r
       -- the nesting order of the loops (depth → leaf). It is the plan's choice
       -- (SQLite reorders inner joins); the executable keeps FROM's order, or,
       -- when the cross product is large, nests greedily: next the leaf that
@@ -1702,18 +1733,25 @@ def evalFromWhereS {σ : Type} (fuel : Nat) (q : QEnv) (f : FromItem) (where_ : 
       let rawSize (k : Nat) : Nat := ((leafRows[k]!).map (·.size)).getD 0
       let product := (List.range nL).foldl (fun p k => p * max 1 (rawSize k)) 1
       let reorder := !hasFn && nL > 2 && product > 1000000
-      -- per leaf of a table: its rows' own conjuncts, once evaluated (all of
-      -- them at once when the loops are reordered, to size the leaves)
-      let mut own : Array (Array (Option Bool)) :=
-        leafRows.map fun rs? => Array.replicate ((rs?.map (·.size)).getD 0) none
+      -- the leaves' sizes after their own conjuncts, to choose the nesting
+      -- order (itself a choice): computed on a copy of the state, restored
+      -- after, so that it has no effect but that choice; an error leaves the
+      -- raw size
+      let mut sizes : Array Nat := (Array.range nL).map rawSize
       if reorder then
+        let saved ← get
         for h : k in [0:nL] do
           if let some rs := leafRows[k]! then
-            let mut flags := #[]
-            for r in rs do flags := flags.push (some (← localHolds k r))
-            own := own.set! k flags
-      let ownNow := own
-      let size (k : Nat) : Nat := (ownNow[k]!.filter (· != some false)).size
+            let r ← tryCatch (do
+                let mut n := 0
+                for r in rs do
+                  if ← localHolds k r then n := n + 1
+                pure (some n))
+              (fun _ => pure none)
+            if let some n := r then sizes := sizes.set! k n
+        set saved
+      let sizesNow := sizes
+      let size (k : Nat) : Nat := sizesNow[k]!
       let nest0 : Array Nat := Id.run do
         if !reorder then return (Array.range nL)
         let mut chosen : Array Nat := #[]
@@ -1775,10 +1813,8 @@ def evalFromWhereS {σ : Type} (fuel : Nat) (q : QEnv) (f : FromItem) (where_ : 
         probes := probes.push found
       -- per leaf: its index (key → rows, and the rows without a key), once built
       let mut indexes : Array (Option (Std.HashMap String (Array Nat) × Array Nat)) := Array.replicate nL none
-      -- a leaf's own conjuncts (naming only its columns) are evaluated once
-      -- per row of the leaf, when the loop first reaches that row (unless
-      -- reordered), and remembered, as SQLite's plan tests a table's
-      -- constraints in its loop
+      -- a leaf's own conjuncts (naming only its columns) are tested when the
+      -- loop reaches one of its rows, before the others of that depth
       -- the rows of leaf `k` after the partial row `pre`
       let rowsAt (k : Nat) (pre : Array Cur) : M (Array (Array Cur)) := do
         match leafRows[k]! with
@@ -1796,6 +1832,10 @@ def evalFromWhereS {σ : Type} (fuel : Nat) (q : QEnv) (f : FromItem) (where_ : 
       -- before it (`step`'s state is returned with the error)
       let mut acc := init
       -- frames: depth, partial row, the leaf's rows (once computed), next index
+      -- per leaf of a table: the value of its pure own conjuncts on each row,
+      -- once evaluated (evaluating them again would give the same)
+      let mut own : Array (Array (Option Bool)) :=
+        leafRows.map fun rs? => Array.replicate ((rs?.map (·.size)).getD 0) none
       let mut stack : List (Nat × Array Cur × Option (Array (Nat × Array Cur)) × Nat) := [(0, empty, none, 0)]
       let mut failure : Option Err := none
       let mut finished := false
@@ -1835,11 +1875,12 @@ def evalFromWhereS {σ : Type} (fuel : Nat) (q : QEnv) (f : FromItem) (where_ : 
                 let next := (d, pre, some rows, i + 1) :: rest
                 -- the leaf's own conjuncts on this row (a table leaf)
                 let (ownOk, own') ← if leafRows[k]!.isSome then do
-                    match own[k]![j]? with
-                    | some (some b) => pure (b, own)
-                    | _ =>
-                      let b ← localHolds k row
-                      pure (b, own.modify k (·.set! j (some b)))
+                    let (p, own') ← match own[k]![j]? with
+                      | some (some b) => pure (b, own)
+                      | _ => do
+                        let b ← localPure k row
+                        pure (b, own.modify k (·.set! j (some b)))
+                    if !p then pure (false, own') else pure (← localImpure k row, own')
                   else pure (true, own)
                 if !ownOk then return .ok (some next, own', acc, indexes')
                 if ← check cur d (leafRows[k]!.isSome) then
