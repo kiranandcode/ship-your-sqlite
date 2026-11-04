@@ -123,6 +123,7 @@ structure SelectSim (ch : Choices) (fuel : Nat) : Prop where
   expandCols : ∀ (srcs : Array Src) (cols : List ResultCol), Sim ch (Sql.expandCols fuel srcs cols) (Den.expandCols srcs cols)
   runCore : ∀ (q : QEnv) (core : SelectCore) (orderBy : List OrderTerm) (noRows : Bool) (lim : Option Nat) (off : Nat) (stream : Bool), Sim ch (Sql.runCore fuel q core orderBy noRows lim off stream) (Den.runCore q core orderBy noRows lim off stream)
   runSelect : ∀ (q : QEnv) (sel : Select) (cap : Bool) (stream : Bool), Sim ch (Sql.runSelect fuel q sel cap stream) (Den.runSelect q sel cap stream)
+  limitOffset : ∀ (q : QEnv) (limit : Option Expr) (offset : Option Expr) (cap : Bool), Sim ch (Sql.limitOffset fuel q limit offset cap) (Den.limitOffset q limit offset cap)
   runSimple : ∀ (q : QEnv) (first : SelectCore) (orderBy : List OrderTerm) (limitN : Option Int) (offsetN : Int) (dirs : List (SortDir × NullsOrder)) (stream : Bool), Sim ch (Sql.runSimple fuel q first orderBy limitN offsetN dirs stream) (Den.runSimple q first orderBy limitN offsetN dirs stream)
   runUnionAll : ∀ (q : QEnv) (first : SelectCore) (rest : List (CompoundOp × SelectCore)) (limitN : Option Int) (offsetN : Int) (stream : Bool), Sim ch (Sql.runUnionAll fuel q first rest limitN offsetN stream) (Den.runUnionAll q first rest limitN offsetN stream)
   runCompound : ∀ (q : QEnv) (first : SelectCore) (rest : List (CompoundOp × SelectCore)) (orderBy : List OrderTerm) (dirs : List (SortDir × NullsOrder)), Sim ch (Sql.runCompound fuel q first rest orderBy dirs) (Den.runCompound q first rest orderBy dirs)
@@ -154,6 +155,7 @@ theorem selectSim_zero (ch : Choices) : SelectSim ch 0 where
   expandCols := by intros; unfold Sql.expandCols; exact Sim.outOfFuel _
   runCore := by intros; unfold Sql.runCore; exact Sim.outOfFuel _
   runSelect := by intros; unfold Sql.runSelect; exact Sim.outOfFuel _
+  limitOffset := by intros; unfold Sql.limitOffset; exact Sim.outOfFuel _
   runSimple := by intros; unfold Sql.runSimple; exact Sim.outOfFuel _
   runUnionAll := by intros; unfold Sql.runUnionAll; exact Sim.outOfFuel _
   runCompound := by intros; unfold Sql.runCompound; exact Sim.outOfFuel _

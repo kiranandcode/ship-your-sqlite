@@ -2554,17 +2554,7 @@ def runSelect (fuel : Nat) (q : QEnv) (sel : Select) (cap : Bool := false) (stre
     do
       let .mk with_ rec_ first rest orderBy limit offset := sel
       let q := { q with ctes := (with_.map fun (.mk n cols _ s) => (n, CteVal.defn cols s rec_)) ++ q.ctes }
-      let limitN ← match limit with
-        | some l => some <$> limitValue (← evalExpr fuel q l)
-        | none => pure none
-      -- a scalar subquery or EXISTS has LIMIT 1, or LIMIT (X<>0) for its own
-      -- LIMIT X (sqlite3CodeSubselect)
-      let limitN := if cap then (if limitN == some 0 then some 0 else some 1) else limitN
-      -- LIMIT 0 jumps past the loop before OFFSET is computed (computeLimitRegisters)
-      let offsetN ← match offset, limitN with
-        | _, some 0 => pure 0
-        | some o, _ => limitValue (← evalExpr fuel q o)
-        | none, _ => pure 0
+      let (limitN, offsetN) ← limitOffset fuel q limit offset cap
       let dirs := orderBy.map fun (.mk _ d nl) => (d, nl)
       let (cols, rows, applied) ←
         if rest.isEmpty then runSimple fuel q first orderBy limitN offsetN dirs stream
@@ -2577,6 +2567,24 @@ def runSelect (fuel : Nat) (q : QEnv) (sel : Select) (cap : Bool := false) (stre
         | some l => if l < 0 then rows else rows.extract 0 l.toNat
         | none => rows
       return (cols, rows)
+
+/-- LIMIT and OFFSET of a SELECT (computeLimitRegisters): a scalar subquery
+    or EXISTS (`cap`) has LIMIT 1, or LIMIT (X<>0) for its own LIMIT X
+    (sqlite3CodeSubselect); LIMIT 0 jumps past the loop before OFFSET is
+    computed. -/
+def limitOffset (fuel : Nat) (q : QEnv) (limit offset : Option Expr) (cap : Bool) : M (Option Int × Int) :=
+  match fuel with
+  | 0 => outOfFuel
+  | fuel + 1 => do
+    let limitN ← match limit with
+      | some l => some <$> limitValue (← evalExpr fuel q l)
+      | none => pure none
+    let limitN := if cap then (if limitN == some 0 then some 0 else some 1) else limitN
+    let offsetN ← match offset, limitN with
+      | _, some 0 => pure 0
+      | some o, _ => limitValue (← evalExpr fuel q o)
+      | none, _ => pure 0
+    return (limitN, offsetN)
 
 /-- A SELECT without compound (`runSelect`): its rows, and whether LIMIT and
     OFFSET were applied (in the loop, without ORDER BY). -/
