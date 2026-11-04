@@ -122,5 +122,10 @@ theorem selectSim (ch : Choices) : ∀ fuel, SelectSim ch fuel
     have ih := selectSim ch fuel
     {''']
 allf.append(',\n'.join(f'      {n} := sim_{n} ih' for n in names) + ' }')
-allf.append('\nend Sql.Den\n')
+# the functions of the block, simulated at every fuel (for `sim` in the blocks after)
+allf.append('')
+for l, n in zip(lines, names):
+    stmt = l.split(' : ', 1)[1]
+    allf.append(f'theorem Sim.{n} {{ch : Choices}} {{fuel : Nat}} :\n    {stmt} :=\n  (selectSim ch fuel).{n}\n')
+allf.append('end Sql.Den\n')
 open('Sql/Den/SimSelectAll.lean', 'w').write('\n'.join(allf))

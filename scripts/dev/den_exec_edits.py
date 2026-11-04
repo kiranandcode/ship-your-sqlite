@@ -9,20 +9,8 @@ def rep(a, b):
 
 s = s.replace('import Sql.Den.Domain', 'import Sql.Den.Resolve', 1)
 s = re.sub(r'(?<![.\w«])alias(?![\w»])', '«alias»', s)
-rep('''      -- OP_NewRowid: up to 100 random candidates in [1, 2^62]; none unused
-      -- is SQLITE_FULL
-      let c ← get
-      let mut k := c.prng
-      let mut found : Option Int := none
-      for _ in [0:100] do
-        k := k + 1
-        let cand : Int := (c.choices.rowid k % 2 ^ 62 : Nat) + 1
-        if !(t.rows.any (·.rowid == cand)) then found := some cand; break
-      set { c with prng := k }
-      match found with''', '''      -- OP_NewRowid: up to 100 random candidates in [1, 2^62] (any); none
-      -- unused is SQLITE_FULL
-      let cands ← anyOf fun (l : List Int) => l.length = 100 ∧ ∀ c ∈ l, 1 ≤ c ∧ c ≤ 2 ^ 62
-      match cands.find? (fun cand => !(t.rows.any (·.rowid == cand))) with''')
+rep('''  let cands ← draw fun ch seed => (List.range 100).map fun i => (((ch.rowid (seed + i + 1) % 2 ^ 62 : Nat) : Int) + 1)''',
+    '''  let cands ← anyOf fun (l : List Int) => l.length = 100 ∧ ∀ c ∈ l, 1 ≤ c ∧ c ≤ 2 ^ 62''')
 s = s.replace('← chooseOrder ', '← permA ')
 rep('''  -- json.c's parse cache lives for one statement
   modify fun c => { c with jsonCache := {} }''', '''  -- json.c's parse cache lives for one statement; 'now' is fixed for it

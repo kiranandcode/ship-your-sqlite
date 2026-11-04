@@ -234,50 +234,37 @@ def analyzeRows (t : Table) (only : Option Name) : D (List (Option String × Val
   return out
 
 
-/-- Insert one row (values for every column, rowid value or none), applying
-    conflict resolution. Returns the inserted row, or none if ignored. -/
-def insertRow (tname : Name) (vals : Array Value) (rowidV : Option Value) (ovr : Option ConflictRes) :
-    D (Option Row) := do
-  let t ← currentTable tname
-  let db ← getDb
-  let mut vals := vals
-  for h : i in [0:t.cols.size] do
-    vals := vals.set! i (← storeValue t i (vals[i]?.getD .null))
-  -- rowid
-  -- OP_NewRowid: one more than the largest rowid (which may be negative); 1 for an empty table
-  let maxRowid : Int := match t.rows.toList.map (·.rowid) with
-    | [] => 0
-    | r :: rs => rs.foldl max r
+/-- OP_NewRowid's random rowid, when the next one does not fit: up to 100
+    random candidates in [1, 2^62] (one draw of the oracle), the first unused;
+    none unused is SQLITE_FULL (as is AUTOINCREMENT). -/
+def randomRowid (t : Table) : D Int := do
+  if t.autoinc then err "database or disk is full" 13
+  let cands ← anyOf fun (l : List Int) => l.length = 100 ∧ ∀ c ∈ l, 1 ≤ c ∧ c ≤ 2 ^ 62
+  match cands.find? (fun cand => !(t.rows.any (·.rowid == cand))) with
+  | some cand => pure cand
+  | none => err "database or disk is full" 13
+
+
+/-- The rowid of a new row (OP_NewRowid): the given one (after INTEGER
+    affinity), else one more than the largest (`autoRowid`), else, when that
+    does not fit, a random unused one (an unspecified choice). -/
+def newRowid (t : Table) (db : Db) (rowidV : Option Value) : D Int := do
   let rid ← match rowidV with
     | some v =>
-      let v' := applyAffinity .integer v
-      match v' with
+      match applyAffinity .integer v with
       | .int i => pure i
-      | .null => pure (maxRowid + 1)
+      | .null => pure (maxRowidOf t + 1)
       | _ => err "datatype mismatch" SQLITE_MISMATCH
-    | none => pure (maxRowid + 1)
-  let seqOf (s : Schema) : Int :=
-    match s.findTable "sqlite_sequence" with
-    | some st => (st.rows.findSome? fun r => match r.vals[0]?, r.vals[1]? with
-        | some (Value.text n), some v => if nameEq (String.fromUTF8! n) t.name then some v.numeric.toInt else none
-        | _, _ => none).getD 0
-    | none => 0
+    | none => pure (maxRowidOf t + 1)
   let auto := rowidV.all (·.isNull)
-  let rid := if t.autoinc && auto then max (maxRowid + 1) (seqOf db.main + 1) else rid
-  -- the next rowid does not fit: AUTOINCREMENT fails; otherwise SQLite picks a
-  -- random unused rowid (an unspecified choice; the executable takes one)
-  let rid ← if auto && rid > maxI64 then do
-      if t.autoinc then err "database or disk is full" 13
-      -- OP_NewRowid: up to 100 random candidates in [1, 2^62] (any); none
-      -- unused is SQLITE_FULL
-      let cands ← anyOf fun (l : List Int) => l.length = 100 ∧ ∀ c ∈ l, 1 ≤ c ∧ c ≤ 2 ^ 62
-      match cands.find? (fun cand => !(t.rows.any (·.rowid == cand))) with
-      | some cand => pure cand
-      | none => err "database or disk is full" 13
-    else pure rid
-  if let some ci := t.rowidCol then vals := vals.set! ci (.int rid)
-  let mut row ← withGenerated t { rowid := rid, vals }
-  -- NOT NULL with conflict resolution
+  let rid := autoRowid t db auto rid
+  if auto && rid > maxI64 then randomRowid t else pure rid
+
+
+/-- NOT NULL constraints with conflict resolution on a new row: none when
+    the row is ignored. -/
+def notNullRow (t : Table) (row : Row) (ovr : Option ConflictRes) : D (Option Row) := do
+  let mut row := row
   for h : i in [0:t.cols.size] do
     let c := t.cols[i]
     if c.notNull && (row.vals[i]?.getD .null).isNull then
@@ -288,8 +275,13 @@ def insertRow (tname : Name) (vals : Array Value) (rowidV : Option Value) (ovr :
         | some d => row := { row with vals := row.vals.set! i (← storeValue t i (← evalExpr {} d)) }
         | none => err s!"NOT NULL constraint failed: {t.name}.{c.name}" SQLITE_CONSTRAINT_NOTNULL
       | res => throwConflict res s!"NOT NULL constraint failed: {t.name}.{c.name}" SQLITE_CONSTRAINT_NOTNULL
-  if !(← checkRow t row ovr) then return none
-  -- uniqueness: the rowid, then the unique keys
+  return some row
+
+
+/-- Uniqueness of a new row: the rowid, then the unique keys, with conflict
+    resolution (REPLACE removes the conflicting rows): the table's rows to
+    keep, none when the row is ignored. -/
+def uniqueRows (t : Table) (db : Db) (row : Row) (rid : Int) (ovr : Option ConflictRes) : D (Option (Array Row)) := do
   let mut rows := t.rows
   if !t.withoutRowid then
     if rows.any (·.rowid == rid) then
@@ -306,20 +298,26 @@ def insertRow (tname : Name) (vals : Array Value) (rowidV : Option Value) (ovr :
       | .ignore => return none
       | .replace => rows := rows.filter (fun r => !keyEq k (keyOf r k) key)
       | res => throwConflict res (uniqueMsg t k) (if k.isPk then SQLITE_CONSTRAINT_PRIMARYKEY else SQLITE_CONSTRAINT_UNIQUE)
-  let t' := { t with rows := sortRows t (rows.push row) }
-  modifyMain fun s => s.setTable t'
-  if t.autoinc then
-    modifyMain fun s =>
-      match s.findTable "sqlite_sequence" with
-      | none => s
-      | some st =>
-        let cur := seqOf s
-        let mine (r : Row) : Bool := match r.vals[0]? with
-          | some (Value.text n) => nameEq (String.fromUTF8! n) t.name | _ => false
-        let rows := if st.rows.any mine then
-            st.rows.map fun r => if mine r then { r with vals := r.vals.set! 1 (.int (max cur rid)) } else r
-          else st.rows.push { rowid := (st.rows.foldl (fun m r => max m r.rowid) 0) + 1, vals := #[.ofString t.name, .int (max cur rid)] }
-        s.setTable { st with rows }
+  return some rows
+
+
+/-- Insert one row (values for every column, rowid value or none), applying
+    conflict resolution. Returns the inserted row, or none if ignored. -/
+def insertRow (tname : Name) (vals : Array Value) (rowidV : Option Value) (ovr : Option ConflictRes) :
+    D (Option Row) := do
+  let t ← currentTable tname
+  let db ← getDb
+  let mut vals := vals
+  for h : i in [0:t.cols.size] do
+    vals := vals.set! i (← storeValue t i (vals[i]?.getD .null))
+  let rid ← newRowid t db rowidV
+  if let some ci := t.rowidCol then vals := vals.set! ci (.int rid)
+  let row0 ← withGenerated t { rowid := rid, vals }
+  let some row ← notNullRow t row0 ovr | return none
+  if !(← checkRow t row ovr) then return none
+  let some rows ← uniqueRows t db row rid ovr | return none
+  modifyMain fun s => s.setTable { t with rows := sortRows t (rows.push row) }
+  if t.autoinc then modifyMain (bumpSeq t rid)
   return some row
 
 

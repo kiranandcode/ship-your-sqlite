@@ -251,6 +251,22 @@ theorem mapM_list {α β : Type} {ch : Choices} (xs : List α) {f : α → M β}
     simp only [List.mapM_cons]
     exact bind (h x) fun a => bind ih fun as => pure (a :: as)
 
+theorem forM_list {α : Type} {ch : Choices} (xs : List α) {f : α → M PUnit} {g : α → D PUnit}
+    (h : ∀ a, Sim ch (f a) (g a)) : Sim ch (xs.forM f) (xs.forM g) := by
+  induction xs with
+  | nil => exact pure _
+  | cons x xs ih => exact bind (h x) fun _ => ih
+
+theorem forM_list_eq {α : Type} {ch : Choices} {xs ys : List α} {f : α → M PUnit} {g : α → D PUnit}
+    (hxs : xs = ys) (h : ∀ a, Sim ch (f a) (g a)) : Sim ch (xs.forM f) (ys.forM g) :=
+  hxs ▸ forM_list xs h
+
+theorem forM_option {α : Type} {ch : Choices} (o : Option α) {f : α → M PUnit} {g : α → D PUnit}
+    (h : ∀ a, Sim ch (f a) (g a)) : Sim ch (o.forM f) (o.forM g) := by
+  cases o with
+  | none => exact pure _
+  | some a => exact h a
+
 theorem mapM_array {α β : Type} {ch : Choices} (xs : Array α) {f : α → M β} {g : α → D β}
     (h : ∀ a, Sim ch (f a) (g a)) : Sim ch (xs.mapM f) (xs.mapM g) := by
   simp only [Array.mapM_eq_mapM_toList]
@@ -264,6 +280,12 @@ theorem foldlM_list {α β : Type} {ch : Choices} (xs : List α) (b : β)
   | cons x xs ih =>
     simp only [List.foldlM_cons]
     exact bind (h b x) fun b => ih b
+
+theorem filterMapM_array {α β : Type} {ch : Choices} (xs : Array α) {f : α → M (Option β)} {g : α → D (Option β)}
+    (h : ∀ a, Sim ch (f a) (g a)) : Sim ch (xs.filterMapM f) (xs.filterMapM g) := by
+  unfold Array.filterMapM
+  rw [← Array.foldlM_toList, ← Array.foldlM_toList]
+  exact foldlM_list _ _ fun b a => bind (h a) fun o => by cases o <;> exact pure _
 
 /-! ### Loops over collections equal up to unfolding
 
@@ -618,7 +640,11 @@ macro_rules
       -- the interpreter's match (or if); the hypothesis it gives rewrites
       -- the denotation's (up to defeq: their matchers are distinct constants)
       | (split <;> (try simp only [*]) <;> (try (rename_i h; first | sim_rw_match h | erw [h]))
-          <;> (try simp only [])))
+          <;> (try simp only []))
+      | (with_reducible apply Sim.forM_list; intro _)
+      | (with_reducible apply Sim.forM_option; intro _)
+      | ((with_reducible apply Sim.forM_list_eq); rfl; intro _)
+      | (with_reducible apply Sim.filterMapM_array; intro _))
 
 /-- A simulation proof by lockstep. Last, the goals where the two sides'
     matches were split apart (after the interpreter's catch-all case the

@@ -56,4 +56,152 @@ theorem selectSim (ch : Choices) : ∀ fuel, SelectSim ch fuel
       runUnionAll := sim_runUnionAll ih,
       runCompound := sim_runCompound ih }
 
+theorem Sim.evalExpr {ch : Choices} {fuel : Nat} :
+    ∀ (q : QEnv) (e : Expr), Sim ch (Sql.evalExpr fuel q e) (Den.evalExpr q e) :=
+  (selectSim ch fuel).evalExpr
+
+theorem Sim.compareRows {ch : Choices} {fuel : Nat} :
+    ∀ (q : QEnv) (op : BinOp) (xs : List Expr) (ys : List Expr), Sim ch (Sql.compareRows fuel q op xs ys) (Den.compareRows q op xs ys) :=
+  (selectSim ch fuel).compareRows
+
+theorem Sim.valueOf {ch : Choices} {fuel : Nat} :
+    ∀ (q : QEnv) (r0 : Resolved), Sim ch (Sql.valueOf fuel q r0) (Den.valueOf q r0) :=
+  (selectSim ch fuel).valueOf
+
+theorem Sim.evalAgg {ch : Choices} {fuel : Nat} :
+    ∀ (q : QEnv) (n : Name) (distinct : Bool) (args : List Expr) (star : Bool) (ob : List OrderTerm) (filter : Option Expr), Sim ch (Sql.evalAgg fuel q n distinct args star ob filter) (Den.evalAgg q n distinct args star ob filter) :=
+  (selectSim ch fuel).evalAgg
+
+theorem Sim.aggFinish {ch : Choices} {fuel : Nat} :
+    ∀ (q : QEnv) (n : Name) (star : Bool) (args : List Expr) (coll : Coll) (vals : Array (List Value)) (jflags : Option (Array (List Bool))), Sim ch (Sql.aggFinish fuel q n star args coll vals jflags) (Den.aggFinish q n star args coll vals jflags) :=
+  (selectSim ch fuel).aggFinish
+
+theorem Sim.callAgg {ch : Choices} {fuel : Nat} :
+    ∀ (_q : QEnv) (name : String) (vals : Array (List Value)) (flags : List Bool) (rowFlags : Option (Array (List Bool))), Sim ch (Sql.callAgg fuel _q name vals flags rowFlags) (Den.callAgg _q name vals flags rowFlags) :=
+  (selectSim ch fuel).callAgg
+
+theorem Sim.argIsJson {ch : Choices} {fuel : Nat} :
+    ∀ (q : QEnv) (a : Expr), Sim ch (Sql.argIsJson fuel q a) (Den.argIsJson q a) :=
+  (selectSim ch fuel).argIsJson
+
+theorem Sim.callFn {ch : Choices} {fuel : Nat} :
+    ∀ (q : QEnv) (n : Name) (args : List Expr) (distinct : Bool), Sim ch (Sql.callFn fuel q n args distinct) (Den.callFn q n args distinct) :=
+  (selectSim ch fuel).callFn
+
+theorem Sim.callFnST {ch : Choices} {fuel : Nat} :
+    ∀ (q : QEnv) (n : Name) (args : List Expr) (_distinct : Bool), Sim ch (Sql.callFnST fuel q n args _distinct) (Den.callFnST q n args _distinct) :=
+  (selectSim ch fuel).callFnST
+
+theorem Sim.condJump {ch : Choices} {fuel : Nat} :
+    ∀ (q : QEnv) (e : Expr) (sense : Bool) (jn : Bool), Sim ch (Sql.condJump fuel q e sense jn) (Den.condJump q e sense jn) :=
+  (selectSim ch fuel).condJump
+
+theorem Sim.condHolds {ch : Choices} {fuel : Nat} :
+    ∀ (q : QEnv) (e : Expr), Sim ch (Sql.condHolds fuel q e) (Den.condHolds q e) :=
+  (selectSim ch fuel).condHolds
+
+theorem Sim.evalExprST {ch : Choices} {fuel : Nat} :
+    ∀ (q : QEnv) (e : Expr), Sim ch (Sql.evalExprST fuel q e) (Den.evalExprST q e) :=
+  (selectSim ch fuel).evalExprST
+
+theorem Sim.resolveWindow {ch : Choices} {fuel : Nat} :
+    ∀ (windows : List (Name × Window)) (w : Window), Sim ch (Sql.resolveWindow fuel windows w) (Den.resolveWindow windows w) :=
+  (selectSim ch fuel).resolveWindow
+
+theorem Sim.computeWindow {ch : Choices} {fuel : Nat} :
+    ∀ (ctxs : Array QEnv) (windows : List (Name × Window)) (call : Expr), Sim ch (Sql.computeWindow fuel ctxs windows call) (Den.computeWindow ctxs windows call) :=
+  (selectSim ch fuel).computeWindow
+
+theorem Sim.windowRowValue {ch : Choices} {fuel : Nat} :
+    ∀ (ctxs : Array QEnv) (name : String) (n : Name) (args : List Expr) (star : Bool) (ord : List OrderTerm) (frame : Option Frame) (okeys : Array (Array Value)) (ocolls : List Coll) (odirs : List (SortDir × NullsOrder)) (argv : Array (List Value)) (pass : Array Bool) (p : Array Nat) (pi : PeerInfo) (j : Nat), Sim ch (Sql.windowRowValue fuel ctxs name n args star ord frame okeys ocolls odirs argv pass p pi j) (Den.windowRowValue ctxs name n args star ord frame okeys ocolls odirs argv pass p pi j) :=
+  (selectSim ch fuel).windowRowValue
+
+theorem Sim.windowPartition {ch : Choices} {fuel : Nat} :
+    ∀ (ctxs : Array QEnv) (name : String) (n : Name) (args : List Expr) (star : Bool) (ord : List OrderTerm) (frame : Option Frame) (okeys : Array (Array Value)) (ocolls : List Coll) (odirs : List (SortDir × NullsOrder)) (argv : Array (List Value)) (pass : Array Bool) (p : Array Nat) (result : Array Value), Sim ch (Sql.windowPartition fuel ctxs name n args star ord frame okeys ocolls odirs argv pass p result) (Den.windowPartition ctxs name n args star ord frame okeys ocolls odirs argv pass p result) :=
+  (selectSim ch fuel).windowPartition
+
+theorem Sim.evalFromWhereS {ch : Choices} {fuel : Nat} :
+    ∀ {σ : Type} (q : QEnv) (f : FromItem) (where_ : Option Expr) (aliases : List (Name × Expr)) (init : σ) (step : σ → Array Src → Array Cur → M (σ × Bool)) (step' : σ → Array Src → Array Cur → D (σ × Bool)), (∀ a srcs cur, Sim ch (step a srcs cur) (step' a srcs cur)) → Sim ch (Sql.evalFromWhereS fuel q f where_ aliases init step) (joinRun (Den.joinPrepare q f where_ aliases) (Den.joinRowsAt q) (Den.joinCheck q) init step') :=
+  (selectSim ch fuel).evalFromWhereS
+
+theorem Sim.evalFromWhere {ch : Choices} {fuel : Nat} :
+    ∀ (q : QEnv) (f : FromItem) (where_ : Option Expr) (aliases : List (Name × Expr)), Sim ch (Sql.evalFromWhere fuel q f where_ aliases) (Den.evalFromWhere q f where_ aliases) :=
+  (selectSim ch fuel).evalFromWhere
+
+theorem Sim.namedSource {ch : Choices} {fuel : Nat} :
+    ∀ (q : QEnv) (sch : Option Name) (n : Name) («alias» : Name), Sim ch (Sql.namedSource fuel q sch n «alias») (Den.namedSource q sch n «alias») :=
+  (selectSim ch fuel).namedSource
+
+theorem Sim.cteRows {ch : Choices} {fuel : Nat} :
+    ∀ (q : QEnv) (n : Name) (cv0 : CteVal), Sim ch (Sql.cteRows fuel q n cv0) (Den.cteRows q n cv0) :=
+  (selectSim ch fuel).cteRows
+
+theorem Sim.evalFrom {ch : Choices} {fuel : Nat} :
+    ∀ (q : QEnv) (f0 : FromItem), Sim ch (Sql.evalFrom fuel q f0) (Den.evalFrom q f0) :=
+  (selectSim ch fuel).evalFrom
+
+theorem Sim.viewCols {ch : Choices} {fuel : Nat} :
+    Sim ch (Sql.viewCols fuel) Den.viewCols :=
+  (selectSim ch fuel).viewCols
+
+theorem Sim.tableFnSrc {ch : Choices} {fuel : Nat} :
+    ∀ (n : Name) («alias» : Option Name), Sim ch (Sql.tableFnSrc fuel n «alias») (Den.tableFnSrc n «alias») :=
+  (selectSim ch fuel).tableFnSrc
+
+theorem Sim.tableFunction {ch : Choices} {fuel : Nat} :
+    ∀ (n : Name) (argsJ : List (Value × Bool)), Sim ch (Sql.tableFunction fuel n argsJ) (Den.tableFunction n argsJ) :=
+  (selectSim ch fuel).tableFunction
+
+theorem Sim.expandCols {ch : Choices} {fuel : Nat} :
+    ∀ (srcs : Array Src) (cols : List ResultCol), Sim ch (Sql.expandCols fuel srcs cols) (Den.expandCols srcs cols) :=
+  (selectSim ch fuel).expandCols
+
+theorem Sim.runCore {ch : Choices} {fuel : Nat} :
+    ∀ (q : QEnv) (core : SelectCore) (orderBy : List OrderTerm) (noRows : Bool) (lim : Option Nat) (off : Nat) (stream : Bool), Sim ch (Sql.runCore fuel q core orderBy noRows lim off stream) (Den.runCore q core orderBy noRows lim off stream) :=
+  (selectSim ch fuel).runCore
+
+theorem Sim.runStream {ch : Choices} {fuel : Nat} :
+    ∀ (q : QEnv) (distinct : Bool) (cols : List ResultCol) (f : FromItem) (where_ : Option Expr) (aliases0 : List (Name × Expr)) (lim : Option Nat) (off : Nat) (stream : Bool), Sim ch (Sql.runStream fuel q distinct cols f where_ aliases0 lim off stream) (Den.runStream q distinct cols f where_ aliases0 lim off stream) :=
+  (selectSim ch fuel).runStream
+
+theorem Sim.runGrouped {ch : Choices} {fuel : Nat} :
+    ∀ (q : QEnv) (distinct : Bool) (cols : List ResultCol) (from_ : Option FromItem) (where_ : Option Expr) (groupBy : List Expr) (having : Option Expr) (windows : List (Name × Window)) (orderBy : List OrderTerm) (noRows : Bool) (lim : Option Nat) (off : Nat) (aliases0 : List (Name × Expr)), Sim ch (Sql.runGrouped fuel q distinct cols from_ where_ groupBy having windows orderBy noRows lim off aliases0) (Den.runGrouped q distinct cols from_ where_ groupBy having windows orderBy noRows lim off aliases0) :=
+  (selectSim ch fuel).runGrouped
+
+theorem Sim.runRows {ch : Choices} {fuel : Nat} :
+    ∀ (q : QEnv) (distinct : Bool) (srcs : Array Src) (rcols : List ResultCol) (kept : Array (Array Cur)) (cmeta : Array ColMeta) (groupBy : List Expr) (having : Option Expr) (windows : List (Name × Window)) (orderBy : List OrderTerm) (lim : Option Nat) (off : Nat), Sim ch (Sql.runRows fuel q distinct srcs rcols kept cmeta groupBy having windows orderBy lim off) (Den.runRows q distinct srcs rcols kept cmeta groupBy having windows orderBy lim off) :=
+  (selectSim ch fuel).runRows
+
+theorem Sim.windowOut {ch : Choices} {fuel : Nat} :
+    ∀ (ctxs : Array QEnv) (windows : List (Name × Window)) (wcalls : List Expr) (exprs : List Expr) (obExprs : List Expr) (distinct : Bool) (cmeta : Array ColMeta) (lim : Option Nat) (off : Nat), Sim ch (Sql.windowOut fuel ctxs windows wcalls exprs obExprs distinct cmeta lim off) (Den.windowOut ctxs windows wcalls exprs obExprs distinct cmeta lim off) :=
+  (selectSim ch fuel).windowOut
+
+theorem Sim.aggCtxs {ch : Choices} {fuel : Nat} :
+    ∀ (q : QEnv) (srcs : Array Src) (kept : Array (Array Cur)) (exprs : List Expr) (aliases : List (Name × Expr)) (groupBy : List Expr) (having : Option Expr), Sim ch (Sql.aggCtxs fuel q srcs kept exprs aliases groupBy having) (Den.aggCtxs q srcs kept exprs aliases groupBy having) :=
+  (selectSim ch fuel).aggCtxs
+
+theorem Sim.groupCtx {ch : Choices} {fuel : Nat} :
+    ∀ (q : QEnv) (srcs : Array Src) (grp : Array (Array Cur)) (minmax : List (Bool × Bool × Expr)) (aliases : List (Name × Expr)) (having : Option Expr), Sim ch (Sql.groupCtx fuel q srcs grp minmax aliases having) (Den.groupCtx q srcs grp minmax aliases having) :=
+  (selectSim ch fuel).groupCtx
+
+theorem Sim.runSelect {ch : Choices} {fuel : Nat} :
+    ∀ (q : QEnv) (sel : Select) (cap : Bool) (stream : Bool), Sim ch (Sql.runSelect fuel q sel cap stream) (Den.runSelect q sel cap stream) :=
+  (selectSim ch fuel).runSelect
+
+theorem Sim.limitOffset {ch : Choices} {fuel : Nat} :
+    ∀ (q : QEnv) (limit : Option Expr) (offset : Option Expr) (cap : Bool), Sim ch (Sql.limitOffset fuel q limit offset cap) (Den.limitOffset q limit offset cap) :=
+  (selectSim ch fuel).limitOffset
+
+theorem Sim.runSimple {ch : Choices} {fuel : Nat} :
+    ∀ (q : QEnv) (first : SelectCore) (orderBy : List OrderTerm) (limitN : Option Int) (offsetN : Int) (dirs : List (SortDir × NullsOrder)) (stream : Bool), Sim ch (Sql.runSimple fuel q first orderBy limitN offsetN dirs stream) (Den.runSimple q first orderBy limitN offsetN dirs stream) :=
+  (selectSim ch fuel).runSimple
+
+theorem Sim.runUnionAll {ch : Choices} {fuel : Nat} :
+    ∀ (q : QEnv) (first : SelectCore) (rest : List (CompoundOp × SelectCore)) (limitN : Option Int) (offsetN : Int) (stream : Bool), Sim ch (Sql.runUnionAll fuel q first rest limitN offsetN stream) (Den.runUnionAll q first rest limitN offsetN stream) :=
+  (selectSim ch fuel).runUnionAll
+
+theorem Sim.runCompound {ch : Choices} {fuel : Nat} :
+    ∀ (q : QEnv) (first : SelectCore) (rest : List (CompoundOp × SelectCore)) (orderBy : List OrderTerm) (dirs : List (SortDir × NullsOrder)), Sim ch (Sql.runCompound fuel q first rest orderBy dirs) (Den.runCompound q first rest orderBy dirs) :=
+  (selectSim ch fuel).runCompound
+
 end Sql.Den
