@@ -115,6 +115,19 @@ theorem chooseNest {ch : Choices} (condC : QEnv → Expr → M Bool) (q : QEnv) 
     exact List.isPerm_iff.mp h
   · exact List.Perm.refl _
 
+/-- The order of a depth's conjuncts the oracle picks is one of the
+    denotation's (a permutation of the index-first order, itself one). -/
+theorem chooseConjOrder {ch : Choices} (env : Env) (l : List Expr) :
+    Sim ch (Sql.chooseConjOrder env l) (Den.perm l) where
+  exhausted_mono := fun c _ h => h
+  choices_eq := fun _ h => h
+  sound := fun c _ _ => by
+    show (Except.ok (permute (c.choices.order c.orderPos) (indexFirst env l).toArray).toList,
+      proj { c with orderPos := c.orderPos + 1 }) ∈ (Den.perm l).outcomes (proj c)
+    refine mem_outcomes_lift.mpr ⟨_, (permute_perm _ _).trans ?_, rfl⟩
+    simp only [indexFirst]
+    exact List.filter_append_perm _ l
+
 end Sim
 
 /-- The interpreter's plan of a join is one of the denotation's. -/
@@ -147,8 +160,6 @@ theorem sim_evalFromWhereS {ch : Choices} {fuel : Nat} (ih : SelectSim ch fuel) 
     sim
   · intro cur d
     unfold Den.joinCheck
-    simp only []
-    apply Sim.perm_self
     sim
   · rcases r with ⟨acc, more, failure⟩
     exact Sim.pure _

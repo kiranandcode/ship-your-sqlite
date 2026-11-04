@@ -304,23 +304,33 @@ theorem ret_condHolds (q : QEnv) (sc : Scope) (hf : q.env.frames[0]? = some sc) 
   rw [Den.condHolds.eq_def]
   exact Ret.bind (ret_condJump q sc hf k e c h false true) (Ret.pure _)
 
-/-- The denotation's check of a depth rejects a row, without effect, when
-    one of the depth's conjuncts (with no aggregate) is false on it: the
-    order that tests it first. -/
-theorem joinCheck_rejects (q : QEnv) (p : JoinPlan) (cur : Array Cur) (d : Nat) (e : Expr)
-    (he : e ∈ (p.byDepth.filter (·.1 == d)).map (·.2)) (hagg : hasAgg e = false)
-    (hfalse : Ret (Den.condHolds { q with env := { q.env with frames := { srcs := p.srcs, cur, aliases := p.aliases } :: q.env.frames, group := none } } e) false) :
-    ∀ s, (Except.ok false, s) ∈ (Den.joinCheck q p cur d).outcomes s := by
-  intro s
-  rw [Den.joinCheck.eq_def]
-  simp only []
-  rw [Sim.mem_outcomes_bind]
-  obtain ⟨l1, l2, hl⟩ := List.append_of_mem he
-  refine ⟨(.ok (e :: (l1 ++ l2)), s),
-    Sim.mem_outcomes_lift.mpr ⟨_, hl ▸ List.perm_middle.symm, rfl⟩, ?_⟩
-  simp only [List.forIn_cons, hagg, Bool.false_eq_true, if_false]
-  refine (?_ : Ret _ false) s
-  exact Ret.bind (Ret.bind (Ret.bind hfalse (Ret.pure _)) (Ret.pure _)) (Ret.pure _)
+/-- The loop of a depth's check over conjuncts `es`, when the automatic
+    index rules the row out on them: each compiled conjunct before the
+    rejecting one holds (and has no effect), the rejecting one ends the loop. -/
+theorem loop_prefix (cur : Array Cur) (env0 : Env)
+    (body : Expr → Option Bool × Unit → D (ForInStep (Option Bool × Unit)))
+    (hb : ∀ e c, compileConj env0 e = some c →
+      Ret (body e (none, ())) (if c.jump cur false true then .done (some false, ()) else .yield (none, ()))) :
+    ∀ es : List Expr, skipPrefix cur (es.map (compileConj env0)) = true →
+      Ret (forIn es (none, ()) body) (some false, ()) := by
+  intro es
+  induction es with
+  | nil => intro h; simp [skipPrefix] at h
+  | cons e es ih =>
+    intro h
+    simp only [List.map_cons] at h
+    rcases hc : compileConj env0 e with _ | c
+    · rw [hc] at h; simp [skipPrefix] at h
+    · rw [hc] at h
+      simp only [skipPrefix, Bool.or_eq_true] at h
+      simp only [List.forIn_cons]
+      refine Ret.bind (hb e c hc) ?_
+      by_cases hj : c.jump cur false true = true
+      · simp only [hj, if_true]
+        exact Ret.pure _
+      · simp only [hj] at h ⊢
+        simp only [Bool.false_eq_true, false_or] at h
+        exact ih h
 
 /-! ### The scope's current row does not change what the conjuncts compile to -/
 
@@ -393,24 +403,35 @@ end SameScope
 theorem skipRow_rejects (q : QEnv) (p : JoinPlan) (d : Nat) (cur : Array Cur)
     (hskip : skipRow (p.pconds { q.env with frames := p.scope p.empty :: q.env.frames, group := none }) d cur = true) :
     ∀ s, (Except.ok false, s) ∈ (Den.joinCheck q p cur d).outcomes s := by
-  unfold skipRow at hskip
-  obtain ⟨c, hc, hj⟩ := List.any_eq_true.mp hskip
-  unfold JoinPlan.pconds at hc
-  rw [Array.getElem?_map, Array.getElem?_range] at hc
+  intro s
+  have hsame := sameScope_cur q.env p.srcs p.empty cur p.aliases q.env.frames
+  unfold skipRow JoinPlan.pconds at hskip
+  rw [Array.getElem?_map] at hskip
+  have hskip' : skipPrefix cur ((p.orders[d]?.getD []).map
+      (compileConj { q.env with frames := p.scope p.empty :: q.env.frames, group := none })) = true := by
+    cases h : p.orders[d]? with
+    | none => rw [h] at hskip; simp [skipPrefix] at hskip
+    | some es => rw [h] at hskip; exact hskip
+  rw [Den.joinCheck.eq_def]
+  simp only []
+  refine (?_ : Ret _ false) s
+  refine Ret.bind (loop_prefix cur _ _ ?_ _ hskip') (Ret.pure _)
+  intro e c hc
+  unfold compileConj at hc
   split at hc
-  · simp only [Option.map_some, Option.getD_some, List.mem_filterMap] at hc
-    obtain ⟨⟨l, e⟩, hx, hg⟩ := hc
-    split at hg
-    · contradiction
-    · rename_i hagg
-      have he : e ∈ (p.byDepth.filter (·.1 == d)).map (·.2) := List.mem_map.mpr ⟨(l, e), hx, rfl⟩
-      have hsame := sameScope_cur q.env p.srcs p.empty cur p.aliases q.env.frames
-      simp only [JoinPlan.scope] at hg
-      rw [hsame.compileCondK] at hg
-      have hr := ret_condHolds { q with env := { q.env with frames := { srcs := p.srcs, cur, aliases := p.aliases } :: q.env.frames, group := none } }
-        { srcs := p.srcs, cur, aliases := p.aliases } rfl syntaxFuel e c hg
-      simp only [hj, Bool.not_true] at hr
-      exact joinCheck_rejects q p cur d e he (by simpa using hagg) hr
-  · simp at hc
+  · contradiction
+  · rename_i hagg
+    simp only [Bool.not_eq_true] at hagg
+    simp only [hagg, Bool.false_eq_true, if_false]
+    simp only [JoinPlan.scope] at hc
+    rw [hsame.compileCondK] at hc
+    refine Ret.bind (ret_condHolds { q with env := { q.env with frames := { srcs := p.srcs, cur, aliases := p.aliases } :: q.env.frames, group := none } }
+      { srcs := p.srcs, cur, aliases := p.aliases } rfl syntaxFuel e c hc) ?_
+    by_cases hj : c.jump cur false true = true
+    · simp only [hj, Bool.not_true, Bool.not_false, if_true]
+      exact Ret.pure _
+    · simp only [Bool.not_eq_true] at hj
+      simp only [hj, Bool.not_false, Bool.not_true, Bool.false_eq_true, if_false]
+      exact Ret.pure _
 
 end Sql.Den

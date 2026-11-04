@@ -1143,7 +1143,10 @@ def joinPrepare (q : QEnv) (f : FromItem) (where_ : Option Expr) (aliases : List
   -- the order of the loops: any, as the plan picks; FROM's with a
   -- table-valued function (its arguments name earlier leaves)
   let nest ← if leafRows.any (·.isNone) then pure (Array.range nL) else permA (Array.range nL)
-  return JoinPlan.make leaves leafSrcs leafRows nest (onConds ++ (where_.map conjuncts).getD []) aliases
+  let p := JoinPlan.make leaves leafSrcs leafRows nest (onConds ++ (where_.map conjuncts).getD []) aliases
+  -- the order of each depth's conjuncts: any, as the plan picks
+  let orders ← (List.range nL).mapM fun d => perm (p.depthConds d)
+  return { p with orders := orders.toArray }
 partial_fixpoint monotonicity by (try simp only []); repeat' monotonicity
 
 /-- The rows of leaf `k` after the partial row `pre`. -/
@@ -1160,12 +1163,11 @@ def joinRowsAt (q : QEnv) (p : JoinPlan) (k : Nat) (pre : Array Cur) : D (Array 
     | _ => return #[]
 partial_fixpoint monotonicity by (try simp only []); repeat' monotonicity
 
-/-- The conjuncts of depth `d` on a row, in an order the plan picks; the
-    first that does not hold rejects the row. -/
+/-- The conjuncts of depth `d` on a row, in the plan's order; the first that
+    does not hold rejects the row. -/
 def joinCheck (q : QEnv) (p : JoinPlan) (cur : Array Cur) (d : Nat) : D Bool := do
   let qr := { q with env := { q.env with frames := { srcs := p.srcs, cur, aliases := p.aliases } :: q.env.frames, group := none } }
-  let order ← perm ((p.byDepth.filter (·.1 == d)).map (·.2))
-  for e in order do
+  for e in p.orders[d]?.getD [] do
     if hasAgg e then err "misuse of aggregate function"
     if !(← condHolds qr e) then return false
   return true

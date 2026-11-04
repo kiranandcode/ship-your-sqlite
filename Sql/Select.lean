@@ -1214,8 +1214,13 @@ structure JoinPlan where
   nest : Array Nat
   byDepth : List (Nat × Expr)
   aliases : List (Name × Expr)
+  /-- the order each depth's conjuncts are tested in (the plan's) -/
+  orders : Array (List Expr) := #[]
 
 namespace JoinPlan
+
+/-- The conjuncts of depth `d`, in the order of WHERE and the ON clauses. -/
+def depthConds (p : JoinPlan) (d : Nat) : List Expr := (p.byDepth.filter (·.1 == d)).map (·.2)
 
 /-- The sources of all leaves, in FROM's order. -/
 def srcs (p : JoinPlan) : Array Src := p.leafSrcs.foldl (· ++ ·) #[]
@@ -1415,15 +1420,34 @@ def compileCondK (env : Env) : Nat → Expr → Option PCond
       | _, _ => none
     | _ => none
 
-/-- The compiled conjuncts of each depth of a join, in the join's scope `env`. -/
-def JoinPlan.pconds (p : JoinPlan) (env : Env) : Array (List PCond) :=
-  (Array.range p.leaves.size).map fun d =>
-    (p.byDepth.filter (·.1 == d)).filterMap fun (_, e) => if hasAgg e then none else compileCondK env syntaxFuel e
+/-- A conjunct compiled for the automatic index (none: it cannot be). -/
+def compileConj (env : Env) (e : Expr) : Option PCond :=
+  if hasAgg e then none else compileCondK env syntaxFuel e
 
-/-- The automatic index rules out the partial row `cur` at depth `d`: a
-    compiled conjunct of the depth does not hold on it. -/
-def skipRow (pconds : Array (List PCond)) (d : Nat) (cur : Array Cur) : Bool :=
-  (pconds[d]?.getD []).any fun c => c.jump cur false true
+/-- The compiled conjuncts of each depth of a join, in the plan's order, in
+    the join's scope `env`. -/
+def JoinPlan.pconds (p : JoinPlan) (env : Env) : Array (List (Option PCond)) :=
+  p.orders.map fun es => es.map (compileConj env)
+
+/-- A row is ruled out by the conjuncts in order: a compiled one that does
+    not hold, after compiled ones that hold (each tested purely). -/
+def skipPrefix (cur : Array Cur) : List (Option PCond) → Bool
+  | [] => false
+  | none :: _ => false
+  | some c :: rest => c.jump cur false true || skipPrefix cur rest
+
+/-- The automatic index rules out the partial row `cur` at depth `d`. -/
+def skipRow (pconds : Array (List (Option PCond))) (d : Nat) (cur : Array Cur) : Bool :=
+  skipPrefix cur (pconds[d]?.getD [])
+
+/-- The conjuncts the index can test, then the others (a permutation). -/
+def indexFirst (env : Env) (es : List Expr) : List Expr :=
+  es.filter (fun e => (compileConj env e).isSome) ++ es.filter (fun e => !(compileConj env e).isSome)
+
+/-- The order a depth's conjuncts are tested in: a permutation the oracle
+    picks (by default the ones the automatic index can test first). -/
+def chooseConjOrder (env : Env) (es : List Expr) : M (List Expr) := do
+  return (← chooseOrder (indexFirst env es).toArray).toList
 
 /-- `m` run for its result only: the state is restored after it (but for
     the oracle's counters and the fuel flag); an error gives `dflt`. -/
@@ -1545,7 +1569,11 @@ def joinPrepareM (evalFromC : FromItem → M (Array Src × Array (Array Cur)))
   -- arguments name earlier leaves)
   let nest ← if leafRows.any (·.isNone) then pure (Array.range nL)
     else chooseNest condC q leaves leafSrcs leafRows (onConds ++ (where_.map conjuncts).getD []) aliases
-  return JoinPlan.make leaves leafSrcs leafRows nest (onConds ++ (where_.map conjuncts).getD []) aliases
+  let p := JoinPlan.make leaves leafSrcs leafRows nest (onConds ++ (where_.map conjuncts).getD []) aliases
+  -- the order of each depth's conjuncts: the plan's
+  let orders ← (List.range nL).mapM fun d =>
+    chooseConjOrder { q.env with frames := p.scope p.empty :: q.env.frames, group := none } (p.depthConds d)
+  return { p with orders := orders.toArray }
 
 
 
@@ -2281,7 +2309,7 @@ def evalFromWhereS {σ : Type} (fuel : Nat) (q : QEnv) (f : FromItem) (where_ : 
       -- not hold rejects the row
       let check (cur : Array Cur) (d : Nat) : M Bool := do
         let qr := { q with env := { q.env with frames := { srcs := p.srcs, cur, aliases := p.aliases } :: q.env.frames, group := none } }
-        for e in (p.byDepth.filter (·.1 == d)).map (·.2) do
+        for e in p.orders[d]?.getD [] do
           if hasAgg e then err "misuse of aggregate function"
           if !(← condHolds fuel qr e) then return false
         return true

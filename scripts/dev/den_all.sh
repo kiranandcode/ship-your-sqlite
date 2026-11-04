@@ -3,7 +3,7 @@
 # (scripts/dev/denize.py, then the hand edits of den_*_edits.py).
 set -e
 cd "$(dirname "$0")/../.."
-python3 scripts/dev/denize.py Sql/Select.lean Sql/Den/Select.lean --skip attemptM,joinLoopsM,sandbox,greedyOrder,chooseNest,joinPrepareM,cteLoopM >/dev/null
+python3 scripts/dev/denize.py Sql/Select.lean Sql/Den/Select.lean --skip attemptM,joinLoopsM,sandbox,greedyOrder,chooseNest,joinPrepareM,cteLoopM,chooseConjOrder >/dev/null
 python3 scripts/dev/den_select_edits.py
 python3 scripts/dev/denize.py Sql/Resolve.lean Sql/Den/Resolve.lean >/dev/null
 sed -i 's/^import Sql.Den.Domain$/import Sql.Den.Select/' Sql/Den/Resolve.lean
