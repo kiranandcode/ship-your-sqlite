@@ -85,6 +85,8 @@ def transform(blk, mutual):
     # fuel arguments of calls
     for n in sorted(set(names), key=len, reverse=True):
         blk = re.sub(r'(?<![\w.])' + re.escape(n) + r' fuel(?![\w\'])', n, blk)
+    # and of calls to the other modules' meaning functions
+    blk = re.sub(r'(?<=[\w)\]]) fuel(?=[\s)\]])', '', blk)
     # the monad
     blk = re.sub(r'(?<=[:(→\s])M(?= [\w(\[{])', 'D', blk)
     blk = blk.replace('partial def ', 'def ')

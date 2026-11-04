@@ -352,15 +352,19 @@ def insertRow (fuel : Nat) (tname : Name) (vals : Array Value) (rowidV : Option 
   -- random unused rowid (an unspecified choice; the executable takes one)
   let rid ← if auto && rid > maxI64 then do
       if t.autoinc then err "database or disk is full" 13
+      -- OP_NewRowid: up to 100 random candidates in [1, 2^62]; none unused
+      -- is SQLITE_FULL
       let c ← get
       let mut k := c.db.prng
-      let mut cand : Int := 0
+      let mut found : Option Int := none
       for _ in [0:100] do
         k := k + 1
-        cand := (c.choices.rowid k % 2 ^ 63 : Nat)
-        if cand > 0 && !(t.rows.any (·.rowid == cand)) then break
+        let cand : Int := (c.choices.rowid k % 2 ^ 62 : Nat) + 1
+        if !(t.rows.any (·.rowid == cand)) then found := some cand; break
       set { c with db := { c.db with prng := k } }
-      pure cand
+      match found with
+      | some cand => pure cand
+      | none => err "database or disk is full" 13
     else pure rid
   if let some ci := t.rowidCol then vals := vals.set! ci (.int rid)
   let mut row ← withGenerated fuel t { rowid := rid, vals }

@@ -197,6 +197,15 @@ theorem monotone_forIn'_rangeD {β : Type} {γ : Type w} [Lean.Order.PartialOrde
   intro h
   exact monotone_apply _ _ (monotone_apply a _ hf)
 
+open Lean.Order in
+/-- `Option.forM`: the action on the value, if there is one. -/
+@[partial_fixpoint_monotone]
+theorem monotone_option_forMD {α : Type} {γ : Type w} [Lean.Order.PartialOrder γ] (o : Option α)
+    (f : γ → α → D PUnit) (hf : monotone f) : monotone (fun x => o.forM (f x)) := by
+  cases o with
+  | none => exact monotone_const _
+  | some a => exact monotone_apply a _ hf
+
 /-! ## Least fixed points: core's `fix` is Mathlib's `lfp` -/
 
 open Lean.Order in
