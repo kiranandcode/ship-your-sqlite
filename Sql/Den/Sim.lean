@@ -402,4 +402,52 @@ theorem outOfFuel {α : Type} {ch : Choices} (n : D α) : Sim ch (Sql.outOfFuel 
 
 end Sim
 
+/-! ## The lockstep tactic
+
+The interpreter's and the denotation's definitions are the same code (the
+denotation is derived from the interpreter); `sim` walks both in step:
+binds, state, loops, `try`, `match`/`if` (split on the interpreter's side,
+the denotation's reduced with the same hypotheses), the oracle's orders, and
+the recursive calls by the hypotheses in context. -/
+
+/-- The simulation lemmas of a block's helper functions (non-recursive):
+    extended by each proof file with `macro_rules`. -/
+syntax "sim_helper" : tactic
+macro_rules | `(tactic| sim_helper) => `(tactic| fail "no helper")
+
+/-- The induction hypotheses (the block's functions at the smaller fuel):
+    extended by each proof file with `macro_rules`. -/
+syntax "sim_ih" : tactic
+macro_rules | `(tactic| sim_ih) => `(tactic| fail "no induction hypothesis")
+
+/-- One lockstep step of a simulation proof. Lemmas are applied up to
+    reducible unfolding only, so that a failed attempt is cheap. -/
+syntax "sim_step" : tactic
+macro_rules
+  | `(tactic| sim_step) => `(tactic| first
+      | with_reducible exact Sim.pure _
+      | with_reducible exact Sim.throw _
+      | with_reducible exact Sim.err _ _
+      | with_reducible exact Sim.getDb
+      | with_reducible exact Sim.chooseOrder _
+      | with_reducible exact Sim.outOfFuel _
+      | sim_helper
+      | sim_ih
+      | (with_reducible apply Sim.bind; rotate_left; intro _)
+      | (with_reducible apply Sim.get_bind; intro _ _)
+      | (with_reducible apply Sim.modify <;> intro _ <;> rfl)
+      | (with_reducible apply Sim.tryCatch; rotate_left; intro _)
+      | (with_reducible apply Sim.forIn_list; intro _ _)
+      | (with_reducible apply Sim.forIn_array; intro _ _)
+      | (with_reducible apply Sim.forIn_range; intro _ _)
+      | (with_reducible apply Sim.forIn'_range; intro _ _ _)
+      | (with_reducible apply Sim.forIn'_list; intro _ _ _)
+      | (with_reducible apply Sim.mapM_list; intro _)
+      | (with_reducible apply Sim.mapM_array; intro _)
+      | (with_reducible apply Sim.foldlM_list; intro _ _)
+      | (split <;> (try simp only [*])))
+
+/-- A simulation proof by lockstep. -/
+macro "sim" : tactic => `(tactic| ((try simp only []); repeat' sim_step))
+
 end Sql.Den
