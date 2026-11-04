@@ -1454,7 +1454,8 @@ def chooseConjOrder (env : Env) (es : List Expr) : M (List Expr) := do
 def sandbox {α : Type} (m : M α) (dflt : α) : M α := do
   let saved ← get
   let r ← tryCatch m (fun _ => pure dflt)
-  modify fun c => { saved with orderPos := c.orderPos, prng := c.prng, exhausted := saved.exhausted || c.exhausted }
+  modify fun c => { saved with orderPos := c.orderPos, prng := c.prng, exhausted := saved.exhausted || c.exhausted,
+                               stmts := c.stmts }
   return r
 
 /-- Greedy nesting: next the leaf that least multiplies the partial rows (one
@@ -2006,7 +2007,7 @@ def callFnST (fuel : Nat) (q : QEnv) (n : Name) (args : List Expr) (_distinct : 
       match Printf.scalar? n.toLower vs with
       | some r => lift r
       | none =>
-      match DateTime.scalar? { unixMs := (← get).choices.clockMs } n.toLower vs with
+      match DateTime.scalar? { unixMs := (← get).clockMs } n.toLower vs with
       | some r => lift r
       | none =>
         let v ← (try scalarFn n vs (args.map fun a => exprColl q.env a) catch e => throw (fixName e))

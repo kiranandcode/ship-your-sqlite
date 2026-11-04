@@ -1400,8 +1400,8 @@ end
     (except for what SQLite keeps: `OR FAIL` rows, and the counters). The
     error is returned, not thrown, so that the state after it is kept. -/
 def runStmt (fuel : Nat) (s : Stmt) : M (Except Err (Array (Array Value))) := do
-  -- json.c's parse cache lives for one statement
-  modify fun c => { c with jsonCache := {} }
+  -- json.c's parse cache lives for one statement; 'now' is fixed for it
+  modify fun c => { c with jsonCache := {}, clockMs := c.choices.clock c.stmts, stmts := c.stmts + 1 }
   let saved ← get
   try
     let before := fkOrphans saved.db

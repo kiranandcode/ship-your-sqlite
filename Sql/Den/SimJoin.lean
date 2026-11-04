@@ -70,7 +70,7 @@ theorem joinLoopsM {σ : Type} {ch : Choices} (nL : Nat) (nest : Array Nat)
     oracle's counters and (only setting it) the fuel flag. -/
 theorem runM_sandbox {α : Type} (m : M α) (dflt : α) (c : Ctx) :
     ∃ (r : α) (c₂ : Ctx), runM (Sql.sandbox m dflt) c =
-      (.ok r, { c with orderPos := c₂.orderPos, prng := c₂.prng, exhausted := c.exhausted || c₂.exhausted }) := by
+      (.ok r, { c with orderPos := c₂.orderPos, prng := c₂.prng, exhausted := c.exhausted || c₂.exhausted, stmts := c₂.stmts }) := by
   unfold Sql.sandbox
   simp only [runM_bind]
   have hg : runM (get : M Ctx) c = (.ok c, c) := rfl
@@ -97,7 +97,7 @@ theorem sandbox_bind {α β : Type} {ch : Choices} {m : M α} {dflt : α} {k : �
   sound := fun c hch hx => by
     obtain ⟨r, c₂, h⟩ := runM_sandbox m dflt c
     rw [runM_bind, h] at hx ⊢
-    exact (hk r).sound { c with orderPos := c₂.orderPos, prng := c₂.prng, exhausted := c.exhausted || c₂.exhausted } hch hx
+    exact (hk r).sound { c with orderPos := c₂.orderPos, prng := c₂.prng, exhausted := c.exhausted || c₂.exhausted, stmts := c₂.stmts } hch hx
 
 /-- The executable's nesting order is one of the denotation's. -/
 theorem chooseNest {ch : Choices} (condC : QEnv → Expr → M Bool) (q : QEnv) (leaves : Array FromItem)

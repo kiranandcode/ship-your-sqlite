@@ -31,7 +31,7 @@ theorem sound : sound_Statement := by
   obtain ⟨hex, hfin⟩ := hx
   unfold Den.Derives Den.runScript
   rw [Nd.mem_bind]
-  refine ⟨ch.clockMs, trivial, ?_⟩
+  refine ⟨0, trivial, ?_⟩
   rw [Nd.mem_bind]
   refine ⟨_, loopI_sound fuel src _ _ rfl hex, ?_⟩
   simp only [projD, hfin]

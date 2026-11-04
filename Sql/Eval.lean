@@ -75,9 +75,10 @@ structure Choices where
   /-- the `n`-th candidate of the random rowid SQLite picks after rowid
       2^63−1 (taken modulo 2^62, plus 1) -/
   rowid : Nat → Nat := fun k => (k * 2862933555777941757 + 3037000493) % 2 ^ 63
-  /-- the time 'now' reads, in milliseconds since the Unix epoch (the
+  /-- the time 'now' reads in the `n`-th statement, in milliseconds since
+      the Unix epoch (`sqlite3StmtCurrentTime`: fixed for a statement; the
       external model's clock, `Run.World.clock`, is a parameter likewise) -/
-  clockMs : Int := 0
+  clock : Nat → Int := fun _ => 0
   deriving Inhabited
 
 structure Ctx where
@@ -92,6 +93,10 @@ structure Ctx where
   prng : Nat := 0
   /-- json.c's cache of parsed JSON texts, per statement (`Sql.Json`) -/
   jsonCache : Json.Cache := {}
+  /-- the time 'now' reads in this statement (the oracle's `clock`) -/
+  clockMs : Int := 0
+  /-- how many statements have started (the index of the oracle's `clock`) -/
+  stmts : Nat := 0
   deriving Inhabited
 
 abbrev M := ExceptT Err (StateM Ctx)
@@ -101,7 +106,8 @@ def err {α} (msg : String) (code : Nat := SQLITE_ERROR) : M α := throw { code,
 /-- Back to a saved state with database `db`, keeping what is not rolled
     back: the choices made so far and whether some fuel ran out. -/
 def restoreTo (saved : Ctx) (db : Db) : M Unit :=
-  modify fun c => { saved with db, orderPos := c.orderPos, exhausted := c.exhausted, prng := c.prng }
+  modify fun c => { saved with db, orderPos := c.orderPos, exhausted := c.exhausted, prng := c.prng,
+                               clockMs := c.clockMs, stmts := c.stmts }
 
 /-- The fuel `runStmt` gives the evaluator: a bound on the depth of its
     recursion (nested expressions, subqueries, triggers) and on the rounds of a

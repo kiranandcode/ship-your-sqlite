@@ -35,13 +35,37 @@ theorem modify_ch {ch : Choices} (f : Ctx → Ctx) (g : DCtx → DCtx)
     show (Except.ok (), proj (f c)) ∈ _
     rw [hcomm c h]; exact mem_outcomes_modify.mpr rfl
 
+/-- A state update with a value the denotation chooses (any satisfying `P`):
+    the interpreter's (`sel`), which satisfies it. -/
+theorem modify_choose {α β : Type} {ch : Choices} {P : α → Prop} {m : M β} {n : D β} (f : Ctx → Ctx)
+    (g : α → DCtx → DCtx) (sel : Ctx → α) (hP : ∀ c, P (sel c))
+    (hcomm : ∀ c, c.choices = ch → proj (f c) = g (sel c) (proj c)) (hex : ∀ c, (f c).exhausted = c.exhausted)
+    (hch : ∀ c, (f c).choices = c.choices) (hk : Sim ch m n) :
+    Sim ch (_root_.modify f >>= fun _ => m) (anyOf P >>= fun x => _root_.modify (g x) >>= fun _ => n) where
+  exhausted_mono := fun c hc hx => by
+    have : runM (_root_.modify f >>= fun _ => m) c = runM m (f c) := rfl
+    rw [this]; exact hk.exhausted_mono (f c) (by rw [hch]; exact hc) (by rw [hex]; exact hx)
+  choices_eq := fun c hc => by
+    have : runM (_root_.modify f >>= fun _ => m) c = runM m (f c) := rfl
+    rw [this]; exact hk.choices_eq (f c) (by rw [hch]; exact hc)
+  sound := fun c hc hx => by
+    have : runM (_root_.modify f >>= fun _ => m) c = runM m (f c) := rfl
+    rw [this] at hx ⊢
+    rw [mem_outcomes_bind]
+    refine ⟨(.ok (sel c), proj c), mem_outcomes_lift.mpr ⟨sel c, hP c, rfl⟩, ?_⟩
+    show _ ∈ (_root_.modify (g (sel c)) >>= fun _ => n).outcomes (proj c)
+    rw [mem_outcomes_bind]
+    refine ⟨(.ok (), g (sel c) (proj c)), mem_outcomes_modify.mpr rfl, ?_⟩
+    rw [← hcomm c hc]
+    exact hk.sound (f c) (by rw [hch]; exact hc) hx
+
 end Sim
 
 /-- A statement: the denotation's clock for it is the oracle's. -/
 theorem sim_runStmt {ch : Choices} (fuel : Nat) (s : Stmt) : Sim ch (Sql.runStmt fuel s) (Den.runStmt s) := by
   unfold Sql.runStmt Den.runStmt
-  refine Sim.anyOf_bind ch.clockMs trivial ?_
-  refine Sim.bind (Sim.modify_ch _ _ (fun c hc => by simp [proj, hc]) (fun _ => rfl) (fun _ => rfl)) fun _ => ?_
+  refine Sim.modify_choose _ (fun clk d => { d with jsonCache := {}, clockMs := clk }) (fun c => c.choices.clock c.stmts)
+    (fun _ => trivial) (fun _ _ => rfl) (fun _ => rfl) (fun _ => rfl) ?_
   sim
 
 /-! ## The driver -/

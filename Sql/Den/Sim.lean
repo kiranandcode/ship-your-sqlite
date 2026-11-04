@@ -16,8 +16,8 @@ namespace Sql.Den
 open Sql
 
 /-- The interpreter's state as the denotation sees it: the database, the
-    JSON parse cache and the clock (the oracle's, the same for every statement). -/
-def proj (c : Ctx) : DCtx := { db := c.db, jsonCache := c.jsonCache, clockMs := c.choices.clockMs }
+    JSON parse cache and the statement's clock. -/
+def proj (c : Ctx) : DCtx := { db := c.db, jsonCache := c.jsonCache, clockMs := c.clockMs }
 
 /-- The outcome of an interpreter computation from a state. -/
 def runM {α : Type} (m : M α) (c : Ctx) : Except Err α × Ctx := (m.run).run c
@@ -180,7 +180,7 @@ theorem restoreTo {ch : Choices} (saved : Ctx) (db : Db) (hs : saved.choices = c
     Sim ch (Sql.restoreTo saved db) (Den.restoreTo (proj saved) db) where
   exhausted_mono := fun c _ h => h
   choices_eq := fun _ _ => hs
-  sound := fun c _ _ => mem_outcomes_set.mpr rfl
+  sound := fun c _ _ => mem_outcomes_modify.mpr rfl
 
 theorem getDb {ch : Choices} : Sim ch Sql.getDb Den.getDb :=
   get_bind fun _ _ => pure _

@@ -12,8 +12,6 @@ def sub_block(start, end_marker, new):
     i = s.index(start); j = s.index(end_marker, i)
     s = s[:i] + new + s[j:]
 
-rep('''      match DateTime.scalar? { unixMs := (← get).choices.clockMs } n.toLower vs with''',
-    '''      match DateTime.scalar? { unixMs := (← get).clockMs } n.toLower vs with''')
 rep('''def condHolds (q : QEnv) (e : Expr) : D Bool :=
   match fuel with
   | 0 => outOfFuel

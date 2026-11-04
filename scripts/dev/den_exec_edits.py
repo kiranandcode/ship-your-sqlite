@@ -12,8 +12,8 @@ s = re.sub(r'(?<![.\w«])alias(?![\w»])', '«alias»', s)
 rep('''  let cands ← draw fun ch seed => (List.range 100).map fun i => (((ch.rowid (seed + i + 1) % 2 ^ 62 : Nat) : Int) + 1)''',
     '''  let cands ← anyOf fun (l : List Int) => l.length = 100 ∧ ∀ c ∈ l, 1 ≤ c ∧ c ≤ 2 ^ 62''')
 s = s.replace('← chooseOrder ', '← permA ')
-rep('''  -- json.c's parse cache lives for one statement
-  modify fun c => { c with jsonCache := {} }''', '''  -- json.c's parse cache lives for one statement; 'now' is fixed for it
+rep('''  -- json.c's parse cache lives for one statement; 'now' is fixed for it
+  modify fun c => { c with jsonCache := {}, clockMs := c.choices.clock c.stmts, stmts := c.stmts + 1 }''', '''  -- json.c's parse cache lives for one statement; 'now' is any time, fixed for it
   let clockMs ← anyOf fun (_ : Int) => True
   modify fun c => { c with jsonCache := {}, clockMs }''')
 i = s.index('/-- Run a script as the driver does, with the implementation\'s choices `ch`')
