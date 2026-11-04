@@ -3,8 +3,8 @@
 `SqliteRefines_Statement` (BRIEF.md) relates SQLite's C code to the SQL
 semantics through a step relation on Clight states. That relation is **Certora/
 clean's Clight step relation (`CC.Step`, a Lean port of CompCert 3.17's Clight)
-plus exactly three extensions**, all defined in this repository. Kiran approved
-this design on 2026-11-03 (BRIEF.md D8).
+plus exactly three extensions**, all defined in this repository. This design was
+adopted on 2026-11-03 (BRIEF.md D8).
 
 This file says, for each extension, what it adds to CompCert's semantics, why,
 and which SQLite code needs it. Anything here that SQLite does not exercise is

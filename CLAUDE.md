@@ -1,11 +1,11 @@
 # ship-your-sqlite — discipline
 
-The whole of SQLite (SCOPE-FROM-KIRAN.md): `sqlite3.c` exported by Clean's
+The whole of SQLite: `sqlite3.c` exported by Clean's
 `clightgen -lean`, a semantics of the whole SQL dialect, and a refinement
 theorem about the whole program. Plan: BRIEF.md. Ledger: PHASES.md.
 
 ## Before any work
-* Read BRIEF.md, PHASES.md and SCOPE-FROM-KIRAN.md.
+* Read BRIEF.md and PHASES.md.
 * Reuse, don't rebuild: ship-your-tcc already built Clean, ran its
   interpreter as an oracle and patched CCLib for parametric externals. Copy
   with a row in ATTRIBUTION.md. Sibling repositories are read-only.

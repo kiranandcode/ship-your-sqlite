@@ -5,8 +5,7 @@ dialect SQLite implements, in Lean 4. Prove that SQLite's C source, exported
 to Lean as Clight, refines that semantics: on every script, the output the
 Clight program produces is the output the semantics derives.
 
-Scope (Kiran, SCOPE-FROM-KIRAN.md, overriding the "core subset" wording of the
-original prompt): **all of SQLite**.
+Scope: **all of SQLite**, not a core subset.
 - the full amalgamation `sqlite3.c` of a pinned release, in its default build,
   through `clightgen -lean`. A workaround for a clightgen limit must keep the
   functionality. An `SQLITE_OMIT_*` or reduced build is allowed only as a
@@ -96,8 +95,8 @@ way: Clean's interpreter running `sqliteProg` against the native binary.
 | D4 | Lean **4.32.1**, Clean's pinned toolchain; CCLib is a Lake `git` dependency at D2's commit (`subDir = "export"`), so nothing of it is in this repository | no port needed; ship-your-tcc's 4.34 port is available if we must move | taken |
 | D5 | Running the export: our runner wraps Clean's `doStep` and executes `Callstate (External …)` states itself with an executable libc/OS model (`Run/Ext.lean`), so no CCLib patch is needed to *run* | `doExternalCall` refuses unknown externals; SQLite calls ~80 libc/POSIX functions | taken |
 | D6 | Proving: the external semantics must be a parameter, not Clean's axiom (our laws forbid axioms in the theorem's footprint) | ship-your-tcc's `StepWith X` patch does exactly this | open: adopt tcc's patch (kept under `patches/clean/`) or route libc through C; decide in Phase 3 |
-| D8 | The semantics the theorem is about is **Clean's `Step` extended** by exactly three things, each stated in Lean in this repository: (1) the external model (`Run/Ext.lean`); (2) variadic calls and `va_*` (O1, `Run/Runner.lean`); (3) a flat placement of blocks for the pointer comparisons CompCert leaves undefined (O2, `Run/Flat.lean`). Volatile accesses to non-volatile blocks are not an extension: they are Clean's `VolatileLoad.nonvol`/`VolatileStore.nonvol`, which its interpreter just does not execute | keeps clightgen, CCLib and SQLite unmodified and the whole program in scope; the alternatives were patching CCLib (CompCert-licensed code) or compiling features out of SQLite (against the scope) | **approved by Kiran** (2026-11-03); documented in TRUST.md |
-| D7 | Configuration: the default build (no `-D` flags). The oracle and the export use the same flag file `config/sqlite.flags`. `SQLITE_ENABLE_MATH_FUNCTIONS` (on in the official CLI, off in a bare `sqlite3.c` build) is added to the flag file so the math library is in scope | Kiran's scope: the default build, and the built-in function library | taken (reversible) |
+| D8 | The semantics the theorem is about is **Clean's `Step` extended** by exactly three things, each stated in Lean in this repository: (1) the external model (`Run/Ext.lean`); (2) variadic calls and `va_*` (O1, `Run/Runner.lean`); (3) a flat placement of blocks for the pointer comparisons CompCert leaves undefined (O2, `Run/Flat.lean`). Volatile accesses to non-volatile blocks are not an extension: they are Clean's `VolatileLoad.nonvol`/`VolatileStore.nonvol`, which its interpreter just does not execute | keeps clightgen, CCLib and SQLite unmodified and the whole program in scope; the alternatives were patching CCLib (CompCert-licensed code) or compiling features out of SQLite (against the scope) | **adopted** (2026-11-03); documented in TRUST.md |
+| D7 | Configuration: the default build (no `-D` flags). The oracle and the export use the same flag file `config/sqlite.flags`. `SQLITE_ENABLE_MATH_FUNCTIONS` (on in the official CLI, off in a bare `sqlite3.c` build) is added to the flag file so the math library is in scope | the scope: the default build, and the built-in function library | taken (reversible) |
 
 ## Laws
 

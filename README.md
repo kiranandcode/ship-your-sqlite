@@ -15,8 +15,7 @@ It is a "ship your interpreter" project, after
 (a C interpreter's RV64 binary against an LLM-written semantics), with
 siblings for TinyCC and libtommath.
 
-- Plan, scope and decisions: [BRIEF.md](BRIEF.md) (and Kiran's scope note,
-  [SCOPE-FROM-KIRAN.md](SCOPE-FROM-KIRAN.md): all of SQLite, not a subset)
+- Plan, scope (all of SQLite, not a subset) and decisions: [BRIEF.md](BRIEF.md)
 - Phases, coverage, obligations, gaps and obstructions: [PHASES.md](PHASES.md)
 - What the theorem's semantics adds to CompCert's Clight: [TRUST.md](TRUST.md)
 - Discipline: [CLAUDE.md](CLAUDE.md)
@@ -89,4 +88,4 @@ lake build                  # CCLib (fetched by Lake from the same commit) + the
   developers, in the public domain. Fetched at release 3.54.1.
 - Method, tooling and discipline from ship-your-interpreter, ship-your-tcc
   and ship-your-libtommath (ATTRIBUTION.md).
-- The idea came from a friend of Kiran's.
+- The idea came from a friend.

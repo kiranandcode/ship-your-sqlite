@@ -40,8 +40,7 @@ def attachesMemoryOnly (script : ByteArray) : Prop :=
     what removes it. -/
 structure Admissible (script : ByteArray) : Prop where
   /-- EXPLAIN and EXPLAIN QUERY PLAN print SQLite's bytecode and plan, which
-      the SQL semantics does not model. Pending Kiran's decision 2 (cove
-      report): in scope (then the semantics models VDBE listings) or out of
+      the SQL semantics does not model. Pending open decision 2: in scope (then the semantics models VDBE listings) or out of
       scope via this premise. -/
   noExplain : ∀ t ∈ tokens script, isKw "EXPLAIN" t = false
   /-- The external model has no file system (`open` fails with ENOENT), so
@@ -67,7 +66,7 @@ structure Refines (p : CC.Program) : Prop where
 
 /-- Phase 3's theorem, about the export. Known false as stated on the scripts
     of BUGS.md #3 (a NaN converted to an integer: the Clight run is stuck, so
-    `terminates` fails) until Kiran's decision 1: a fourth extension (x86's
+    `terminates` fails) until open decision 1: a fourth extension (x86's
     `cvttsd2si`) or a premise excluding those conversions. -/
 def SqliteRefines_Statement (p : CC.Program) : Prop := Refines p
 
