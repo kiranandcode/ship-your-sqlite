@@ -470,6 +470,19 @@ elab "sim_by_head" : tactic => withMainContext do
   let t ← whnfR (← getMainTarget)
   let (fn, args) := t.getAppFnArgs
   unless fn == ``Sql.Den.Sim && args.size == 4 do throwError "sim_by_head: not a Sim goal"
+  -- a local function (a `let` the goal's lets were lifted into): unfold it,
+  -- and the denotation side's head too, in this goal only
+  if let .fvar fv := args[2]!.getAppFn then
+    let some d ← fv.findDecl? | throwError "sim_by_head: unknown local"
+    unless d.isLet do throwError "sim_by_head: local {d.userName} has no value"
+    let x := mkIdent d.userName
+    evalTactic (← `(tactic| simp only [$x:ident]))
+    if let .fvar gv := args[3]!.getAppFn then
+      if let some d' ← gv.findDecl? then
+        if d'.isLet then
+          let y := mkIdent d'.userName
+          evalTactic (← `(tactic| simp only [$y:ident]))
+    return
   let .const f _ := args[2]!.getAppFn | throwError "sim_by_head: no head constant"
   -- only the interpreter's own functions (`Sql.f`)
   unless f.getPrefix == `Sql do throwError "sim_by_head: {f} is not an interpreter function"

@@ -11,132 +11,137 @@ open Sql
 
 theorem sim_evalExpr {ch : Choices} {fuel : Nat} (ih : SelectSim ch fuel) :
     ∀ (q : QEnv) (e : Expr), Sim ch (Sql.evalExpr (fuel + 1) q e) (Den.evalExpr q e) := by
-  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
+  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowRowValue, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
   intros; unfold Sql.evalExpr Den.evalExpr; sim
 
 theorem sim_compareRows {ch : Choices} {fuel : Nat} (ih : SelectSim ch fuel) :
     ∀ (q : QEnv) (op : BinOp) (xs : List Expr) (ys : List Expr), Sim ch (Sql.compareRows (fuel + 1) q op xs ys) (Den.compareRows q op xs ys) := by
-  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
+  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowRowValue, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
   intros; unfold Sql.compareRows Den.compareRows; sim
 
 theorem sim_valueOf {ch : Choices} {fuel : Nat} (ih : SelectSim ch fuel) :
     ∀ (q : QEnv) (r0 : Resolved), Sim ch (Sql.valueOf (fuel + 1) q r0) (Den.valueOf q r0) := by
-  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
+  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowRowValue, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
   intros; unfold Sql.valueOf Den.valueOf; sim
 
 theorem sim_evalAgg {ch : Choices} {fuel : Nat} (ih : SelectSim ch fuel) :
     ∀ (q : QEnv) (n : Name) (distinct : Bool) (args : List Expr) (star : Bool) (ob : List OrderTerm) (filter : Option Expr), Sim ch (Sql.evalAgg (fuel + 1) q n distinct args star ob filter) (Den.evalAgg q n distinct args star ob filter) := by
-  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
+  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowRowValue, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
   intros; unfold Sql.evalAgg Den.evalAgg; sim
 
 theorem sim_aggFinish {ch : Choices} {fuel : Nat} (ih : SelectSim ch fuel) :
     ∀ (q : QEnv) (n : Name) (star : Bool) (args : List Expr) (coll : Coll) (vals : Array (List Value)) (jflags : Option (Array (List Bool))), Sim ch (Sql.aggFinish (fuel + 1) q n star args coll vals jflags) (Den.aggFinish q n star args coll vals jflags) := by
-  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
+  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowRowValue, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
   intros; unfold Sql.aggFinish Den.aggFinish; sim
 
 theorem sim_callAgg {ch : Choices} {fuel : Nat} (ih : SelectSim ch fuel) :
     ∀ (_q : QEnv) (name : String) (vals : Array (List Value)) (flags : List Bool) (rowFlags : Option (Array (List Bool))), Sim ch (Sql.callAgg (fuel + 1) _q name vals flags rowFlags) (Den.callAgg _q name vals flags rowFlags) := by
-  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
+  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowRowValue, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
   intros; unfold Sql.callAgg Den.callAgg; sim
 
 theorem sim_argIsJson {ch : Choices} {fuel : Nat} (ih : SelectSim ch fuel) :
     ∀ (q : QEnv) (a : Expr), Sim ch (Sql.argIsJson (fuel + 1) q a) (Den.argIsJson q a) := by
-  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
+  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowRowValue, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
   intros; unfold Sql.argIsJson Den.argIsJson; sim
 
 theorem sim_callFn {ch : Choices} {fuel : Nat} (ih : SelectSim ch fuel) :
     ∀ (q : QEnv) (n : Name) (args : List Expr) (distinct : Bool), Sim ch (Sql.callFn (fuel + 1) q n args distinct) (Den.callFn q n args distinct) := by
-  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
+  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowRowValue, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
   intros; unfold Sql.callFn Den.callFn; sim
 
 theorem sim_callFnST {ch : Choices} {fuel : Nat} (ih : SelectSim ch fuel) :
     ∀ (q : QEnv) (n : Name) (args : List Expr) (_distinct : Bool), Sim ch (Sql.callFnST (fuel + 1) q n args _distinct) (Den.callFnST q n args _distinct) := by
-  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
+  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowRowValue, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
   intros; unfold Sql.callFnST Den.callFnST; sim
 
 theorem sim_condJump {ch : Choices} {fuel : Nat} (ih : SelectSim ch fuel) :
     ∀ (q : QEnv) (e : Expr) (sense : Bool) (jn : Bool), Sim ch (Sql.condJump (fuel + 1) q e sense jn) (Den.condJump q e sense jn) := by
-  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
+  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowRowValue, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
   intros; unfold Sql.condJump Den.condJump; sim
 
 theorem sim_condHolds {ch : Choices} {fuel : Nat} (ih : SelectSim ch fuel) :
     ∀ (q : QEnv) (e : Expr), Sim ch (Sql.condHolds (fuel + 1) q e) (Den.condHolds q e) := by
-  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
+  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowRowValue, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
   intros; unfold Sql.condHolds Den.condHolds; sim
 
 theorem sim_evalExprST {ch : Choices} {fuel : Nat} (ih : SelectSim ch fuel) :
     ∀ (q : QEnv) (e : Expr), Sim ch (Sql.evalExprST (fuel + 1) q e) (Den.evalExprST q e) := by
-  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
+  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowRowValue, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
   intros; unfold Sql.evalExprST Den.evalExprST; sim
 
 theorem sim_resolveWindow {ch : Choices} {fuel : Nat} (ih : SelectSim ch fuel) :
     ∀ (windows : List (Name × Window)) (w : Window), Sim ch (Sql.resolveWindow (fuel + 1) windows w) (Den.resolveWindow windows w) := by
-  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
+  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowRowValue, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
   intros; unfold Sql.resolveWindow Den.resolveWindow; sim
 
 theorem sim_computeWindow {ch : Choices} {fuel : Nat} (ih : SelectSim ch fuel) :
     ∀ (ctxs : Array QEnv) (windows : List (Name × Window)) (call : Expr), Sim ch (Sql.computeWindow (fuel + 1) ctxs windows call) (Den.computeWindow ctxs windows call) := by
-  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
+  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowRowValue, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
   intros; unfold Sql.computeWindow Den.computeWindow; sim
+
+theorem sim_windowRowValue {ch : Choices} {fuel : Nat} (ih : SelectSim ch fuel) :
+    ∀ (ctxs : Array QEnv) (name : String) (n : Name) (args : List Expr) (star : Bool) (ord : List OrderTerm) (frame : Option Frame) (okeys : Array (Array Value)) (ocolls : List Coll) (odirs : List (SortDir × NullsOrder)) (argv : Array (List Value)) (pass : Array Bool) (p : Array Nat) (pi : PeerInfo) (j : Nat), Sim ch (Sql.windowRowValue (fuel + 1) ctxs name n args star ord frame okeys ocolls odirs argv pass p pi j) (Den.windowRowValue ctxs name n args star ord frame okeys ocolls odirs argv pass p pi j) := by
+  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowRowValue, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
+  intros; unfold Sql.windowRowValue Den.windowRowValue; sim
 
 theorem sim_windowPartition {ch : Choices} {fuel : Nat} (ih : SelectSim ch fuel) :
     ∀ (ctxs : Array QEnv) (name : String) (n : Name) (args : List Expr) (star : Bool) (ord : List OrderTerm) (frame : Option Frame) (okeys : Array (Array Value)) (ocolls : List Coll) (odirs : List (SortDir × NullsOrder)) (argv : Array (List Value)) (pass : Array Bool) (p : Array Nat) (result : Array Value), Sim ch (Sql.windowPartition (fuel + 1) ctxs name n args star ord frame okeys ocolls odirs argv pass p result) (Den.windowPartition ctxs name n args star ord frame okeys ocolls odirs argv pass p result) := by
-  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
+  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowRowValue, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
   intros; unfold Sql.windowPartition Den.windowPartition; sim
 
 theorem sim_namedSource {ch : Choices} {fuel : Nat} (ih : SelectSim ch fuel) :
     ∀ (q : QEnv) (sch : Option Name) (n : Name) («alias» : Name), Sim ch (Sql.namedSource (fuel + 1) q sch n «alias») (Den.namedSource q sch n «alias») := by
-  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
+  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowRowValue, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
   intros; unfold Sql.namedSource Den.namedSource; sim
 
 theorem sim_evalFrom {ch : Choices} {fuel : Nat} (ih : SelectSim ch fuel) :
     ∀ (q : QEnv) (f0 : FromItem), Sim ch (Sql.evalFrom (fuel + 1) q f0) (Den.evalFrom q f0) := by
-  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
+  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowRowValue, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
   intros; unfold Sql.evalFrom Den.evalFrom; sim
 
 theorem sim_viewCols {ch : Choices} {fuel : Nat} (ih : SelectSim ch fuel) :
     Sim ch (Sql.viewCols (fuel + 1)) Den.viewCols := by
-  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
+  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowRowValue, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
   intros; unfold Sql.viewCols Den.viewCols; sim
 
 theorem sim_tableFnSrc {ch : Choices} {fuel : Nat} (ih : SelectSim ch fuel) :
     ∀ (n : Name) («alias» : Option Name), Sim ch (Sql.tableFnSrc (fuel + 1) n «alias») (Den.tableFnSrc n «alias») := by
-  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
+  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowRowValue, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
   intros; unfold Sql.tableFnSrc Den.tableFnSrc; sim
 
 theorem sim_tableFunction {ch : Choices} {fuel : Nat} (ih : SelectSim ch fuel) :
     ∀ (n : Name) (argsJ : List (Value × Bool)), Sim ch (Sql.tableFunction (fuel + 1) n argsJ) (Den.tableFunction n argsJ) := by
-  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
+  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowRowValue, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
   intros; unfold Sql.tableFunction Den.tableFunction; sim
 
 theorem sim_expandCols {ch : Choices} {fuel : Nat} (ih : SelectSim ch fuel) :
     ∀ (srcs : Array Src) (cols : List ResultCol), Sim ch (Sql.expandCols (fuel + 1) srcs cols) (Den.expandCols srcs cols) := by
-  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
+  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowRowValue, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
   intros; unfold Sql.expandCols Den.expandCols; sim
 
 theorem sim_runSelect {ch : Choices} {fuel : Nat} (ih : SelectSim ch fuel) :
     ∀ (q : QEnv) (sel : Select) (cap : Bool) (stream : Bool), Sim ch (Sql.runSelect (fuel + 1) q sel cap stream) (Den.runSelect q sel cap stream) := by
-  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
+  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowRowValue, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
   intros; unfold Sql.runSelect Den.runSelect; sim
 
 theorem sim_limitOffset {ch : Choices} {fuel : Nat} (ih : SelectSim ch fuel) :
     ∀ (q : QEnv) (limit : Option Expr) (offset : Option Expr) (cap : Bool), Sim ch (Sql.limitOffset (fuel + 1) q limit offset cap) (Den.limitOffset q limit offset cap) := by
-  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
+  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowRowValue, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
   intros; unfold Sql.limitOffset Den.limitOffset; sim
 
 theorem sim_runSimple {ch : Choices} {fuel : Nat} (ih : SelectSim ch fuel) :
     ∀ (q : QEnv) (first : SelectCore) (orderBy : List OrderTerm) (limitN : Option Int) (offsetN : Int) (dirs : List (SortDir × NullsOrder)) (stream : Bool), Sim ch (Sql.runSimple (fuel + 1) q first orderBy limitN offsetN dirs stream) (Den.runSimple q first orderBy limitN offsetN dirs stream) := by
-  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
+  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowRowValue, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
   intros; unfold Sql.runSimple Den.runSimple; sim
 
 theorem sim_runUnionAll {ch : Choices} {fuel : Nat} (ih : SelectSim ch fuel) :
     ∀ (q : QEnv) (first : SelectCore) (rest : List (CompoundOp × SelectCore)) (limitN : Option Int) (offsetN : Int) (stream : Bool), Sim ch (Sql.runUnionAll (fuel + 1) q first rest limitN offsetN stream) (Den.runUnionAll q first rest limitN offsetN stream) := by
-  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
+  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowRowValue, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
   intros; unfold Sql.runUnionAll Den.runUnionAll; sim
 
 theorem sim_runCompound {ch : Choices} {fuel : Nat} (ih : SelectSim ch fuel) :
     ∀ (q : QEnv) (first : SelectCore) (rest : List (CompoundOp × SelectCore)) (orderBy : List OrderTerm) (dirs : List (SortDir × NullsOrder)), Sim ch (Sql.runCompound (fuel + 1) q first rest orderBy dirs) (Den.runCompound q first rest orderBy dirs) := by
-  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
+  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowRowValue, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
   intros; unfold Sql.runCompound Den.runCompound; sim
 
 end Sql.Den

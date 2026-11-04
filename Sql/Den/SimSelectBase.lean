@@ -112,6 +112,7 @@ structure SelectSim (ch : Choices) (fuel : Nat) : Prop where
   evalExprST : ∀ (q : QEnv) (e : Expr), Sim ch (Sql.evalExprST fuel q e) (Den.evalExprST q e)
   resolveWindow : ∀ (windows : List (Name × Window)) (w : Window), Sim ch (Sql.resolveWindow fuel windows w) (Den.resolveWindow windows w)
   computeWindow : ∀ (ctxs : Array QEnv) (windows : List (Name × Window)) (call : Expr), Sim ch (Sql.computeWindow fuel ctxs windows call) (Den.computeWindow ctxs windows call)
+  windowRowValue : ∀ (ctxs : Array QEnv) (name : String) (n : Name) (args : List Expr) (star : Bool) (ord : List OrderTerm) (frame : Option Frame) (okeys : Array (Array Value)) (ocolls : List Coll) (odirs : List (SortDir × NullsOrder)) (argv : Array (List Value)) (pass : Array Bool) (p : Array Nat) (pi : PeerInfo) (j : Nat), Sim ch (Sql.windowRowValue fuel ctxs name n args star ord frame okeys ocolls odirs argv pass p pi j) (Den.windowRowValue ctxs name n args star ord frame okeys ocolls odirs argv pass p pi j)
   windowPartition : ∀ (ctxs : Array QEnv) (name : String) (n : Name) (args : List Expr) (star : Bool) (ord : List OrderTerm) (frame : Option Frame) (okeys : Array (Array Value)) (ocolls : List Coll) (odirs : List (SortDir × NullsOrder)) (argv : Array (List Value)) (pass : Array Bool) (p : Array Nat) (result : Array Value), Sim ch (Sql.windowPartition fuel ctxs name n args star ord frame okeys ocolls odirs argv pass p result) (Den.windowPartition ctxs name n args star ord frame okeys ocolls odirs argv pass p result)
   evalFromWhere : ∀ (q : QEnv) (f : FromItem) (where_ : Option Expr) (aliases : List (Name × Expr)), Sim ch (Sql.evalFromWhere fuel q f where_ aliases) (Den.evalFromWhere q f where_ aliases)
   namedSource : ∀ (q : QEnv) (sch : Option Name) (n : Name) («alias» : Name), Sim ch (Sql.namedSource fuel q sch n «alias») (Den.namedSource q sch n «alias»)
@@ -144,6 +145,7 @@ theorem selectSim_zero (ch : Choices) : SelectSim ch 0 where
   evalExprST := by intros; unfold Sql.evalExprST; exact Sim.outOfFuel _
   resolveWindow := by intros; unfold Sql.resolveWindow; exact Sim.outOfFuel _
   computeWindow := by intros; unfold Sql.computeWindow; exact Sim.outOfFuel _
+  windowRowValue := by intros; unfold Sql.windowRowValue; exact Sim.outOfFuel _
   windowPartition := by intros; unfold Sql.windowPartition; exact Sim.outOfFuel _
   evalFromWhere := by intros; unfold Sql.evalFromWhere; exact Sim.outOfFuel _
   namedSource := by intros; unfold Sql.namedSource; exact Sim.outOfFuel _

@@ -1059,6 +1059,45 @@ def combineCompound (cols : Array ColMeta) (rows0 : Array (Array Value × Array 
   pure (cols, (stableSort (fun a b => lexCompare ocolls dirs a.2 b.2) keyed).map (·.1), false)
 
 
+/-- The peers of a window partition `p` (rows equal in the window's ORDER
+    BY): for each row the first and last of its peers, its peer group, and
+    the number of groups. -/
+structure PeerInfo where
+  m : Nat
+  firstPeer : Array Nat
+  lastPeer : Array Nat
+  groupIdx : Array Nat
+  ngroups : Nat
+
+def PeerInfo.groupStart (pi : PeerInfo) (k : Nat) : Nat :=
+  ((List.range pi.m).find? (fun x => pi.groupIdx[x]! == k)).getD pi.m
+
+def PeerInfo.groupEnd (pi : PeerInfo) (k : Nat) : Nat :=
+  ((List.range pi.m).reverse.find? (fun x => pi.groupIdx[x]! == k)).getD 0
+
+def peerInfo (ocolls : List Coll) (odirs : List (SortDir × NullsOrder)) (okeys : Array (Array Value))
+    (p : Array Nat) : PeerInfo := Id.run do
+  let isPeer (a b : Nat) : Bool := lexCompare ocolls odirs okeys[a]! okeys[b]! == .eq
+  let m := p.size
+  let mut firstPeer := Array.replicate m 0
+  let mut lastPeer := Array.replicate m 0
+  let mut groupIdx := Array.replicate m 0
+  let mut g : Nat := 0
+  for j in [0:m] do
+    if j > 0 && isPeer p[j - 1]! p[j]! then
+      firstPeer := firstPeer.set! j firstPeer[j - 1]!
+      groupIdx := groupIdx.set! j groupIdx[j - 1]!
+    else
+      firstPeer := firstPeer.set! j j
+      if j > 0 then g := g + 1
+      groupIdx := groupIdx.set! j g
+  for j' in [0:m] do
+    let j := m - 1 - j'
+    if j + 1 < m && isPeer p[j]! p[j + 1]! then lastPeer := lastPeer.set! j lastPeer[j + 1]!
+    else lastPeer := lastPeer.set! j j
+  return { m, firstPeer, lastPeer, groupIdx, ngroups := g + 1 }
+
+
 mutual
 
 def evalExpr (fuel : Nat) (q : QEnv) (e : Expr) : M Value :=
@@ -1648,12 +1687,12 @@ def computeWindow (fuel : Nat) (ctxs : Array QEnv) (windows : List (Name × Wind
       return (result, order)
 
 
-/-- The values of a window function over one partition `p` (row indices in
-    the window's order) of the rows `ctxs` (`computeWindow`). -/
-def windowPartition (fuel : Nat) (ctxs : Array QEnv) (name : String) (n : Name) (args : List Expr) (star : Bool)
+/-- The value of a window function at row `j` of partition `p` (row indices
+    in the window's order) of the rows `ctxs` (`windowPartition`). -/
+def windowRowValue (fuel : Nat) (ctxs : Array QEnv) (name : String) (n : Name) (args : List Expr) (star : Bool)
     (ord : List OrderTerm) (frame : Option Frame) (okeys : Array (Array Value)) (ocolls : List Coll)
     (odirs : List (SortDir × NullsOrder)) (argv : Array (List Value)) (pass : Array Bool) (p : Array Nat)
-    (result : Array Value) : M (Array Value) :=
+    (pi : PeerInfo) (j : Nat) : M Value :=
   match fuel with
   | 0 => outOfFuel
   | fuel + 1 => do
@@ -1665,31 +1704,14 @@ def windowPartition (fuel : Nat) (ctxs : Array QEnv) (name : String) (n : Name) 
         | v => match realAsInt v.numeric.toReal with
           | some i => return i
           | none => return (if v.isNull then dflt else v.numeric.toInt)
+    let m := pi.m
+    let fP := pi.firstPeer
+    let lP := pi.lastPeer
+    let gIdx := pi.groupIdx
+    let ngroups := pi.ngroups
+    let groupStart (k : Nat) : Nat := pi.groupStart k
+    let groupEnd (k : Nat) : Nat := pi.groupEnd k
     let isPeer (a b : Nat) : Bool := lexCompare ocolls odirs okeys[a]! okeys[b]! == .eq
-    let mut result := result
-    let m := p.size
-    let mut firstPeer := Array.replicate m 0
-    let mut lastPeer := Array.replicate m 0
-    let mut groupIdx := Array.replicate m 0
-    let mut g : Nat := 0
-    for j in [0:m] do
-      if j > 0 && isPeer p[j - 1]! p[j]! then
-        firstPeer := firstPeer.set! j firstPeer[j - 1]!
-        groupIdx := groupIdx.set! j groupIdx[j - 1]!
-      else
-        firstPeer := firstPeer.set! j j
-        if j > 0 then g := g + 1
-        groupIdx := groupIdx.set! j g
-    for j' in [0:m] do
-      let j := m - 1 - j'
-      if j + 1 < m && isPeer p[j]! p[j + 1]! then lastPeer := lastPeer.set! j lastPeer[j + 1]!
-      else lastPeer := lastPeer.set! j j
-    let ngroups : Nat := g + 1
-    let gIdx := groupIdx
-    let groupStart (k : Nat) : Nat := ((List.range m).find? (fun x => gIdx[x]! == k)).getD m
-    let groupEnd (k : Nat) : Nat := ((List.range m).reverse.find? (fun x => gIdx[x]! == k)).getD 0
-    let fP := firstPeer
-    let lP := lastPeer
     let frameOf (j : Nat) : M (List Nat) := do
       let fr := frame.getD (if ord.isEmpty then .mk .rows .unboundedPreceding .unboundedFollowing .noOthers
                             else .mk .range .unboundedPreceding .currentRow .noOthers)
@@ -1752,44 +1774,56 @@ def windowPartition (fuel : Nat) (ctxs : Array QEnv) (name : String) (n : Name) 
           if !excluded then out := kk :: out
         k := k + 1
       return out.reverse
-    for j in [0:m] do
-      let row := p[j]!
-      let v ← match name with
-        | "row_number" => pure (Value.int (j + 1))
-        | "rank" => pure (.int (fP[j]! + 1))
-        | "dense_rank" => pure (.int (gIdx[j]! + 1))
-        | "percent_rank" => pure (.real (if m ≤ 1 then 0.0 else intToReal fP[j]! / intToReal ((m : Int) - 1)))
-        | "cume_dist" => pure (.real (intToReal (lP[j]! + 1) / intToReal m))
-        | "ntile" =>
-          let nt ← constArg 0 1
-          if nt ≤ 0 then err "argument of ntile must be a positive integer"
-          let nt := nt.toNat
-          let base := m / nt
-          let extra := m % nt
-          let bucket := if j < extra * (base + 1) then j / (base + 1) else extra + (j - extra * (base + 1)) / (max base 1)
-          pure (.int (bucket + 1))
-        | "lag" | "lead" =>
-          let off ← constArg 1 1
-          let k : Int := if name == "lag" then (j : Int) - off else j + off
-          if k ≥ 0 && k < m then pure ((argv[p[k.toNat]!]!)[0]?.getD .null)
-          else match args[2]? with
-            | some e => evalExpr fuel ctxs[row]! e
-            | none => pure .null
-        | "first_value" | "last_value" | "nth_value" =>
-          let fr ← frameOf j
-          let nth ← constArg 1 1
-          if name == "nth_value" && nth ≤ 0 then err "second argument to nth_value must be a positive integer"
-          let pick := if name == "first_value" then fr.head?
-            else if name == "last_value" then fr.getLast?
-            else fr[(nth - 1).toNat]?
-          pure ((pick.bind fun k => (argv[p[k]!]!)[0]?).getD .null)
-        | _ =>
-          if !(isAggCall n args.length star false) then err s!"no such window function: {n}"
-          let fr ← frameOf j
-          let vals := (fr.filter fun k => pass[p[k]!]!).toArray.map fun k => argv[p[k]!]!
-          let coll := ((args.head?.bind fun e => (ctxs[0]?.bind fun c => exprColl c.env e)).map (·.1)).getD .binary
-          aggFinish fuel ctxs[row]! n star args coll vals
-      result := result.set! row v
+    let row := p[j]!
+    match name with
+      | "row_number" => pure (Value.int (j + 1))
+      | "rank" => pure (.int (fP[j]! + 1))
+      | "dense_rank" => pure (.int (gIdx[j]! + 1))
+      | "percent_rank" => pure (.real (if m ≤ 1 then 0.0 else intToReal fP[j]! / intToReal ((m : Int) - 1)))
+      | "cume_dist" => pure (.real (intToReal (lP[j]! + 1) / intToReal m))
+      | "ntile" =>
+        let nt ← constArg 0 1
+        if nt ≤ 0 then err "argument of ntile must be a positive integer"
+        let nt := nt.toNat
+        let base := m / nt
+        let extra := m % nt
+        let bucket := if j < extra * (base + 1) then j / (base + 1) else extra + (j - extra * (base + 1)) / (max base 1)
+        pure (.int (bucket + 1))
+      | "lag" | "lead" =>
+        let off ← constArg 1 1
+        let k : Int := if name == "lag" then (j : Int) - off else j + off
+        if k ≥ 0 && k < m then pure ((argv[p[k.toNat]!]!)[0]?.getD .null)
+        else match args[2]? with
+          | some e => evalExpr fuel ctxs[row]! e
+          | none => pure .null
+      | "first_value" | "last_value" | "nth_value" =>
+        let fr ← frameOf j
+        let nth ← constArg 1 1
+        if name == "nth_value" && nth ≤ 0 then err "second argument to nth_value must be a positive integer"
+        let pick := if name == "first_value" then fr.head?
+          else if name == "last_value" then fr.getLast?
+          else fr[(nth - 1).toNat]?
+        pure ((pick.bind fun k => (argv[p[k]!]!)[0]?).getD .null)
+      | _ =>
+        if !(isAggCall n args.length star false) then err s!"no such window function: {n}"
+        let fr ← frameOf j
+        let vals := (fr.filter fun k => pass[p[k]!]!).toArray.map fun k => argv[p[k]!]!
+        let coll := ((args.head?.bind fun e => (ctxs[0]?.bind fun c => exprColl c.env e)).map (·.1)).getD .binary
+        aggFinish fuel ctxs[row]! n star args coll vals
+
+/-- The values of a window function over one partition `p` (row indices in
+    the window's order) of the rows `ctxs` (`computeWindow`). -/
+def windowPartition (fuel : Nat) (ctxs : Array QEnv) (name : String) (n : Name) (args : List Expr) (star : Bool)
+    (ord : List OrderTerm) (frame : Option Frame) (okeys : Array (Array Value)) (ocolls : List Coll)
+    (odirs : List (SortDir × NullsOrder)) (argv : Array (List Value)) (pass : Array Bool) (p : Array Nat)
+    (result : Array Value) : M (Array Value) :=
+  match fuel with
+  | 0 => outOfFuel
+  | fuel + 1 => do
+    let pi := peerInfo ocolls odirs okeys p
+    let mut result := result
+    for j in [0:pi.m] do
+      result := result.set! p[j]! (← windowRowValue fuel ctxs name n args star ord frame okeys ocolls odirs argv pass p pi j)
     return result
 
 /-- FROM with WHERE: a chain of inner joins is evaluated as nested loops, each
