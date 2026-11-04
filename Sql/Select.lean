@@ -1170,6 +1170,49 @@ def resultMeta (q : QEnv) (srcs : Array Src) (rcols : List ResultCol) : Array Co
     | .expr e _ _ => ⟨resultName q srcs rc, exprAff qm.env e, ((exprColl qm.env e).map (·.1)).getD .binary⟩
     | _ => ⟨"", none, .binary⟩
 
+/-- The rows of a recursive CTE `n` from the queue on (`cteRows`; the
+    denotation's `cteLoop`, at most `steps` rounds): take the first row (or,
+    with ORDER BY, the least), hand it out unless OFFSET skips it or LIMIT is
+    reached, and queue the rows the recursive SELECTs give on it (UNION:
+    unless seen). `evalC` and `runSelectC` are the evaluator's. -/
+def cteLoopM (evalC : QEnv → Expr → M Value) (runSelectC : QEnv → Select → M (Array ColMeta × Array (Array Value)))
+    (steps : Nat) (q : QEnv) (n : Name) (cols : Array ColMeta) (others : List (Name × CteVal))
+    (with_ : List Cte) (wrec : Bool) (recursive : List SelectCore) (ob : List OrderTerm)
+    (distinctMode : Bool) (limit : Option Int) (offset : Int)
+    (queue seen out : Array (Array Value)) (skipped : Int) : M (Array (Array Value)) :=
+  match steps with
+  | 0 => if queue.isEmpty then return out else outOfFuel
+  | steps + 1 => do
+    if queue.isEmpty then return out
+    -- ORDER BY on a recursive CTE makes the queue a priority queue
+    let (row, rest') ← if ob.isEmpty then pure (queue[0]!, queue.extract 1 queue.size)
+      else do
+        let keys ← queue.mapM fun r => ob.toArray.mapM fun (.mk e _ _) =>
+          evalC { q with env := { q.env with frames := { srcs := #[metaSrc n cols], cur := #[some { rowid := 0, vals := r }] } :: q.env.frames } } e
+        let dirs := ob.map fun (.mk _ d nl) => (d, nl)
+        let mut best := 0
+        for i in List.range queue.size do
+          if i > 0 && lexCompare [] dirs keys[i]! keys[best]! == .lt then best := i
+        pure (queue[best]!, (queue.extract 0 best) ++ (queue.extract (best + 1) queue.size))
+    let mut queue := rest'
+    let mut skipped := skipped
+    let mut out := out
+    if skipped < offset then skipped := skipped + 1
+    else
+      if let some l := limit then
+        if l ≥ 0 && out.size ≥ l.toNat then return out
+      out := out.push row
+    let ctesRow := (n, CteVal.rows cols #[row]) :: others
+    let mut seen := seen
+    for c in recursive do
+      let (_, rows) ← runSelectC { q with ctes := ctesRow } (.mk with_ wrec c [] [] none none)
+      for r in rows do
+        if distinctMode then
+          if seen.any (rowsEq [] r) then continue
+          seen := seen.push r
+        queue := queue.push r
+    cteLoopM evalC runSelectC steps q n cols others with_ wrec recursive ob distinctMode limit offset queue seen out skipped
+
 /-! ## Joins: SQLite's nested loops
 
 The plan of a join (`JoinPlan`, shared with the denotation), the loops
@@ -1318,12 +1361,20 @@ inductive PCond where
   | not (a : PCond)
   deriving Inhabited
 
-/-- `x IN (w, …)` on values (the IN list's loop of `evalExpr`). -/
+/-- The loop of `x IN (w, …)` (`evalExpr`) on values, from the state
+    (some comparison was NULL, some was true): the first true comparison
+    stops it. -/
+def inListScan (v : Value) (aff : Option Aff) : Bool × Bool → List (Value × Coll) → Bool × Bool
+  | st, [] => st
+  | st, (w, coll) :: rest =>
+    let c := compareOp .eq aff coll v w
+    if truth c == some true then (st.1, true)
+    else if c.isNull then inListScan v aff (true, st.2) rest else inListScan v aff (st.1, st.2) rest
+
+/-- `x IN (w, …)` on values. -/
 def inListValue (v : Value) (aff : Option Aff) (ws : List (Value × Coll)) : Value :=
-  if v.isNull then .null else
-  let found := ws.any fun (w, coll) => truth (compareOp .eq aff coll v w) == some true
-  let sawNull := ws.any fun (w, coll) => (compareOp .eq aff coll v w).isNull
-  boolV (if found then some true else if sawNull then none else some false)
+  let st := inListScan v aff (false, false) ws
+  if v.isNull then .null else boolV (if st.2 then some true else if st.1 then none else some false)
 
 /-- Whether the jump a compiled conjunct codes is taken on a partial row
     (`condJump`). -/
@@ -2332,40 +2383,11 @@ def cteRows (fuel : Nat) (q : QEnv) (n : Name) (cv0 : CteVal) : M (Array ColMeta
               if seen.any (rowsEq [] r) then continue
               seen := seen.push r
             queue := queue.push r
-        let mut out : Array (Array Value) := #[]
-        let mut skipped : Int := 0
-        let mut steps := 0
-        -- a recursive CTE may run forever in SQLite: such a script has no
-        -- derivation, and the executable stops when the fuel is spent
-        let mut finished := false
-        for _ in [0:fuel] do
-          if queue.isEmpty then finished := true; break
-          -- ORDER BY on a recursive CTE makes the queue a priority queue
-          let (row, rest') ← if ob.isEmpty then pure (queue[0]!, queue.extract 1 queue.size)
-            else do
-              let keys ← queue.mapM fun r => ob.toArray.mapM fun (.mk e _ _) =>
-                evalExpr fuel { q with env := { q.env with frames := { srcs := #[metaSrc n cols], cur := #[some { rowid := 0, vals := r }] } :: q.env.frames } } e
-              let dirs := ob.map fun (.mk _ d nl) => (d, nl)
-              let mut best := 0
-              for i in [1:queue.size] do
-                if lexCompare [] dirs keys[i]! keys[best]! == .lt then best := i
-              pure (queue[best]!, (queue.extract 0 best) ++ (queue.extract (best + 1) queue.size))
-          queue := rest'
-          if skipped < offset then skipped := skipped + 1
-          else
-            if let some l := limit then
-              if l ≥ 0 && out.size ≥ l.toNat then finished := true; break
-            out := out.push row
-          steps := steps + 1
-          let ctesRow := (n, CteVal.rows cols #[row]) :: others
-          for (_, c) in recursive do
-            let (_, rows) ← runSelect fuel { q with ctes := ctesRow } (.mk with_ wrec c [] [] none none)
-            for r in rows do
-              if distinctMode then
-                if seen.any (rowsEq [] r) then continue
-                seen := seen.push r
-              queue := queue.push r
-        if !finished && !queue.isEmpty then outOfFuel
+        -- the queue, run to empty; a recursive CTE may run forever in SQLite:
+        -- such a script has no derivation, and the executable stops when the
+        -- fuel is spent
+        let out ← cteLoopM (evalExpr fuel) (runSelect fuel) fuel q n cols others with_ wrec (recursive.map (·.2)) ob
+          distinctMode limit offset queue seen #[] 0
         return (cols, out)
 
 /-- Evaluate a FROM clause: its sources and joined rows (one `Cur` per source). -/

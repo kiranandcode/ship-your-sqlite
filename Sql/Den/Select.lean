@@ -1252,10 +1252,11 @@ def cteRows (q : QEnv) (n : Name) (cv0 : CteVal) : D (Array ColMeta × Array (Ar
               if seen.any (rowsEq [] r) then continue
               seen := seen.push r
             queue := queue.push r
-        -- the queue, run to empty: a least fixed point (a recursive CTE that
-        -- never empties its queue has no outcome)
-        let out ← cteLoop q n cols others with_ wrec (recursive.map (·.2)) ob distinctMode limit offset
-          queue seen #[] 0
+        -- the queue, run to empty; a recursive CTE may run forever in SQLite:
+        -- such a script has no derivation, and the executable stops when the
+        -- fuel is spent
+        let out ← cteLoop q n cols others with_ wrec (recursive.map (·.2)) ob
+          distinctMode limit offset queue seen #[] 0
         return (cols, out)
 partial_fixpoint monotonicity by (try simp only []); repeat' monotonicity
 

@@ -38,16 +38,12 @@ open(p, 'w').write(s)
 
 # --- recursive CTEs: the queue as a least fixed point ---
 s = open(p).read()
+rep('''cteLoopM (evalExpr) (runSelect) q n cols others with_ wrec (recursive.map (·.2)) ob''',
+    '''cteLoop q n cols others with_ wrec (recursive.map (·.2)) ob''')
 i = s.index('def cteRows')
-a = s.index('        let mut out : Array (Array Value) := #[]\n        let mut skipped : Int := 0\n', i)
-b = s.index('        if !finished && !queue.isEmpty then outOfFuel\n        return (cols, out)\n', i) + len('        if !finished && !queue.isEmpty then outOfFuel\n        return (cols, out)\n')
-s = s[:a] + '''        -- the queue, run to empty: a least fixed point (a recursive CTE that
-        -- never empties its queue has no outcome)
-        let out ← cteLoop q n cols others with_ wrec (recursive.map (·.2)) ob distinctMode limit offset
-          queue seen #[] 0
-        return (cols, out)
-partial_fixpoint monotonicity by (try simp only []); repeat' monotonicity
-
+j = s.index('partial_fixpoint monotonicity', i)
+j = s.index('\n', j) + 1
+s = s[:j] + '''
 /-- The rows of a recursive CTE `n` from the queue on (setupQueue/the loop of
     multiSelect's recursive case): take the first row (or, with ORDER BY,
     the least), hand it out unless OFFSET skips it or LIMIT is reached, and
@@ -85,9 +81,8 @@ def cteLoop (q : QEnv) (n : Name) (cols : Array ColMeta) (others : List (Name ×
         seen := seen.push r
       queue := queue.push r
   cteLoop q n cols others with_ wrec recursive ob distinctMode limit offset queue seen out skipped
-''' + s[b:]
-# the original partial_fixpoint after cteRows is now after cteLoop
-
+partial_fixpoint monotonicity by (try simp only []); repeat' monotonicity
+''' + s[j:]
 open(p, 'w').write(s)
 
 # --- `alias` is a keyword under Mathlib: quote it ---

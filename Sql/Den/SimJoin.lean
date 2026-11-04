@@ -6,6 +6,7 @@
   denotation's), and `evalFromWhereS` by `joinRun`.
 -/
 import Sql.Den.SimSelectBase
+import Sql.Den.SimIndex
 
 namespace Sql.Den
 
@@ -124,5 +125,32 @@ theorem sim_joinPrepareM {ch : Choices} {fuel : Nat} (ih : SelectSim ch fuel) (q
   select_ih ih
   unfold Sql.joinPrepareM Den.joinPrepare
   sim
+
+/-- The interpreter's join is simulated by the denotation's: the plan, then
+    the loops, whose rows, checks and steps are simulated (a row the index
+    skips being one the denotation's check rejects). -/
+theorem sim_evalFromWhereS {ch : Choices} {fuel : Nat} (ih : SelectSim ch fuel) {σ : Type} (q : QEnv)
+    (f : FromItem) (where_ : Option Expr) (aliases : List (Name × Expr)) (init : σ)
+    (step : σ → Array Src → Array Cur → M (σ × Bool)) (step' : σ → Array Src → Array Cur → D (σ × Bool))
+    (h_step : ∀ a srcs cur, Sim ch (step a srcs cur) (step' a srcs cur)) :
+    Sim ch (Sql.evalFromWhereS (fuel + 1) q f where_ aliases init step)
+      (joinRun (Den.joinPrepare q f where_ aliases) (Den.joinRowsAt q) (Den.joinCheck q) init step') := by
+  have hprep := sim_joinPrepareM ih q f where_ aliases
+  select_ih ih
+  unfold Sql.evalFromWhereS joinRun
+  simp only []
+  refine Sim.bind hprep fun p => ?_
+  refine Sim.bind (Sim.joinLoopsM _ _ _ _ _ _ _ _ _ _ ?_ ?_ (fun d cur h => skipRow_rejects q p d cur h)
+    (fun acc cur => h_step acc p.srcs cur) 0 p.empty init) fun r => ?_
+  · intro k pre
+    unfold Den.joinRowsAt
+    sim
+  · intro cur d
+    unfold Den.joinCheck
+    simp only []
+    apply Sim.perm_self
+    sim
+  · rcases r with ⟨acc, more, failure⟩
+    exact Sim.pure _
 
 end Sql.Den
