@@ -9,6 +9,21 @@ namespace Sql.Den
 
 open Sql
 
+theorem sim_execInsert {ch : Choices} {fuel : Nat} (ih : ExecSim ch fuel) :
+    ∀ (q : QEnv) (orC : Option ConflictRes) (tname : Name) (cols : List Name) (src : InsertSource) (upserts : List Upsert) (ret : List ResultCol), Sim ch (Sql.execInsert (fuel + 1) q orC tname cols src upserts ret) (Den.execInsert q orC tname cols src upserts ret) := by
+  exec_ih ih
+  intros; unfold Sql.execInsert Den.execInsert; sim
+
+theorem sim_execUpdate {ch : Choices} {fuel : Nat} (ih : ExecSim ch fuel) :
+    ∀ (q : QEnv) (orC : Option ConflictRes) (tname : Name) («alias» : Option Name) (sets : List (List Name × Expr)) (from_ : Option FromItem) (wh : Option Expr) (ret : List ResultCol), Sim ch (Sql.execUpdate (fuel + 1) q orC tname «alias» sets from_ wh ret) (Den.execUpdate q orC tname «alias» sets from_ wh ret) := by
+  exec_ih ih
+  intros; unfold Sql.execUpdate Den.execUpdate; sim
+
+theorem sim_insertOne {ch : Choices} {fuel : Nat} (ih : ExecSim ch fuel) :
+    ∀ (q : QEnv) (t : Table) (tname : Name) (orC : Option ConflictRes) (upserts : List Upsert) (colIdx : List Nat) (r : Array Value) (n : Int), Sim ch (Sql.insertOne (fuel + 1) q t tname orC upserts colIdx r n) (Den.insertOne q t tname orC upserts colIdx r n) := by
+  exec_ih ih
+  intros; unfold Sql.insertOne Den.insertOne; sim
+
 theorem sim_fkOnParentDelete {ch : Choices} {fuel : Nat} (ih : ExecSim ch fuel) :
     ∀ (pname : Name) (pr : Row), Sim ch (Sql.fkOnParentDelete (fuel + 1) pname pr) (Den.fkOnParentDelete pname pr) := by
   exec_ih ih

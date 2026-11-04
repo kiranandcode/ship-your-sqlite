@@ -80,10 +80,53 @@ theorem Sim.resultRows {ch : Choices} :
     ∀ (fuel : Nat) (q : QEnv) (t : Table) («alias» : Name) (rows : Array Row) (ret : List ResultCol), Sim ch (Sql.resultRows fuel q t «alias» rows ret) (Den.resultRows q t «alias» rows ret) := by
   intros; unfold Sql.resultRows Den.resultRows; sim
 
+theorem Sim.createExists {ch : Choices} :
+    ∀ (db : Db) (temp : Bool) (sch : Option Name) (att : Option Name) (name : Name) (ine : Bool) (cols : List ColumnDef) (tailStart : Nat), Sim ch (Sql.createExists db temp sch att name ine cols tailStart) (Den.createExists db temp sch att name ine cols tailStart) := by
+  intros; unfold Sql.createExists Den.createExists; sim
+
+theorem Sim.createTableM {ch : Choices} :
+    ∀ (fuel : Nat) (q : QEnv) (temp : Bool) (ine : Bool) (sch : Option Name) (name : Name) (cols : List ColumnDef) (cons : List (Option Name × TableConstraint)) (wr : Bool) (strict : Bool) (asSel : Option Select) (sql : String) (tailStart : Nat), Sim ch (Sql.createTableM fuel q temp ine sch name cols cons wr strict asSel sql tailStart) (Den.createTableM q temp ine sch name cols cons wr strict asSel sql tailStart) := by
+  intros; unfold Sql.createTableM Den.createTableM; sim
+
+theorem Sim.insertSources {ch : Choices} :
+    ∀ (fuel : Nat) (q : QEnv) (t : Table) (cols : List Name) (src : InsertSource), Sim ch (Sql.insertSources fuel q t cols src) (Den.insertSources q t cols src) := by
+  intros; unfold Sql.insertSources Den.insertSources; sim
+
+theorem Sim.upsertRow {ch : Choices} :
+    ∀ (fuel : Nat) (q : QEnv) (tname : Name) (vals : Array Value) (rowidV : Option Value) (upserts : List Upsert) (n : Int) (e : Err), Sim ch (Sql.upsertRow fuel q tname vals rowidV upserts n e) (Den.upsertRow q tname vals rowidV upserts n e) := by
+  intros; unfold Sql.upsertRow Den.upsertRow; sim
+
+theorem Sim.updateTargets {ch : Choices} :
+    ∀ (fuel : Nat) (q : QEnv) (t : Table) (src : Src) (fsrcs : Array Src) (frows : Array (Array Cur)) (wh : Option Expr), Sim ch (Sql.updateTargets fuel q t src fsrcs frows wh) (Den.updateTargets q t src fsrcs frows wh) := by
+  intros; unfold Sql.updateTargets Den.updateTargets; sim
+
+theorem Sim.updatedRow {ch : Choices} :
+    ∀ (fuel : Nat) (q : QEnv) (t : Table) (src : Src) (fsrcs : Array Src) (old : Row) (fr : Array Cur) (sets : List (List Name × Expr)), Sim ch (Sql.updatedRow fuel q t src fsrcs old fr sets) (Den.updatedRow q t src fsrcs old fr sets) := by
+  intros; unfold Sql.updatedRow Den.updatedRow; sim
+
+theorem Sim.updateConflictErr {ch : Choices} :
+    ∀ (q : QEnv) (nUpd : Nat) (r : ConflictRes) (m : String) (code : Nat), Sim ch (Sql.updateConflictErr q nUpd r m code) (Den.updateConflictErr q nUpd r m code) := by
+  intros; unfold Sql.updateConflictErr Den.updateConflictErr; sim
+
+theorem Sim.updateNotNull {ch : Choices} :
+    ∀ (fuel : Nat) (q : QEnv) (t : Table) (newRow : Row) (orC : Option ConflictRes) (nUpd : Nat), Sim ch (Sql.updateNotNull fuel q t newRow orC nUpd) (Den.updateNotNull q t newRow orC nUpd) := by
+  intros; unfold Sql.updateNotNull Den.updateNotNull; sim
+
+theorem Sim.updateConflicts {ch : Choices} :
+    ∀ (q : QEnv) (t : Table) (old : Row) (newRow : Row) (orC : Option ConflictRes) (nUpd : Nat), Sim ch (Sql.updateConflicts q t old newRow orC nUpd) (Den.updateConflicts q t old newRow orC nUpd) := by
+  intros; unfold Sql.updateConflicts Den.updateConflicts; sim
+
+theorem Sim.updateChecks {ch : Choices} :
+    ∀ (fuel : Nat) (q : QEnv) (t : Table) (old : Row) (newRow : Row) (orC : Option ConflictRes) (nUpd : Nat), Sim ch (Sql.updateChecks fuel q t old newRow orC nUpd) (Den.updateChecks q t old newRow orC nUpd) := by
+  intros; unfold Sql.updateChecks Den.updateChecks; sim
+
 /-- Every function of the interpreter's Exec block, at `fuel`, is simulated by
     its denotation. -/
 structure ExecSim (ch : Choices) (fuel : Nat) : Prop where
   execStmt : ∀ (q : QEnv) (s : Stmt), Sim ch (Sql.execStmt fuel q s) (Den.execStmt q s)
+  execInsert : ∀ (q : QEnv) (orC : Option ConflictRes) (tname : Name) (cols : List Name) (src : InsertSource) (upserts : List Upsert) (ret : List ResultCol), Sim ch (Sql.execInsert fuel q orC tname cols src upserts ret) (Den.execInsert q orC tname cols src upserts ret)
+  execUpdate : ∀ (q : QEnv) (orC : Option ConflictRes) (tname : Name) («alias» : Option Name) (sets : List (List Name × Expr)) (from_ : Option FromItem) (wh : Option Expr) (ret : List ResultCol), Sim ch (Sql.execUpdate fuel q orC tname «alias» sets from_ wh ret) (Den.execUpdate q orC tname «alias» sets from_ wh ret)
+  insertOne : ∀ (q : QEnv) (t : Table) (tname : Name) (orC : Option ConflictRes) (upserts : List Upsert) (colIdx : List Nat) (r : Array Value) (n : Int), Sim ch (Sql.insertOne fuel q t tname orC upserts colIdx r n) (Den.insertOne q t tname orC upserts colIdx r n)
   fkOnParentDelete : ∀ (pname : Name) (pr : Row), Sim ch (Sql.fkOnParentDelete fuel pname pr) (Den.fkOnParentDelete pname pr)
   fkOnParentUpdate : ∀ (pname : Name) (old : Row) (new : Row), Sim ch (Sql.fkOnParentUpdate fuel pname old new) (Den.fkOnParentUpdate pname old new)
   viewWithTriggers : ∀ (n : Name), Sim ch (Sql.viewWithTriggers fuel n) (Den.viewWithTriggers n)
@@ -97,6 +140,9 @@ structure ExecSim (ch : Choices) (fuel : Nat) : Prop where
 /-- At fuel 0 every function of the block runs out of fuel. -/
 theorem execSim_zero (ch : Choices) : ExecSim ch 0 where
   execStmt := by intros; unfold Sql.execStmt; exact Sim.outOfFuel _
+  execInsert := by intros; unfold Sql.execInsert; exact Sim.outOfFuel _
+  execUpdate := by intros; unfold Sql.execUpdate; exact Sim.outOfFuel _
+  insertOne := by intros; unfold Sql.insertOne; exact Sim.outOfFuel _
   fkOnParentDelete := by intros; unfold Sql.fkOnParentDelete; exact Sim.outOfFuel _
   fkOnParentUpdate := by intros; unfold Sql.fkOnParentUpdate; exact Sim.outOfFuel _
   viewWithTriggers := by intros; unfold Sql.viewWithTriggers; exact Sim.outOfFuel _
@@ -110,6 +156,6 @@ theorem execSim_zero (ch : Choices) : ExecSim ch 0 where
 set_option hygiene false in
 /-- The fields of an induction hypothesis `ExecSim ch fuel`, as hypotheses `h_f`. -/
 macro "exec_ih " ih:ident : tactic =>
-  `(tactic| obtain ⟨h_execStmt, h_fkOnParentDelete, h_fkOnParentUpdate, h_viewWithTriggers, h_viewRows, h_insertView, h_updateView, h_deleteView, h_runViewTriggers, h_runTriggers⟩ := $ih)
+  `(tactic| obtain ⟨h_execStmt, h_execInsert, h_execUpdate, h_insertOne, h_fkOnParentDelete, h_fkOnParentUpdate, h_viewWithTriggers, h_viewRows, h_insertView, h_updateView, h_deleteView, h_runViewTriggers, h_runTriggers⟩ := $ih)
 
 end Sql.Den

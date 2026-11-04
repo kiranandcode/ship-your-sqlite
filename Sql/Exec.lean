@@ -605,6 +605,241 @@ def fkChildren (db : Db) (parentName : Name) (pr : Row) : List (Table × Foreign
           | some i => parent.cols[i]?.map (·.aff) | none => some .integer) v) (parentVal parent pr pc) == .eq).toList.map
         fun r => (t, fk, r)
 
+/-- The checks of CREATE TABLE before the table is built (`createTableM`):
+    the schema, an existing object (true: IF NOT EXISTS, nothing to do),
+    duplicate columns (an error stops prepare after that definition), a
+    reserved name. -/
+def createExists (db : Db) (temp : Bool) (sch att : Option Name) (name : Name) (ine : Bool)
+    (cols : List ColumnDef) (tailStart : Nat) : M Bool := do
+  if let some s := sch then
+    if !(nameEq s "main" || nameEq s "temp" || att.isSome) then err s!"unknown database {s}"
+  let errAt {α} (m : String) (t : Nat) : M α := throw { code := SQLITE_ERROR, msg := m, tail := some t }
+  if objExists db name temp att then
+    if ine then return true
+    if (db.main.findTable name).isSome || (db.main.findView name).isSome then errAt s!"table {name} already exists" tailStart
+    errAt s!"there is already an index named {name}" tailStart
+  let mut seen : List Name := []
+  for cd in cols do
+    if seen.any (nameEq · cd.name) then errAt s!"duplicate column name: {cd.name}" cd.tailAt
+    seen := cd.name :: seen
+  if name.toLower.startsWith "sqlite_" then err s!"object name reserved for internal use: {name}"
+  return false
+
+/-- CREATE TABLE (`execStmt`). -/
+def createTableM (fuel : Nat) (q : QEnv) (temp ine : Bool) (sch : Option Name) (name : Name) (cols : List ColumnDef)
+    (cons : List (Option Name × TableConstraint)) (wr strict : Bool) (asSel : Option Select) (sql : String)
+    (tailStart : Nat) : M (Array (Array Value)) := do
+  let temp := temp || sch.any (nameEq · "temp")
+  let db ← getDb
+  let att : Option Name := sch.bind fun s => if db.attached.any (nameEq · s) then some s else none
+  if ← createExists db temp sch att name ine cols tailStart then return #[]
+  let t ← match asSel with
+    | some sel =>
+      let (cmeta, rows) ← runSelect fuel q sel
+      let cds := cmeta.toList.map fun c => ({ name := c.name, type := match c.aff with
+        | some .integer => "INT" | some .real => "REAL" | some .text => "TEXT" | some .numeric => "NUM" | _ => "", constraints := [] } : ColumnDef)
+      let t ← mkTable name cds [] false false ""
+      let sqlText := "CREATE TABLE " ++ name ++ "(" ++ ",".intercalate (cds.map fun c => c.name ++ (if c.type.isEmpty then "" else " " ++ c.type)) ++ ")"
+      pure { t with sql := sqlText, rows := rows.mapIdx fun i r => ({ rowid := i + 1, vals := r } : Row) }
+    | none => mkTable name cols cons wr strict sql
+  let t := { t with temp, attachedTo := att }
+  -- automatic indexes for UNIQUE and non-rowid PRIMARY KEY constraints
+  let nAuto := t.uniques.length
+  modifyMain fun s => { s with objs := s.objs.push (.table t) ++
+    ((List.range nAuto).toArray.map fun i => .index
+      { name := s!"sqlite_autoindex_{name}_{i + 1}", table := name, cols := [], unique := false,
+        where_ := none, sql := none }) }
+  if t.autoinc && ((← getDb).main.findTable "sqlite_sequence").isNone then
+    let st ← mkTable "sqlite_sequence" [{ name := "name", type := "", constraints := [] },
+      { name := "seq", type := "", constraints := [] }] [] false false "CREATE TABLE sqlite_sequence(name,seq)"
+    modifyMain fun s => { s with objs := s.objs.push (.table st) }
+  return #[]
+
+/-- The columns an INSERT gives values for (`execInsert`; the rowid is
+    `t.cols.size`), and its source rows: a VALUES row's expressions (computed
+    when the loop reaches it: a VALUES list is a co-routine) or a SELECT's
+    row. The arity checks of prepare come first. -/
+def insertSources (fuel : Nat) (q : QEnv) (t : Table) (cols : List Name) (src : InsertSource) :
+    M (List Nat × Array (List Expr ⊕ Array Value)) := do
+  let colIdx ← if cols.isEmpty then pure (List.range t.cols.size)
+    else cols.mapM fun c => do
+      match t.cols.toList.findIdx? (nameEq ·.name c) with
+      | some i => pure i
+      | none => if isRowidName c && !t.withoutRowid then pure t.cols.size else err s!"table {t.name} has no column named {c}"
+  let ncols := if cols.isEmpty then (t.cols.toList.filter fun c => c.generated.isNone).length else cols.length
+  -- the rows to insert, each computed when the loop reaches it (a VALUES
+  -- list is a co-routine: a row is evaluated, then inserted, then the
+  -- next; its arity is checked at prepare)
+  let srcRows : Array (List Expr ⊕ Array Value) ← match src with
+    | .values rows => do
+        -- the parser's check (sqlite3MultiValues) comes first
+        if let r0 :: _ := rows then
+          if rows.any (·.length != r0.length) then err "all VALUES must have the same number of terms"
+        for r in rows do
+          if r.length != ncols then
+            if cols.isEmpty then err s!"table {t.name} has {ncols} columns but {r.length} values were supplied"
+            err s!"{r.length} values for {ncols} columns"
+        pure (rows.toArray.map .inl)
+    | .select sel => do
+        let (cm, rows) ← runSelect fuel q sel
+        if cm.size != ncols then
+          if cols.isEmpty then err s!"table {t.name} has {ncols} columns but {cm.size} values were supplied"
+          err s!"{cm.size} values for {ncols} columns"
+        pure (rows.map .inr)
+    | .defaults => pure #[.inr #[]]
+  let colIdx := match src with
+    | .defaults => []
+    | _ => if cols.isEmpty then (List.range t.cols.size).filter fun (i : Nat) => (t.cols[i]!).generated.isNone else colIdx
+  return (colIdx, srcRows)
+
+/-- An INSERT's row hit a constraint `e` (`insertOne`): FAIL keeps the earlier
+    rows; with an UPSERT on a uniqueness conflict, its DO clause runs (on the
+    conflicting row); else the error stands. -/
+def upsertRow (fuel : Nat) (q : QEnv) (tname : Name) (vals : Array Value) (rowidV : Option Value)
+    (upserts : List Upsert) (n : Int) (e : Err) : M (Option Row) := do
+  -- FAIL keeps the earlier rows on a constraint conflict (insertRow
+  -- marks it); any other error rolls the statement back
+  if e.keep && upserts.isEmpty then
+    modify fun c => { c with db := { c.db with changes := n, totalChanges := c.db.totalChanges + n } }
+    throw e
+  if upserts.isEmpty || !(e.code == SQLITE_CONSTRAINT_UNIQUE || e.code == SQLITE_CONSTRAINT_PRIMARYKEY) then throw e
+  let some up := upserts.head? | throw e
+  match up.action with
+  | .nothing => pure none
+  | .update sets wh =>
+    -- the conflicting row
+    let t ← currentTable tname
+    let mut vals' := vals
+    for h : i in [0:t.cols.size] do
+      vals' := vals'.set! i (← storeValue t i vals[i]!)
+    let probe : Row := { rowid := (rowidV.map (·.toInt)).getD 0, vals := vals' }
+    let uq := allUniques (← getDb) t
+    let conflict := t.rows.find? fun old =>
+      (t.rowidCol.isSome && rowidV.isSome && old.rowid == probe.rowid) ||
+      uq.any fun (k, _) => keyEq k (keyOf old k) (keyOf probe k)
+    match conflict with
+    | none => throw e
+    | some old =>
+      let exSrc := { tableSrc "excluded" t with hasRowid := false, qualOnly := true }
+      let qx := { q with env := { q.env with frames := { srcs := #[tableSrc t.name t, exSrc], cur := #[some old, some probe] } :: q.env.frames } }
+      let pass ← match wh with
+        | some wexp => condHolds fuel qx wexp
+        | none => pure true
+      if !pass then pure none else
+      let mut nv := old.vals
+      for (names, ex) in sets do
+        let v ← evalExpr fuel qx ex
+        for nm in names do
+          match t.cols.toList.findIdx? (nameEq ·.name nm) with
+          | some i => nv := nv.set! i (← storeValue t i v)
+          | none => err s!"no such column: {nm}"
+      let newRow ← withGenerated fuel t { old with vals := nv }
+      let _ ← checkRow fuel t newRow
+      let others := t.rows.filter (·.rowid != old.rowid)
+      for (k, _) in allUniques (← getDb) t do
+        if others.any (fun r => keyEq k (keyOf r k) (keyOf newRow k)) then
+          err (uniqueMsg t k) (if k.isPk then SQLITE_CONSTRAINT_PRIMARYKEY else SQLITE_CONSTRAINT_UNIQUE)
+      modifyMain fun s => s.setTable { t with rows := sortRows t (others.push newRow) }
+      pure (some newRow)
+
+/-- The rows an UPDATE changes (`execUpdate`): those WHERE holds on, each
+    with the FROM row it is joined with (the first match, in an order the plan
+    picks), in the order the plan updates them. -/
+def updateTargets (fuel : Nat) (q : QEnv) (t : Table) (src : Src) (fsrcs : Array Src) (frows : Array (Array Cur))
+    (wh : Option Expr) : M (Array (Row × Array Cur)) := do
+  let mut targets : Array (Row × Array Cur) := #[]
+  for r in t.rows do
+    -- which matching FROM row is used is the plan's choice
+    for fr in ← chooseOrder frows do
+      let qr := { q with env := { q.env with frames := { srcs := #[src] ++ fsrcs, cur := #[some r] ++ fr } :: q.env.frames } }
+      let ok ← match wh with
+        | some w => condHolds fuel qr w
+        | none => pure true
+      if ok then targets := targets.push (r, fr); break
+  -- the order the rows are updated in is the plan's
+  targets ← chooseOrder targets
+  return targets
+
+/-- The new values of a row an UPDATE changes (`execUpdate`). -/
+def updatedRow (fuel : Nat) (q : QEnv) (t : Table) (src : Src) (fsrcs : Array Src) (old : Row) (fr : Array Cur)
+    (sets : List (List Name × Expr)) : M Row := do
+  let qr := { q with env := { q.env with frames := { srcs := #[src] ++ fsrcs, cur := #[some old] ++ fr } :: q.env.frames } }
+  let mut nv := old.vals
+  let mut newRowid := old.rowid
+  for (names, ex) in sets do
+    let v ← evalExpr fuel qr ex
+    for nm in names do
+      match t.cols.toList.findIdx? (nameEq ·.name nm) with
+      | some i =>
+        nv := nv.set! i (← storeValue t i v)
+        if t.rowidCol == some i then
+          match applyAffinity .integer v with
+          | .int ri => newRowid := ri
+          | _ => err "datatype mismatch" SQLITE_MISMATCH
+      | none =>
+        if isRowidName nm && !t.withoutRowid then
+          match applyAffinity .integer v with
+          | .int ri => newRowid := ri
+          | _ => err "datatype mismatch" SQLITE_MISMATCH
+        else err s!"no such column: {nm}"
+  withGenerated fuel t { rowid := newRowid, vals := nv }
+
+/-- A constraint error of an UPDATE under resolution `r` (FAIL keeps the
+    `nUpd` rows updated so far, ROLLBACK rolls the transaction back). -/
+def updateConflictErr (q : QEnv) (nUpd : Nat) (r : ConflictRes) (m : String) (code : Nat) : M Unit := do
+  if r == .fail then countChanges q nUpd
+  throwConflict r m code
+
+/-- NOT NULL on a row an UPDATE changes, resolved by UPDATE OR <oc> (else the
+    column's ON CONFLICT): the row, none when it is skipped. -/
+def updateNotNull (fuel : Nat) (q : QEnv) (t : Table) (newRow : Row) (orC : Option ConflictRes) (nUpd : Nat) :
+    M (Option Row) := do
+  let mut newRow := newRow
+  let mut skip := false
+  for h : i in [0:t.cols.size] do
+    let c := t.cols[i]
+    if c.notNull && (newRow.vals[i]?.getD .null).isNull then
+      match resolveConflict orC c.notNullConflict with
+      | .ignore => skip := true
+      | .replace =>
+        match c.dflt with
+        | some d => newRow := { newRow with vals := newRow.vals.set! i (← storeValue t i (← evalExpr fuel {} d)) }
+        | none => err s!"NOT NULL constraint failed: {t.name}.{c.name}" SQLITE_CONSTRAINT_NOTNULL
+      | r => updateConflictErr q nUpd r s!"NOT NULL constraint failed: {t.name}.{c.name}" SQLITE_CONSTRAINT_NOTNULL
+  return if skip then none else some newRow
+
+/-- The uniqueness conflicts of a row an UPDATE changes, resolved by UPDATE
+    OR <oc> (else the constraint's own ON CONFLICT): the table's other rows to
+    keep, none when the row is skipped. -/
+def updateConflicts (q : QEnv) (t : Table) (old newRow : Row) (orC : Option ConflictRes) (nUpd : Nat) :
+    M (Option (Array Row)) := do
+  let newRowid := newRow.rowid
+  let mut others := t.rows.filter (·.rowid != old.rowid)
+  if others.any (·.rowid == newRowid) && !t.withoutRowid then
+    let cname := match t.rowidCol with | some ci => t.cols[ci]!.name | none => "rowid"
+    match resolveConflict orC t.rowidConflict with
+    | .replace => others := others.filter (·.rowid != newRowid)
+    | .ignore => return none
+    | r => updateConflictErr q nUpd r s!"UNIQUE constraint failed: {t.name}.{cname}" SQLITE_CONSTRAINT_PRIMARYKEY
+  let mut skip := false
+  for (k, _) in allUniques (← getDb) t do
+    if others.any (fun r => keyEq k (keyOf r k) (keyOf newRow k)) then
+      match resolveConflict orC k.onConflict with
+      | .replace => others := others.filter (fun r => !keyEq k (keyOf r k) (keyOf newRow k))
+      | .ignore => skip := true
+      | r => updateConflictErr q nUpd r (uniqueMsg t k) (if k.isPk then SQLITE_CONSTRAINT_PRIMARYKEY else SQLITE_CONSTRAINT_UNIQUE)
+  return if skip then none else some others
+
+/-- The constraints on a row an UPDATE changes (`execUpdate`): NOT NULL,
+    CHECK, uniqueness; the row and the table's other rows to keep, none when
+    it is skipped; `nUpd` rows were updated before it. -/
+def updateChecks (fuel : Nat) (q : QEnv) (t : Table) (old newRow : Row) (orC : Option ConflictRes) (nUpd : Nat) :
+    M (Option (Row × Array Row)) := do
+  let some newRow ← updateNotNull fuel q t newRow orC nUpd | return none
+  if !(← checkRow fuel t newRow orC) then return none
+  let some others ← updateConflicts q t old newRow orC nUpd | return none
+  return some (newRow, others)
+
 mutual
 
 /-- Execute a statement; returns its output rows. -/
@@ -619,43 +854,7 @@ def execStmt (fuel : Nat) (q : QEnv) (s : Stmt) : M (Array (Array Value)) :=
         return rows
       | .explain _ _ => err "EXPLAIN is not modelled"
       | .createTable temp ine sch name cols cons wr strict asSel sql tailStart =>
-        let temp := temp || sch.any (nameEq · "temp")
-        let db ← getDb
-        let att : Option Name := sch.bind fun s => if db.attached.any (nameEq · s) then some s else none
-        if let some s := sch then
-          if !(nameEq s "main" || nameEq s "temp" || att.isSome) then err s!"unknown database {s}"
-        let errAt {α} (m : String) (t : Nat) : M α := throw { code := SQLITE_ERROR, msg := m, tail := some t }
-        if objExists db name temp att then
-          if ine then return #[]
-          if (db.main.findTable name).isSome || (db.main.findView name).isSome then errAt s!"table {name} already exists" tailStart
-          errAt s!"there is already an index named {name}" tailStart
-        -- errors in a column definition stop prepare after that definition
-        let mut seen : List Name := []
-        for cd in cols do
-          if seen.any (nameEq · cd.name) then errAt s!"duplicate column name: {cd.name}" cd.tailAt
-          seen := cd.name :: seen
-        if name.toLower.startsWith "sqlite_" then err s!"object name reserved for internal use: {name}"
-        let t ← match asSel with
-          | some sel =>
-            let (cmeta, rows) ← runSelect fuel q sel
-            let cds := cmeta.toList.map fun c => ({ name := c.name, type := match c.aff with
-              | some .integer => "INT" | some .real => "REAL" | some .text => "TEXT" | some .numeric => "NUM" | _ => "", constraints := [] } : ColumnDef)
-            let t ← mkTable name cds [] false false ""
-            let sqlText := "CREATE TABLE " ++ name ++ "(" ++ ",".intercalate (cds.map fun c => c.name ++ (if c.type.isEmpty then "" else " " ++ c.type)) ++ ")"
-            pure { t with sql := sqlText, rows := rows.mapIdx fun i r => ({ rowid := i + 1, vals := r } : Row) }
-          | none => mkTable name cols cons wr strict sql
-        let t := { t with temp, attachedTo := att }
-        -- automatic indexes for UNIQUE and non-rowid PRIMARY KEY constraints
-        let nAuto := t.uniques.length
-        modifyMain fun s => { s with objs := s.objs.push (.table t) ++
-          ((List.range nAuto).toArray.map fun i => .index
-            { name := s!"sqlite_autoindex_{name}_{i + 1}", table := name, cols := [], unique := false,
-              where_ := none, sql := none }) }
-        if t.autoinc && ((← getDb).main.findTable "sqlite_sequence").isNone then
-          let st ← mkTable "sqlite_sequence" [{ name := "name", type := "", constraints := [] },
-            { name := "seq", type := "", constraints := [] }] [] false false "CREATE TABLE sqlite_sequence(name,seq)"
-          modifyMain fun s => { s with objs := s.objs.push (.table st) }
-        return #[]
+        createTableM fuel q temp ine sch name cols cons wr strict asSel sql tailStart
       | .createIndex unique ine _ name tname cols w sql =>
         let db ← getDb
         if objExists db name then
@@ -712,216 +911,11 @@ def execStmt (fuel : Nat) (q : QEnv) (s : Stmt) : M (Array (Array Value)) :=
       | .insert _ orC _ tname _ cols src upserts ret =>
         if ← viewWithTriggers fuel tname then
           return ← insertView fuel q tname cols src
-        let t ← currentTable tname
-        let oc := orC.getD .abort
-        let colIdx ← if cols.isEmpty then pure (List.range t.cols.size)
-          else cols.mapM fun c => do
-            match t.cols.toList.findIdx? (nameEq ·.name c) with
-            | some i => pure i
-            | none => if isRowidName c && !t.withoutRowid then pure t.cols.size else err s!"table {t.name} has no column named {c}"
-        let ncols := if cols.isEmpty then (t.cols.toList.filter fun c => c.generated.isNone).length else cols.length
-        -- the rows to insert, each computed when the loop reaches it (a VALUES
-        -- list is a co-routine: a row is evaluated, then inserted, then the
-        -- next; its arity is checked at prepare)
-        let srcRows : Array (M (Array Value)) ← match src with
-          | .values rows => do
-              -- the parser's check (sqlite3MultiValues) comes first
-              if let r0 :: _ := rows then
-                if rows.any (·.length != r0.length) then err "all VALUES must have the same number of terms"
-              for r in rows do
-                if r.length != ncols then
-                  if cols.isEmpty then err s!"table {t.name} has {ncols} columns but {r.length} values were supplied"
-                  err s!"{r.length} values for {ncols} columns"
-              pure (rows.toArray.map fun r => r.toArray.mapM (evalExpr fuel q))
-          | .select sel => do
-              let (cm, rows) ← runSelect fuel q sel
-              if cm.size != ncols then
-                if cols.isEmpty then err s!"table {t.name} has {ncols} columns but {cm.size} values were supplied"
-                err s!"{cm.size} values for {ncols} columns"
-              pure (rows.map pure)
-          | .defaults => pure #[pure #[]]
-        let colIdx := match src with
-          | .defaults => []
-          | _ => if cols.isEmpty then (List.range t.cols.size).filter fun (i : Nat) => (t.cols[i]!).generated.isNone else colIdx
-        let mut inserted := #[]
-        let mut n : Int := 0
-        for rM in srcRows do
-          let r ← rM
-          -- defaults for the other columns
-          let mut vals := Array.replicate t.cols.size Value.null
-          let mut given := Array.replicate t.cols.size false
-          let mut rowidV : Option Value := none
-          for (ci, k) in colIdx.zipIdx do
-            if ci == t.cols.size then rowidV := some r[k]!
-            else vals := vals.set! ci r[k]!; given := given.set! ci true
-          for h : i in [0:t.cols.size] do
-            if !given[i]! then
-              if let some d := t.cols[i].dflt then vals := vals.set! i (← evalExpr fuel {} d)
-          if let some ci := t.rowidCol then
-            if given[ci]! then rowidV := some vals[ci]!
-          -- BEFORE INSERT triggers see NEW with the defaults (rowid -1 when it is not given)
-          let hasBefore := (← getDb).main.triggers.any fun tr => nameEq tr.table tname && tr.time == .before &&
-            match tr.event with | .insert => true | _ => false
-          if hasBefore then
-            let mut nvals := vals
-            for h : i in [0:t.cols.size] do nvals := nvals.set! i (← storeValue t i (vals[i]?.getD .null))
-            let rid := match rowidV.map (applyAffinity .integer) with | some (.int i) => i | _ => -1
-            -- RAISE(FAIL) keeps the rows inserted so far, and counts them
-            tryCatch (runTriggers fuel q .before .insert tname none (some { rowid := rid, vals := nvals }))
-              fun e => do
-                if e.keep then modify fun c => { c with db := { c.db with changes := n, totalChanges := c.db.totalChanges + n } }
-                throw e
-          -- UPSERT: a conflict on the target runs the DO clause instead
-          let r? : Option Row ← try (insertRow fuel tname vals rowidV (if upserts.isEmpty then orC else some .abort))
-            catch e => do
-              -- FAIL keeps the earlier rows on a constraint conflict (insertRow
-              -- marks it); any other error rolls the statement back
-              if e.keep && upserts.isEmpty then
-                modify fun c => { c with db := { c.db with changes := n, totalChanges := c.db.totalChanges + n } }
-                throw e
-              if upserts.isEmpty || !(e.code == SQLITE_CONSTRAINT_UNIQUE || e.code == SQLITE_CONSTRAINT_PRIMARYKEY) then throw e
-              let some up := upserts.head? | throw e
-              match up.action with
-              | .nothing => pure none
-              | .update sets wh =>
-                -- the conflicting row
-                let t ← currentTable tname
-                let mut vals' := vals
-                for h : i in [0:t.cols.size] do
-                  vals' := vals'.set! i (← storeValue t i vals[i]!)
-                let probe : Row := { rowid := (rowidV.map (·.toInt)).getD 0, vals := vals' }
-                let uq := allUniques (← getDb) t
-                let conflict := t.rows.find? fun old =>
-                  (t.rowidCol.isSome && rowidV.isSome && old.rowid == probe.rowid) ||
-                  uq.any fun (k, _) => keyEq k (keyOf old k) (keyOf probe k)
-                match conflict with
-                | none => throw e
-                | some old =>
-                  let exSrc := { tableSrc "excluded" t with hasRowid := false, qualOnly := true }
-                  let qx := { q with env := { q.env with frames := { srcs := #[tableSrc t.name t, exSrc], cur := #[some old, some probe] } :: q.env.frames } }
-                  let pass ← match wh with
-                    | some wexp => condHolds fuel qx wexp
-                    | none => pure true
-                  if !pass then pure none else
-                  let mut nv := old.vals
-                  for (names, ex) in sets do
-                    let v ← evalExpr fuel qx ex
-                    for nm in names do
-                      match t.cols.toList.findIdx? (nameEq ·.name nm) with
-                      | some i => nv := nv.set! i (← storeValue t i v)
-                      | none => err s!"no such column: {nm}"
-                  let newRow ← withGenerated fuel t { old with vals := nv }
-                  let _ ← checkRow fuel t newRow
-                  let others := t.rows.filter (·.rowid != old.rowid)
-                  for (k, _) in allUniques (← getDb) t do
-                    if others.any (fun r => keyEq k (keyOf r k) (keyOf newRow k)) then
-                      err (uniqueMsg t k) (if k.isPk then SQLITE_CONSTRAINT_PRIMARYKEY else SQLITE_CONSTRAINT_UNIQUE)
-                  modifyMain fun s => s.setTable { t with rows := sortRows t (others.push newRow) }
-                  pure (some newRow)
-          match r? with
-          | some row =>
-            n := n + 1
-            inserted := inserted.push row
-            modify fun c => { c with db := { c.db with lastRowid := row.rowid } }
-            tryCatch (runTriggers fuel q .after (.insert) tname none (some row))
-              fun e => do
-                if e.keep then modify fun c => { c with db := { c.db with changes := n, totalChanges := c.db.totalChanges + n } }
-                throw e
-          | _ => pure ()
-        countChanges q n
-        resultRows fuel q (← currentTable tname) tname inserted ret
+        execInsert fuel q orC tname cols src upserts ret
       | .update _ orC _ tname alias sets from_ wh ret _ _ _ =>
         if ← viewWithTriggers fuel tname then
           return ← updateView fuel q tname sets wh
-        let t ← currentTable tname
-        let alias := alias.getD tname
-        let src := tableSrc alias t
-        -- with FROM: each target row is joined with the FROM rows; the first match is used
-        let (fsrcs, frows) ← match from_ with
-          | some f => evalFrom fuel q f
-          | none => pure (#[], #[#[]])
-        let mut targets : Array (Row × Array Cur) := #[]
-        for r in t.rows do
-          -- which matching FROM row is used is the plan's choice
-          for fr in ← chooseOrder frows do
-            let qr := { q with env := { q.env with frames := { srcs := #[src] ++ fsrcs, cur := #[some r] ++ fr } :: q.env.frames } }
-            let ok ← match wh with
-              | some w => condHolds fuel qr w
-              | none => pure true
-            if ok then targets := targets.push (r, fr); break
-        -- the order the rows are updated in is the plan's
-        targets ← chooseOrder targets
-        let mut updated := #[]
-        for (old, fr) in targets do
-          let t ← currentTable tname
-          -- the row as it is now (an earlier trigger may have changed it)
-          let some old := t.rows.find? (·.rowid == old.rowid) | continue
-          let qr := { q with env := { q.env with frames := { srcs := #[src] ++ fsrcs, cur := #[some old] ++ fr } :: q.env.frames } }
-          let mut nv := old.vals
-          let mut newRowid := old.rowid
-          for (names, ex) in sets do
-            let v ← evalExpr fuel qr ex
-            for nm in names do
-              match t.cols.toList.findIdx? (nameEq ·.name nm) with
-              | some i =>
-                nv := nv.set! i (← storeValue t i v)
-                if t.rowidCol == some i then
-                  match applyAffinity .integer v with
-                  | .int ri => newRowid := ri
-                  | _ => err "datatype mismatch" SQLITE_MISMATCH
-              | none =>
-                if isRowidName nm && !t.withoutRowid then
-                  match applyAffinity .integer v with
-                  | .int ri => newRowid := ri
-                  | _ => err "datatype mismatch" SQLITE_MISMATCH
-                else err s!"no such column: {nm}"
-          let newRow ← withGenerated fuel t { rowid := newRowid, vals := nv }
-          runTriggers fuel q .before (.update (sets.flatMap (·.1))) tname (some old) (some newRow)
-          let t ← currentTable tname
-          -- a constraint error under resolution `r` (FAIL keeps the rows
-          -- updated so far, ROLLBACK rolls the transaction back)
-          let conflictErr (r : ConflictRes) (m : String) (code : Nat) : M Unit := do
-            if r == .fail then countChanges q updated.size
-            throwConflict r m code
-          -- NOT NULL, resolved by UPDATE OR <oc> (else the column's ON CONFLICT)
-          let mut newRow := newRow
-          let mut skipNN := false
-          for h : i in [0:t.cols.size] do
-            let c := t.cols[i]
-            if c.notNull && (newRow.vals[i]?.getD .null).isNull then
-              match resolveConflict orC c.notNullConflict with
-              | .ignore => skipNN := true
-              | .replace =>
-                match c.dflt with
-                | some d => newRow := { newRow with vals := newRow.vals.set! i (← storeValue t i (← evalExpr fuel {} d)) }
-                | none => err s!"NOT NULL constraint failed: {t.name}.{c.name}" SQLITE_CONSTRAINT_NOTNULL
-              | r => conflictErr r s!"NOT NULL constraint failed: {t.name}.{c.name}" SQLITE_CONSTRAINT_NOTNULL
-          if skipNN then continue
-          if !(← checkRow fuel t newRow orC) then continue
-          -- conflicts, resolved by UPDATE OR <oc> (else the constraint's own ON CONFLICT)
-          let mut others := t.rows.filter (·.rowid != old.rowid)
-          let mut skip := false
-          if others.any (·.rowid == newRowid) && !t.withoutRowid then
-            let cname := match t.rowidCol with | some ci => t.cols[ci]!.name | none => "rowid"
-            match resolveConflict orC t.rowidConflict with
-            | .replace => others := others.filter (·.rowid != newRowid)
-            | .ignore => skip := true
-            | r => conflictErr r s!"UNIQUE constraint failed: {t.name}.{cname}" SQLITE_CONSTRAINT_PRIMARYKEY
-          if !skip then
-            for (k, _) in allUniques (← getDb) t do
-              if others.any (fun r => keyEq k (keyOf r k) (keyOf newRow k)) then
-                match resolveConflict orC k.onConflict with
-                | .replace => others := others.filter (fun r => !keyEq k (keyOf r k) (keyOf newRow k))
-                | .ignore => skip := true
-                | r => conflictErr r (uniqueMsg t k) (if k.isPk then SQLITE_CONSTRAINT_PRIMARYKEY else SQLITE_CONSTRAINT_UNIQUE)
-          if skip then continue
-          modifyMain fun s => s.setTable { t with rows := sortRows t (others.push newRow) }
-          fkOnParentUpdate fuel tname old newRow
-          updated := updated.push newRow
-          let changedCols := sets.flatMap (·.1)
-          runTriggers fuel q .after (.update changedCols) tname (some old) (some newRow)
-        countChanges q updated.size
-        resultRows fuel q (← currentTable tname) alias updated ret
+        execUpdate fuel q orC tname alias sets from_ wh ret
       | .delete _ _ tname alias wh ret _ _ _ =>
         if ← viewWithTriggers fuel tname then
           return ← deleteView fuel q tname wh
@@ -1123,6 +1117,103 @@ def execStmt (fuel : Nat) (q : QEnv) (s : Stmt) : M (Array (Array Value)) :=
           throw { code := SQLITE_ERROR, msg := s!"table {name} already exists", tail := some tailAt }
         err s!"no such module: {m}"
       | _ => err "statement not modelled yet"
+
+
+/-- INSERT into a table (`execStmt`): each source row in turn, with its
+    triggers. -/
+def execInsert (fuel : Nat) (q : QEnv) (orC : Option ConflictRes) (tname : Name) (cols : List Name)
+    (src : InsertSource) (upserts : List Upsert) (ret : List ResultCol) : M (Array (Array Value)) :=
+  match fuel with
+  | 0 => outOfFuel
+  | fuel + 1 => do
+    let t ← currentTable tname
+    let (colIdx, srcRows) ← insertSources fuel q t cols src
+    let mut inserted := #[]
+    let mut n : Int := 0
+    for rs in srcRows do
+      let r ← match rs with
+        | .inl es => es.toArray.mapM (evalExpr fuel q)
+        | .inr vs => pure vs
+      match ← insertOne fuel q t tname orC upserts colIdx r n with
+      | some row =>
+        n := n + 1
+        inserted := inserted.push row
+        modify fun c => { c with db := { c.db with lastRowid := row.rowid } }
+        tryCatch (runTriggers fuel q .after (.insert) tname none (some row))
+          fun e => do
+            if e.keep then modify fun c => { c with db := { c.db with changes := n, totalChanges := c.db.totalChanges + n } }
+            throw e
+      | none => pure ()
+    countChanges q n
+    resultRows fuel q (← currentTable tname) tname inserted ret
+
+/-- UPDATE of a table (`execStmt`): each target row in turn, with its
+    triggers and the foreign keys' actions. -/
+def execUpdate (fuel : Nat) (q : QEnv) (orC : Option ConflictRes) (tname : Name) (alias : Option Name)
+    (sets : List (List Name × Expr)) (from_ : Option FromItem) (wh : Option Expr) (ret : List ResultCol) :
+    M (Array (Array Value)) :=
+  match fuel with
+  | 0 => outOfFuel
+  | fuel + 1 => do
+    let t ← currentTable tname
+    let alias := alias.getD tname
+    let src := tableSrc alias t
+    -- with FROM: each target row is joined with the FROM rows; the first match is used
+    let (fsrcs, frows) ← match from_ with
+      | some f => evalFrom fuel q f
+      | none => pure (#[], #[#[]])
+    let targets ← updateTargets fuel q t src fsrcs frows wh
+    let mut updated := #[]
+    for (old, fr) in targets do
+      let t ← currentTable tname
+      -- the row as it is now (an earlier trigger may have changed it)
+      let some old := t.rows.find? (·.rowid == old.rowid) | continue
+      let newRow ← updatedRow fuel q t src fsrcs old fr sets
+      runTriggers fuel q .before (.update (sets.flatMap (·.1))) tname (some old) (some newRow)
+      let t ← currentTable tname
+      let some (newRow, others) ← updateChecks fuel q t old newRow orC updated.size | continue
+      modifyMain fun s => s.setTable { t with rows := sortRows t (others.push newRow) }
+      fkOnParentUpdate fuel tname old newRow
+      updated := updated.push newRow
+      let changedCols := sets.flatMap (·.1)
+      runTriggers fuel q .after (.update changedCols) tname (some old) (some newRow)
+    countChanges q updated.size
+    resultRows fuel q (← currentTable tname) alias updated ret
+
+/-- One row of an INSERT (`execInsert`): the defaults of the columns it does
+    not give, the BEFORE triggers, the row itself (with UPSERT); `n` rows
+    were inserted before it. -/
+def insertOne (fuel : Nat) (q : QEnv) (t : Table) (tname : Name) (orC : Option ConflictRes)
+    (upserts : List Upsert) (colIdx : List Nat) (r : Array Value) (n : Int) : M (Option Row) :=
+  match fuel with
+  | 0 => outOfFuel
+  | fuel + 1 => do
+    -- defaults for the other columns
+    let mut vals := Array.replicate t.cols.size Value.null
+    let mut given := Array.replicate t.cols.size false
+    let mut rowidV : Option Value := none
+    for (ci, k) in colIdx.zipIdx do
+      if ci == t.cols.size then rowidV := some r[k]!
+      else vals := vals.set! ci r[k]!; given := given.set! ci true
+    for h : i in [0:t.cols.size] do
+      if !given[i]! then
+        if let some d := t.cols[i].dflt then vals := vals.set! i (← evalExpr fuel {} d)
+    if let some ci := t.rowidCol then
+      if given[ci]! then rowidV := some vals[ci]!
+    -- BEFORE INSERT triggers see NEW with the defaults (rowid -1 when it is not given)
+    let hasBefore := (← getDb).main.triggers.any fun tr => nameEq tr.table tname && tr.time == .before &&
+      match tr.event with | .insert => true | _ => false
+    if hasBefore then
+      let mut nvals := vals
+      for h : i in [0:t.cols.size] do nvals := nvals.set! i (← storeValue t i (vals[i]?.getD .null))
+      let rid := match rowidV.map (applyAffinity .integer) with | some (.int i) => i | _ => -1
+      -- RAISE(FAIL) keeps the rows inserted so far, and counts them
+      tryCatch (runTriggers fuel q .before .insert tname none (some { rowid := rid, vals := nvals }))
+        fun e => do
+          if e.keep then modify fun c => { c with db := { c.db with changes := n, totalChanges := c.db.totalChanges + n } }
+          throw e
+    tryCatch (insertRow fuel tname vals rowidV (if upserts.isEmpty then orC else some .abort))
+      (upsertRow fuel q tname vals rowidV upserts n)
 
 /-- ON DELETE actions for the children of a deleted parent row. -/
 def fkOnParentDelete (fuel : Nat) (pname : Name) (pr : Row) : M Unit :=
