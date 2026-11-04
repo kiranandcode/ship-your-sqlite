@@ -185,6 +185,15 @@ theorem restoreTo {ch : Choices} (saved : Ctx) (db : Db) (hs : saved.choices = c
 theorem getDb {ch : Choices} : Sim ch Sql.getDb Den.getDb :=
   get_bind fun _ _ => pure _
 
+/-- `pure` of values equal up to unfolding (the two sides' matchers). -/
+theorem pure_eq {α : Type} {ch : Choices} {a b : α} (h : a = b) : Sim ch (Pure.pure a : M α) (Pure.pure b : D α) :=
+  h ▸ pure a
+
+theorem map {α β : Type} {ch : Choices} (f : α → β) {m : M α} {n : D α} (h : Sim ch m n) :
+    Sim ch (f <$> m) (f <$> n) := by
+  rw [map_eq_pure_bind, map_eq_pure_bind]
+  exact bind h fun a => pure (f a)
+
 theorem err {α : Type} {ch : Choices} (m : String) (code : Nat) :
     Sim ch (Sql.err m code : M α) (Den.err m code : D α) := throw _
 
@@ -255,6 +264,39 @@ theorem foldlM_list {α β : Type} {ch : Choices} (xs : List α) (b : β)
   | cons x xs ih =>
     simp only [List.foldlM_cons]
     exact bind (h b x) fun b => ih b
+
+/-! ### Loops over collections equal up to unfolding
+
+The interpreter's and the denotation's loops run over the same collection,
+written with distinct auxiliary matchers; `sim` proves the equality by `rfl`. -/
+
+theorem forIn_list_eq {α β : Type} {ch : Choices} {xs ys : List α} {b b' : β}
+    {f : α → β → M (ForInStep β)} {g : α → β → D (ForInStep β)}
+    (hx : xs = ys) (hb : b = b') (h : ∀ a b, Sim ch (f a b) (g a b)) :
+    Sim ch (forIn xs b f) (forIn ys b' g) := hx ▸ hb ▸ forIn_list xs b h
+
+theorem forIn_array_eq {α β : Type} {ch : Choices} {xs ys : Array α} {b b' : β}
+    {f : α → β → M (ForInStep β)} {g : α → β → D (ForInStep β)}
+    (hx : xs = ys) (hb : b = b') (h : ∀ a b, Sim ch (f a b) (g a b)) :
+    Sim ch (forIn xs b f) (forIn ys b' g) := hx ▸ hb ▸ forIn_array xs b h
+
+theorem forIn_range_eq {β : Type} {ch : Choices} {r r' : Std.Legacy.Range} {b b' : β}
+    {f : Nat → β → M (ForInStep β)} {g : Nat → β → D (ForInStep β)}
+    (hx : r = r') (hb : b = b') (h : ∀ a b, Sim ch (f a b) (g a b)) :
+    Sim ch (forIn r b f) (forIn r' b' g) := hx ▸ hb ▸ forIn_range r b h
+
+theorem mapM_list_eq {α β : Type} {ch : Choices} {xs ys : List α} {f : α → M β} {g : α → D β}
+    (hx : xs = ys) (h : ∀ a, Sim ch (f a) (g a)) : Sim ch (xs.mapM f) (ys.mapM g) :=
+  hx ▸ mapM_list xs h
+
+theorem mapM_array_eq {α β : Type} {ch : Choices} {xs ys : Array α} {f : α → M β} {g : α → D β}
+    (hx : xs = ys) (h : ∀ a, Sim ch (f a) (g a)) : Sim ch (xs.mapM f) (ys.mapM g) :=
+  hx ▸ mapM_array xs h
+
+theorem foldlM_list_eq {α β : Type} {ch : Choices} {xs ys : List α} {b b' : β}
+    {f : β → α → M β} {g : β → α → D β}
+    (hx : xs = ys) (hb : b = b') (h : ∀ b a, Sim ch (f b a) (g b a)) :
+    Sim ch (xs.foldlM f b) (ys.foldlM g b') := hx ▸ hb ▸ foldlM_list xs b h
 
 /-! ### Errors -/
 
@@ -431,7 +473,9 @@ elab "sim_by_head" : tactic => withMainContext do
     evalTactic (← `(tactic| apply $(mkIdent lem)))
 
 /-- One lockstep step of a simulation proof. Lemmas are applied up to
-    reducible unfolding only, so that a failed attempt is cheap. -/
+    reducible unfolding only, so that a failed attempt is cheap; the side
+    conditions they leave (equalities of the two sides' pure values, which
+    differ in their auxiliary matchers) are closed by `rfl`. -/
 syntax "sim_step" : tactic
 macro_rules
   | `(tactic| sim_step) => `(tactic| first
@@ -443,17 +487,19 @@ macro_rules
       | with_reducible exact Sim.outOfFuel _
       | sim_by_head
       | (with_reducible apply Sim.bind; rotate_left; intro _)
+      | (with_reducible apply Sim.map)
+      | ((with_reducible apply Sim.pure_eq); rfl)
       | (with_reducible apply Sim.get_bind; intro _ _)
-      | (with_reducible apply Sim.modify <;> intro _ <;> rfl)
+      | ((with_reducible apply Sim.modify) <;> intro _ <;> rfl)
       | (with_reducible apply Sim.tryCatch; rotate_left; intro _)
-      | (with_reducible apply Sim.forIn_list; intro _ _)
-      | (with_reducible apply Sim.forIn_array; intro _ _)
-      | (with_reducible apply Sim.forIn_range; intro _ _)
+      | ((with_reducible apply Sim.forIn_list_eq); rfl; rfl; intro _ _)
+      | ((with_reducible apply Sim.forIn_array_eq); rfl; rfl; intro _ _)
+      | ((with_reducible apply Sim.forIn_range_eq); rfl; rfl; intro _ _)
       | (with_reducible apply Sim.forIn'_range; intro _ _ _)
       | (with_reducible apply Sim.forIn'_list; intro _ _ _)
-      | (with_reducible apply Sim.mapM_list; intro _)
-      | (with_reducible apply Sim.mapM_array; intro _)
-      | (with_reducible apply Sim.foldlM_list; intro _ _)
+      | ((with_reducible apply Sim.mapM_list_eq); rfl; intro _)
+      | ((with_reducible apply Sim.mapM_array_eq); rfl; intro _)
+      | ((with_reducible apply Sim.foldlM_list_eq); rfl; rfl; intro _ _)
       -- the interpreter's match (or if); the hypothesis it gives rewrites
       -- the denotation's (up to defeq: their matchers are distinct constants)
       | (split <;> (try simp only [*]) <;> (try (rename_i h; erw [h])) <;> (try simp only [])))
