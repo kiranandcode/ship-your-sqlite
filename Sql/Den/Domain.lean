@@ -18,7 +18,7 @@ import Sql.Exec
 
 namespace Sql.Den
 
-universe u v
+universe u v w
 
 /-- Sets of outcomes. -/
 def Nd (α : Type u) : Type u := Set α
@@ -129,6 +129,9 @@ end Nd
 structure DCtx where
   db : Db
   jsonCache : Json.Cache := {}
+  /-- the time 'now' reads in this statement (sqlite3StmtCurrentTime), ms
+      since the Unix epoch: any value, chosen when the statement starts -/
+  clockMs : Int := 0
   deriving Inhabited
 
 /-- A computation: from a state, the set of its outcomes (a result or an
@@ -147,6 +150,52 @@ def perm {α : Type} (xs : List α) : D (List α) := liftM (Nd.perm xs : Nd _)
 
 /-- Any value satisfying `p`. -/
 def anyOf {α : Type} (p : α → Prop) : D α := liftM (Nd.any p : Nd _)
+
+/-- Any permutation of an array. -/
+def permA {α : Type} (xs : Array α) : D (Array α) := do return (← perm xs.toList).toArray
+
+/-- An error (as the interpreter's `Sql.err`). -/
+def err {α : Type} (msg : String) (code : Nat := SQLITE_ERROR) : D α := throw { code, msg }
+
+/-! ### Monotonicity of `try … catch` (for `partial_fixpoint`) -/
+
+open Lean.Order in
+@[partial_fixpoint_monotone]
+theorem monotone_tryCatchD {α : Type} {γ : Sort w} [PartialOrder γ]
+    (f : γ → D α) (g : γ → Err → D α) (hf : monotone f) (hg : monotone g) :
+    monotone (fun x => tryCatch (f x) (g x)) := by
+  show monotone (fun x => ExceptT.tryCatch (f x) (g x))
+  unfold ExceptT.tryCatch ExceptT.mk
+  apply monotone_bind (StateT DCtx Nd) (fun x => (f x : StateT DCtx Nd (Except Err α)))
+  · exact hf
+  · apply monotone_of_monotone_apply
+    intro r
+    cases r with
+    | ok a => exact monotone_const _
+    | error e => exact monotone_apply e _ hg
+
+open Lean.Order in
+/-- Loops over a range (`for i in [a:b]`) are loops over a list. -/
+@[partial_fixpoint_monotone]
+theorem monotone_forIn_rangeD {β : Type} {γ : Type w} [Lean.Order.PartialOrder γ] (r : Std.Legacy.Range) (init : β)
+    (f : γ → Nat → β → D (ForInStep β)) (hf : monotone f) :
+    monotone (fun x => forIn r init (f x)) := by
+  simp only [Std.Legacy.Range.forIn_eq_forIn_range']
+  exact Lean.Order.List.monotone_forIn _ _ _ hf
+
+open Lean.Order in
+/-- Loops over a range with the membership proof (`for h : i in [a:b]`). -/
+@[partial_fixpoint_monotone]
+theorem monotone_forIn'_rangeD {β : Type} {γ : Type w} [Lean.Order.PartialOrder γ] (r : Std.Legacy.Range)
+    (init : β) (f : γ → (a : Nat) → a ∈ r → β → D (ForInStep β)) (hf : monotone f) :
+    monotone (fun x => forIn' r init (f x)) := by
+  simp only [Std.Legacy.Range.forIn'_eq_forIn'_range']
+  apply Lean.Order.List.monotone_forIn'
+  apply monotone_of_monotone_apply
+  intro a
+  apply monotone_of_monotone_apply
+  intro h
+  exact monotone_apply _ _ (monotone_apply a _ hf)
 
 /-! ## Least fixed points: core's `fix` is Mathlib's `lfp` -/
 

@@ -201,9 +201,9 @@ sound for the denotation: if it finishes, its output is in the denotation.
 | step | exit criterion | status |
 |---|---|---|
 | 2.6a Mathlib | pinned to v4.32.1 (the toolchain's tag), oleans from the cache, builds on /data | done (`lakefile.toml`, rev 520045a) |
-| 2.6b domain | `Nd`, `D`, their order, CCPO and MonoBind instances, `perm`, `fix = lfp` | |
-| 2.6c expressions | `⟦e⟧` for every expression form, scalar and aggregate functions through the shared library | |
-| 2.6d queries | FROM, WHERE, GROUP BY, HAVING, windows, DISTINCT, ORDER BY, LIMIT, compounds, CTEs (recursive as least fixed points), streaming and partial output | |
+| 2.6b domain | `Nd`, `D`, their order, CCPO and MonoBind instances, `perm`, `fix = lfp` | done (`Sql/Den/Domain.lean`): plus monotonicity lemmas for `try … catch` and loops over ranges, which core lacks; `Sql/Den/Join.lean`: SQLite's nested loops as `joinLoops`, monotone in the actions of its depths |
+| 2.6c expressions | `⟦e⟧` for every expression form, scalar and aggregate functions through the shared library | first version with 2.6d (`Sql/Den/Select.lean`) |
+| 2.6d queries | FROM, WHERE, GROUP BY, HAVING, windows, DISTINCT, ORDER BY, LIMIT, compounds, CTEs (recursive as least fixed points), streaming and partial output | first version (`Sql/Den/Select.lean`, 1,689 lines, axioms propext/choice/Quot.sound): derived from the interpreter by `scripts/dev/denize.py` (no fuel, `M` → `D`, every recursive meaning function a `partial_fixpoint`) and `scripts/dev/den_select_edits.py` (choices as sets: scan, nesting and output orders `perm`, `random()`/`randomblob()` any value, the clock a per-statement state; the join as a plan and `joinLoops`, no index, greedy nesting or memo, a depth's conjuncts in any order; a recursive CTE's queue as `cteLoop`, a least fixed point). Debts: `viewCols` (view column metadata for PRAGMA) calls the interpreter; pure syntax walks (`exprRefs`, `hasAgg`, `exprAff`, …) still carry `syntaxFuel` |
 | 2.6e statements | DML with conflict resolution, triggers (recursive as least fixed points), foreign keys, DDL, transactions, PRAGMA, ATTACH | |
 | 2.6f scripts | `⟦src⟧`, `Derives` redefined, `Spec/Refines.lean` updated | |
 | 2.6g soundness | `sound_Statement` proved | |

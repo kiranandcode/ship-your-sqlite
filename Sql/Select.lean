@@ -458,6 +458,28 @@ def eqKey (coll : Coll) (v : Value) : Option String :=
 def mergeAsc (a b : Array Nat) : Array Nat :=
   (a.toList ++ b.toList).mergeSort (· ≤ ·) |>.toArray
 
+/-- Whether a jump on a value is taken: when its truth is `sense` (when it
+    is NULL: `jn`, SQLITE_JUMPIFNULL). -/
+def jumpOf (v : Value) (sense jn : Bool) : Bool :=
+  match truth v with | some t => t == sense | none => jn
+
+/-- AND/OR coded as jumps (sqlite3ExprIfTrue when `sense`, IfFalse
+    otherwise): the first operand's jump (sense, jumpIfNull), the result when
+    it is taken, and the second operand's jump. -/
+def jumpPlan (isAnd sense jn : Bool) : (Bool × Bool) × Bool × (Bool × Bool) :=
+  match sense, isAnd with
+  | true, true => ((false, !jn), false, (true, jn))
+  | true, false => ((true, jn), true, (true, jn))
+  | false, true => ((false, jn), true, (false, jn))
+  | false, false => ((true, !jn), false, (false, jn))
+
+/-- `TRUE` or `FALSE` written where no column has that name (TK_TRUTH's right side). -/
+def truthConstOf (env : Env) : Expr → Option Bool
+  | .col none none c =>
+    if (nameEq c "true" || nameEq c "false") && (resolveCol env none c).toOption.isNone
+    then some (nameEq c "true") else none
+  | _ => none
+
 /-- An expression without function calls, subqueries, RAISE or parameters
     of windows: its value depends on the row only, and evaluating it changes
     no state (so a repeated evaluation can be remembered). -/
@@ -675,12 +697,7 @@ def evalExpr (fuel : Nat) (q : QEnv) (e : Expr) : M Value :=
             return compareOp op (cmpAff ((← affOf env a)) ((← affOf env b))) (cmpColl env a b) x y
         | .is | .isNot =>
           -- `x IS [NOT] TRUE/FALSE` (true/false not a column) is a truth test (TK_TRUTH)
-          let truthConst : Option Bool := match b with
-            | .col none none c =>
-              if (nameEq c "true" || nameEq c "false") && (resolveCol env none c).toOption.isNone
-              then some (nameEq c "true") else none
-            | _ => none
-          if let some tv := truthConst then
+          if let some tv := truthConstOf env b then
             let x ← evalExpr fuel q a
             let holds := truth x == some tv
             return .int (if holds == (op == .is) then 1 else 0)
@@ -1066,59 +1083,39 @@ def condJump (fuel : Nat) (q : QEnv) (e : Expr) (sense jn : Bool) : M Bool :=
   | 0 => outOfFuel
   | fuel + 1 => do
     let env := q.env
-    let ofValue (v : Value) (sense jn : Bool) : Bool :=
-      match truth v with | some t => t == sense | none => jn
-    let leaf : M Bool := do return ofValue (← evalExpr fuel q e) sense jn
-    -- AND/OR of two jumps
-    let both (isAnd : Bool) (p1 p2 : Bool → Bool → M Bool) : M Bool := do
-      if sense then
-        if isAnd then
-          if ← p1 false (!jn) then return false
-          p2 true jn
-        else
-          if ← p1 true jn then return true
-          p2 true jn
-      else
-        if isAnd then
-          if ← p1 false jn then return true
-          p2 false jn
-        else
-          if ← p1 true (!jn) then return false
-          p2 false jn
     match e with
     | .binop .and a b | .binop .or a b =>
       let isAnd := match e with | .binop .and .. => true | _ => false
       match andOrAlt env e with
       | some alt => condJump fuel q alt sense jn
       | none =>
-        let (f1, f2) := if hasSubquery a && !hasSubquery b then (b, a) else (a, b)
-        both isAnd (condJump fuel q f1) (condJump fuel q f2)
+        -- the right side first when only the left has a subquery
+        let swap := hasSubquery a && !hasSubquery b
+        let f1 := if swap then b else a
+        let f2 := if swap then a else b
+        let ((s1, j1), short, (s2, j2)) := jumpPlan isAnd sense jn
+        if ← condJump fuel q f1 s1 j1 then return short
+        condJump fuel q f2 s2 j2
     | .binop .is a b | .binop .isNot a b =>
       let isNot := match e with | .binop .isNot .. => true | _ => false
-      let tc : Option Bool := match b with
-        | .col none none c =>
-          if (nameEq c "true" || nameEq c "false") && (resolveCol env none c).toOption.isNone
-          then some (nameEq c "true") else none
-        | _ => none
-      match tc with
+      match truthConstOf env b with
       | some tv =>
         -- TK_TRUTH
         if sense then condJump fuel q a (tv != isNot) isNot
         else condJump fuel q a (tv == isNot) (!isNot)
-      | none => leaf
+      | none => return jumpOf (← evalExpr fuel q e) sense jn
     | .unop .not a => condJump fuel q a (!sense) jn
     | .between true x lo hi => condJump fuel q (.between false x lo hi) (!sense) jn
     | .between false x lo hi =>
       -- exprCodeBetween: x once, then (x >= lo) AND (x <= hi) as jumps
       let xv ← evalExpr fuel q x
-      let c1 (s j : Bool) : M Bool := do
-        let l ← evalExpr fuel q lo
-        return ofValue (compareOp .ge (cmpAff (← affOf env x) (← affOf env lo)) (cmpColl env x lo) xv l) s j
-      let c2 (s j : Bool) : M Bool := do
-        let h ← evalExpr fuel q hi
-        return ofValue (compareOp .le (cmpAff (← affOf env x) (← affOf env hi)) (cmpColl env x hi) xv h) s j
-      both true c1 c2
-    | _ => leaf
+      let ((s1, j1), short, (s2, j2)) := jumpPlan true sense jn
+      let l ← evalExpr fuel q lo
+      if jumpOf (compareOp .ge (cmpAff (← affOf env x) (← affOf env lo)) (cmpColl env x lo) xv l) s1 j1 then
+        return short
+      let h ← evalExpr fuel q hi
+      return jumpOf (compareOp .le (cmpAff (← affOf env x) (← affOf env hi)) (cmpColl env x hi) xv h) s2 j2
+    | _ => return jumpOf (← evalExpr fuel q e) sense jn
 
 /-- A WHERE, ON, HAVING, FILTER, CASE WHEN or trigger WHEN condition holds
     (`sqlite3ExprIfFalse(e, skip, SQLITE_JUMPIFNULL)` not taken). -/
