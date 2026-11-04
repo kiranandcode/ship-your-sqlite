@@ -1098,6 +1098,51 @@ def peerInfo (ocolls : List Coll) (odirs : List (SortDir × NullsOrder)) (okeys 
   return { m, firstPeer, lastPeer, groupIdx, ngroups := g + 1 }
 
 
+/-- A frame bound for row `j` of partition `p` (an index into it), given
+    the value of its offset (`b PRECEDING`/`b FOLLOWING`). -/
+def frameBound (ord : List OrderTerm) (unit : FrameUnit) (okeys : Array (Array Value)) (p : Array Nat)
+    (pi : PeerInfo) (j : Nat) (b : FrameBound) (isStart : Bool) (v? : Option Value) : Int :=
+  let m := pi.m
+  let fP := pi.firstPeer
+  let lP := pi.lastPeer
+  let gIdx := pi.groupIdx
+  match b with
+  | .unboundedPreceding => 0
+  | .unboundedFollowing => (m : Int) - 1
+  | .currentRow =>
+    match unit with
+    | .rows => j
+    | _ => (if isStart then fP[j]! else lP[j]!)
+  | .preceding _ | .following _ =>
+    let v := v?.getD .null
+    let prec := match b with | .preceding _ => true | _ => false
+    match unit with
+    | .rows =>
+      let k := v.numeric.toInt
+      if prec then (j : Int) - k else j + k
+    | .groups =>
+      let k := v.numeric.toInt
+      let tg : Int := if prec then (gIdx[j]! : Int) - k else gIdx[j]! + k
+      if tg < 0 then (if isStart then 0 else -1)
+      else if tg ≥ pi.ngroups then (if isStart then m else (m : Int) - 1)
+      else (if isStart then pi.groupStart tg.toNat else pi.groupEnd tg.toNat)
+    | .range =>
+      let key := okeys[p[j]!]![0]?.getD .null
+      if key.isNull then (if isStart then fP[j]! else lP[j]!) else
+      let desc := match ord.head? with | some (.mk _ d _) => d == .desc | none => false
+      let x := key.toReal
+      let d := v.toReal
+      let target := if prec != desc then x - d else x + d
+      let inside (k : Nat) : Bool :=
+        let kv := okeys[p[k]!]![0]?.getD .null
+        if kv.isNull then false else
+        let y := kv.toReal
+        if isStart then (if desc then y ≤ target else y ≥ target)
+        else (if desc then y ≥ target else y ≤ target)
+      if isStart then (((List.range m).find? inside).getD m : Nat)
+      else (match (List.range m).reverse.find? inside with | some k => (k : Int) | none => -1)
+
+
 mutual
 
 def evalExpr (fuel : Nat) (q : QEnv) (e : Expr) : M Value :=
@@ -1723,44 +1768,18 @@ def windowRowValue (fuel : Nat) (ctxs : Array QEnv) (name : String) (n : Name) (
         if bad then
           err (if start then "frame starting offset must be a non-negative number" else "frame ending offset must be a non-negative number")
         return v
-      let bound (b : FrameBound) (isStart : Bool) : M Int := do
+      -- the offsets of the bounds (each evaluated and checked, start first),
+      -- then the bounds themselves (`frameBound`, pure)
+      let offsetOf (b : FrameBound) (isStart : Bool) : M (Option Value) := do
         match b with
-        | .unboundedPreceding => return 0
-        | .unboundedFollowing => return (m : Int) - 1
-        | .currentRow =>
-          match unit with
-          | .rows => return j
-          | _ => return (if isStart then fP[j]! else lP[j]!)
-        | .preceding e | .following e =>
-          let v ← offset e isStart
-          let prec := match b with | .preceding _ => true | _ => false
-          match unit with
-          | .rows =>
-            let k := v.numeric.toInt
-            return (if prec then (j : Int) - k else j + k)
-          | .groups =>
-            let k := v.numeric.toInt
-            let tg : Int := if prec then (gIdx[j]! : Int) - k else gIdx[j]! + k
-            if tg < 0 then return (if isStart then 0 else -1)
-            if tg ≥ ngroups then return (if isStart then m else (m : Int) - 1)
-            return (if isStart then groupStart tg.toNat else groupEnd tg.toNat)
-          | .range =>
-            let key := okeys[p[j]!]![0]?.getD .null
-            if key.isNull then return (if isStart then fP[j]! else lP[j]!)
-            let desc := match ord.head? with | some (.mk _ d _) => d == .desc | none => false
-            let x := key.toReal
-            let d := v.toReal
-            let target := if prec != desc then x - d else x + d
-            let inside (k : Nat) : Bool :=
-              let kv := okeys[p[k]!]![0]?.getD .null
-              if kv.isNull then false else
-              let y := kv.toReal
-              if isStart then (if desc then y ≤ target else y ≥ target)
-              else (if desc then y ≥ target else y ≤ target)
-            if isStart then return (((List.range m).find? inside).getD m : Nat)
-            else return (match (List.range m).reverse.find? inside with | some k => (k : Int) | none => -1)
-      let lo ← bound st true
-      let hi ← bound en false
+        | .preceding e | .following e => return some (← offset e isStart)
+        | _ => return none
+      let vLo ← offsetOf st true
+      let vHi ← offsetOf en false
+      let bound (b : FrameBound) (isStart : Bool) (v : Option Value) : Int :=
+        frameBound ord unit okeys p pi j b isStart v
+      let lo := bound st true vLo
+      let hi := bound en false vHi
       let mut out := []
       let mut k := lo
       for _ in [0:(hi - lo + 1).toNat] do

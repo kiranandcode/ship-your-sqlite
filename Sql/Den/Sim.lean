@@ -475,13 +475,15 @@ elab "sim_by_head" : tactic => withMainContext do
   if let .fvar fv := args[2]!.getAppFn then
     let some d ← fv.findDecl? | throwError "sim_by_head: unknown local"
     unless d.isLet do throwError "sim_by_head: local {d.userName} has no value"
-    let x := mkIdent d.userName
-    evalTactic (← `(tactic| simp only [$x:ident]))
+    let mut fvs := #[fv]
     if let .fvar gv := args[3]!.getAppFn then
       if let some d' ← gv.findDecl? then
-        if d'.isLet then
-          let y := mkIdent d'.userName
-          evalTactic (← `(tactic| simp only [$y:ident]))
+        if d'.isLet then fvs := fvs.push gv
+    let g ← getMainGoal
+    let t' ← zetaDeltaFVars (← g.getType) fvs
+    replaceMainGoal [← g.replaceTargetDefEq t']
+    -- the unfolded function applied: beta-reduce
+    evalTactic (← `(tactic| try simp only []))
     return
   let .const f _ := args[2]!.getAppFn | throwError "sim_by_head: no head constant"
   -- only the interpreter's own functions (`Sql.f`)
@@ -524,6 +526,27 @@ elab "sim_rw_match " h:ident : tactic => withMainContext do
   replaceMainGoal [← (← getMainGoal).replaceTargetEq newTarget proof]
 
 
+open Lean Elab Tactic Meta in
+/-- When a side of the goal is a match on a local definition (one of the
+    goal's lets, lifted by `lift_lets`), unfold that definition there. -/
+elab "sim_zeta_discr" : tactic => withMainContext do
+  let t ← whnfR (← getMainTarget)
+  let (fn, args) := t.getAppFnArgs
+  unless fn == ``Sql.Den.Sim && args.size == 4 do throwError "sim_zeta_discr: not a Sim goal"
+  let mut done := false
+  for side in [args[2]!, args[3]!] do
+    let .const f _ := side.getAppFn | continue
+    unless ← isMatcher f do continue
+    for a in side.getAppArgs do
+      if let .fvar fv := a then
+        if let some d ← fv.findDecl? then
+          if d.isLet then
+            let g ← getMainGoal
+            let t' ← zetaDeltaFVars (← g.getType) #[fv]
+            replaceMainGoal [← g.replaceTargetDefEq t']
+            done := true
+  unless done do throwError "sim_zeta_discr: nothing to unfold"
+
 /-- One lockstep step of a simulation proof. Lemmas are applied up to
     reducible unfolding only, so that a failed attempt is cheap; the side
     conditions they leave (equalities of the two sides' pure values, which
@@ -553,6 +576,7 @@ macro_rules
       | ((with_reducible apply Sim.mapM_list_eq); rfl; intro _)
       | ((with_reducible apply Sim.mapM_array_eq); rfl; intro _)
       | ((with_reducible apply Sim.foldlM_list_eq); rfl; rfl; intro _ _)
+      | sim_zeta_discr
       -- the interpreter's match (or if); the hypothesis it gives rewrites
       -- the denotation's (up to defeq: their matchers are distinct constants)
       | (split <;> (try simp only [*]) <;> (try (rename_i h; first | sim_rw_match h | erw [h]))
