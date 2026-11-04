@@ -24,11 +24,6 @@ theorem Sim.affOf {ch : Choices} (env : Env) (e : Expr) : Sim ch (Sql.affOf env 
   unfold Sql.affOf Den.affOf
   exact Sim.bind Sim.getDb fun _ => Sim.pure _
 
-macro_rules | `(tactic| sim_helper) => `(tactic| first
-  | with_reducible exact Sim.affOf _ _
-  | with_reducible exact Sim.limitValue _
-  | with_reducible exact Sim.checkArity _ _)
-
 /-- Every function of the interpreter's query block, at `fuel`, is simulated
     by its denotation. -/
 structure SelectSim (ch : Choices) (fuel : Nat) : Prop where
@@ -57,35 +52,6 @@ structure SelectSim (ch : Choices) (fuel : Nat) : Prop where
   expandCols : ∀ (srcs : Array Src) (cols : List ResultCol), Sim ch (Sql.expandCols fuel srcs cols) (Den.expandCols srcs cols)
   runCore : ∀ (q : QEnv) (core : SelectCore) (orderBy : List OrderTerm) (noRows : Bool) (lim : Option Nat) (off : Nat) (stream : Bool), Sim ch (Sql.runCore fuel q core orderBy noRows lim off stream) (Den.runCore q core orderBy noRows lim off stream)
   runSelect : ∀ (q : QEnv) (sel : Select) (cap : Bool) (stream : Bool), Sim ch (Sql.runSelect fuel q sel cap stream) (Den.runSelect q sel cap stream)
-
-set_option hygiene false in
-/-- The induction hypotheses of the query block, named `h_<function>`. -/
-macro_rules | `(tactic| sim_ih) => `(tactic| first
-  | with_reducible exact h_evalExpr _ _
-  | with_reducible exact h_compareRows _ _ _ _
-  | with_reducible exact h_valueOf _ _
-  | with_reducible exact h_evalAgg _ _ _ _ _ _ _
-  | with_reducible exact h_aggFinish _ _ _ _ _ _ _ _ _ _
-  | with_reducible exact h_callAgg _ _ _ _ _ _ _ _
-  | with_reducible exact h_argIsJson _ _
-  | with_reducible exact h_callFn _ _ _ _
-  | with_reducible exact h_callFnST _ _ _ _
-  | with_reducible exact h_condJump _ _ _ _
-  | with_reducible exact h_condHolds _ _
-  | with_reducible exact h_evalExprST _ _
-  | with_reducible exact h_scalarFn _ _ _ _ _
-  | with_reducible exact h_resolveWindow _ _ _
-  | with_reducible exact h_computeWindow _ _ _ _
-  | with_reducible exact h_evalFromWhere _ _ _ _ _
-  | with_reducible exact h_namedSource _ _ _ _
-  | with_reducible exact h_cteRows _ _ _
-  | with_reducible exact h_evalFrom _ _
-  | with_reducible exact h_viewCols
-  | with_reducible exact h_tableFnSrc _ _
-  | with_reducible exact h_tableFunction _ _ _
-  | with_reducible exact h_expandCols _ _
-  | with_reducible exact h_runCore _ _ _ _ _ _ _
-  | with_reducible exact h_runSelect _ _ _ _)
 
 theorem selectSim_zero (ch : Choices) : SelectSim ch 0 where
   evalExpr := by intros; rw [Sql.evalExpr]; exact Sim.outOfFuel _
