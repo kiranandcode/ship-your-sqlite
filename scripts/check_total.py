@@ -16,7 +16,8 @@ for f in files:
     for i, line in enumerate(src.split('\n'), 1):
         code = line.split('--')[0]
         if re.search(r'\bpartial\s+def\b', code): hits.append((i, 'partial def'))
-        if re.search(r'(^|\s)(while|repeat)\b', code): hits.append((i, 'loop'))
+        # (the tactic `repeat'` of the monotonicity proofs is not a loop)
+        if re.search(r"(^|\s)(while|repeat)\b(?!')", code): hits.append((i, 'loop'))
     if hits:
         total += len(hits)
         rel = os.path.relpath(f, ROOT)
