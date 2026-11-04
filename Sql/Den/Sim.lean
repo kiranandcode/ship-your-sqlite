@@ -434,6 +434,15 @@ theorem pure_any {α : Type} {ch : Choices} {P : α → Prop} (a : α) (h : P a)
   choices_eq := fun _ h => h
   sound := fun c _ _ => mem_outcomes_lift.mpr ⟨a, h, rfl⟩
 
+/-- A draw of the oracle's PRNG is one of the denotation's values. -/
+theorem draw {α : Type} {ch : Choices} {P : α → Prop} (f : Choices → Nat → α) (hP : ∀ s, P (f ch s)) :
+    Sim ch (Sql.draw f) (anyOf P) where
+  exhausted_mono := fun _ _ h => h
+  choices_eq := fun _ h => h
+  sound := fun c hch _ => by
+    show (Except.ok (f c.choices c.prng), proj { c with prng := c.prng + 1 }) ∈ _
+    exact mem_outcomes_lift.mpr ⟨_, hch ▸ hP c.prng, rfl⟩
+
 /-- Running out of fuel is simulated by anything (it ends the run's claim). -/
 theorem outOfFuel {α : Type} {ch : Choices} (n : D α) : Sim ch (Sql.outOfFuel : M α) n where
   exhausted_mono := fun _ _ _ => rfl
@@ -472,6 +481,36 @@ elab "sim_by_head" : tactic => withMainContext do
     unless (← getEnv).contains lem do throwError "sim_by_head: no lemma for {f}"
     evalTactic (← `(tactic| apply $(mkIdent lem)))
 
+open Lean Elab Tactic Meta in
+/-- Rewrite with `h : lhs = rhs`, `lhs` a matcher application, the subterms
+    of the goal that are another matcher's applications definitionally equal
+    to `lhs`: the interpreter's and the denotation's copies of a match are
+    distinct auxiliary constants, so after `split` on the interpreter's, the
+    hypothesis rewrites the denotation's this way. -/
+elab "sim_rw_match " h:ident : tactic => withMainContext do
+  let hd ← getLocalDeclFromUserName h.getId
+  let some (ty, lhs, rhs) := (← instantiateMVars hd.type).eq? | throwError "sim_rw_match: not an equation"
+  let .const lf _ := lhs.getAppFn | throwError "sim_rw_match: no head"
+  unless ← isMatcher lf do throwError "sim_rw_match: not a matcher"
+  let target ← instantiateMVars (← getMainTarget)
+  let cands ← IO.mkRef (#[] : Array Lean.Expr)
+  forEachExpr target fun t => do
+    if let .const tf _ := t.getAppFn then
+      if tf != lf && t.getAppNumArgs == lhs.getAppNumArgs then
+        if ← isMatcher tf then cands.modify (·.push t)
+  let mut found : Option Lean.Expr := none
+  for t in ← cands.get do
+    if ← withNewMCtxDepth (isDefEq t lhs) then
+      found := some t; break
+  let some t := found | throwError "sim_rw_match: no matching subterm"
+  let abst ← kabstract target t
+  let motive := Lean.mkLambda `x .default ty abst
+  let eqP ← mkExpectedTypeHint hd.toExpr (← mkEq t rhs)
+  let proof ← mkCongrArg motive eqP
+  let newTarget := abst.instantiate1 rhs
+  replaceMainGoal [← (← getMainGoal).replaceTargetEq newTarget proof]
+
+
 /-- One lockstep step of a simulation proof. Lemmas are applied up to
     reducible unfolding only, so that a failed attempt is cheap; the side
     conditions they leave (equalities of the two sides' pure values, which
@@ -486,6 +525,7 @@ macro_rules
       | with_reducible exact Sim.chooseOrder _
       | with_reducible exact Sim.outOfFuel _
       | sim_by_head
+      | assumption
       | (with_reducible apply Sim.bind; rotate_left; intro _)
       | (with_reducible apply Sim.map)
       | ((with_reducible apply Sim.pure_eq); rfl)
@@ -502,9 +542,13 @@ macro_rules
       | ((with_reducible apply Sim.foldlM_list_eq); rfl; rfl; intro _ _)
       -- the interpreter's match (or if); the hypothesis it gives rewrites
       -- the denotation's (up to defeq: their matchers are distinct constants)
-      | (split <;> (try simp only [*]) <;> (try (rename_i h; erw [h])) <;> (try simp only [])))
+      | (split <;> (try simp only [*]) <;> (try (rename_i h; first | sim_rw_match h | erw [h]))
+          <;> (try simp only [])))
 
-/-- A simulation proof by lockstep. -/
-macro "sim" : tactic => `(tactic| ((try simp only []); repeat' sim_step))
+/-- A simulation proof by lockstep. Last, the goals where the two sides'
+    matches were split apart (after the interpreter's catch-all case the
+    denotation's match is split too): their hypotheses contradict. -/
+macro "sim" : tactic =>
+  `(tactic| ((try simp only []); (repeat' sim_step); (all_goals (try (exfalso; solve_by_elim (maxDepth := 3))))))
 
 end Sql.Den

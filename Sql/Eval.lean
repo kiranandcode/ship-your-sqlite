@@ -137,6 +137,13 @@ def permute {α} (code : Nat) (xs : Array α) : Array α :=
         | none => l
   (go xs.size code xs.toList).toArray
 
+/-- A draw of SQLite's PRNG: the oracle's value `f choices seed` at the
+    next draw. -/
+def draw {α} (f : Choices → Nat → α) : M α := do
+  let c ← get
+  set { c with prng := c.prng + 1 }
+  return f c.choices c.prng
+
 /-- An order SQL leaves unspecified: the next code of `Choices.order`. -/
 def chooseOrder {α} (xs : Array α) : M (Array α) := do
   let c ← get

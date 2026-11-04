@@ -19,24 +19,14 @@ rep('''def condHolds (q : QEnv) (e : Expr) : D Bool :=
   | 0 => outOfFuel
   | fuel + 1 => do return !(← condJump q e false true)''', '''def condHolds (q : QEnv) (e : Expr) : D Bool := do
   return !(← condJump q e false true)''')
-rep('''      -- random(), randomblob(N): SQLite's PRNG; the semantics allows any value
-      -- (Phase 2.5 states this as a choice); this executable draws from a counter
-      | "random" =>
-        if nargs != 0 then wrong
-        let c ← get
-        let seed := c.prng
-        set { c with prng := seed + 1 }
-        let x : Nat := c.choices.random seed 0 % 2 ^ 64
-        return .int (if x ≥ 2 ^ 63 then (x : Int) - 2 ^ 64 else x)''', '''      -- random(), randomblob(N): SQLite's PRNG, any value
-      | "random" =>
-        if nargs != 0 then wrong
-        let x ← anyOf fun (x : Int) => -2 ^ 63 ≤ x ∧ x < 2 ^ 63
-        return .int x''')
-rep('''        let c ← get
-        let seed := c.prng
-        set { c with prng := seed + 1 }
-        return .blob ⟨(Array.range n.toNat).map fun i => (c.choices.random seed (i + 1) % 256).toUInt8⟩''', '''        let b ← anyOf fun (b : ByteArray) => b.size = n.toNat
-        return .blob b''')
+rep('''    let x ← draw fun ch seed =>
+      let x : Nat := ch.random seed 0 % 2 ^ 64
+      if x ≥ 2 ^ 63 then ((x : Int) - 2 ^ 64 : Int) else (x : Int)
+    return .int x''', '''    let x ← anyOf fun (x : Int) => -2 ^ 63 ≤ x ∧ x < 2 ^ 63
+    return .int x''')
+rep('''    let b ← draw fun ch seed => (⟨(Array.range n.toNat).map fun i => (ch.random seed (i + 1) % 256).toUInt8⟩ : ByteArray)
+    return .blob b''', '''    let b ← anyOf fun (b : ByteArray) => b.size = n.toNat
+    return .blob b''')
 rep('''        kept ← chooseOrder kept''', '''        kept ← permA kept''')
 rep('''        out ← chooseOrder out''', '''        out ← permA out''')
 open(p, 'w').write(s)

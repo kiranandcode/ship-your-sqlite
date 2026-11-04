@@ -500,6 +500,35 @@ def pureExprK (k : Nat) (e : Expr) : Bool :=
 
 def pureExpr (e : Expr) : Bool := pureExprK syntaxFuel e
 
+/-- `replace(s, pat, rep)` on bytes (pat nonempty): each occurrence of `pat`
+    from the left replaced by `rep` (`k` bounds the steps: the length of `s`). -/
+def replaceAll (pat rep : List UInt8) (s : List UInt8) (k : Nat) : List UInt8 :=
+  match k with
+  | 0 => s
+  | f + 1 =>
+    match s with
+    | [] => []
+    | c :: rest => if s.take pat.length == pat then rep ++ replaceAll pat rep (s.drop pat.length) f
+      else c :: replaceAll pat rep rest f
+
+/-- The value of a hexadecimal digit. -/
+def hexDigitVal (c : UInt8) : Option Nat :=
+  if 48 ≤ c && c ≤ 57 then some (c - 48).toNat
+  else if 65 ≤ c && c ≤ 70 then some (c - 55).toNat
+  else if 97 ≤ c && c ≤ 102 then some (c - 87).toNat else none
+
+/-- `unhex(X, Y)`: pairs of hexadecimal digits as bytes, the characters of
+    `ign` (not digits) skipped; none if malformed. -/
+def unhexBytes (ign : ByteArray) : List UInt8 → Option (List UInt8)
+  | [] => some []
+  | c :: rest =>
+    if ign.toList.contains c && (hexDigitVal c).isNone then unhexBytes ign rest else
+    match rest with
+    | d :: rest' => match hexDigitVal c, hexDigitVal d with
+      | some x, some y => (unhexBytes ign rest').map ((x * 16 + y).toUInt8 :: ·)
+      | _, _ => none
+    | [] => none
+
 /-- `unistrFunc`: `\\` is a backslash; `\XXXX`, `\uXXXX`, `\+XXXXXX` and
     `\UXXXXXXXX` are code points (sqlite3AppendOneUtf8Character); none: an
     invalid escape. The scan for the next backslash stops at a NUL byte
@@ -627,6 +656,408 @@ def affOf (env : Env) (e : Expr) : M (Option Aff) := do
   return exprAff env e (subqueryAffK (← getDb) syntaxFuel)
 
 def QEnv.noGroup (q : QEnv) : QEnv := { q with env := { q.env with group := none } }
+
+/-- Scalar functions, part 7 of 7 (`scalarFn`). -/
+def scalarFn7 (n : Name) (vs : List Value) (colls : List (Option (Coll × Bool))) : M Value := do
+  let name := n.toLower
+  let wrong {α} : M α := err s!"wrong number of arguments to function {n}()"
+  let a0 := vs[0]?.getD .null
+  let a1 := vs[1]?.getD .null
+  let nargs := vs.length
+  match name with
+  | "pow" | "power" | "atan2" | "mod" =>
+    if nargs != 2 then wrong
+    match mathArg a0, mathArg a1 with
+    | some x, some y =>
+      return mathResult (match name with
+        | "atan2" => Float.atan2 x y
+        | "mod" => x - y * (let t := x / y; if t < 0 then t.ceil else t.floor)
+        | _ => Float.pow x y)
+    | _, _ => return .null
+  | "ceil" | "ceiling" | "floor" | "trunc" =>
+    if nargs != 1 then wrong
+    match a0 with
+    | .int i => return .int i
+    | .null => return .null
+    | _ =>
+      match mathArg a0 with
+      | some x => return mathResult (match name with
+          | "floor" => x.floor | "trunc" => (if x < 0 then x.ceil else x.floor) | _ => x.ceil)
+      | none => return .null
+  | _ =>
+    match mathUnary name with
+    | some f =>
+      if nargs != 1 then wrong
+      match mathArg a0 with
+      | some x => return mathResult (f x)
+      | none => return .null
+    | none => err s!"no such function: {n}"
+
+/-- Scalar functions, part 6 of 7 (`scalarFn`). -/
+def scalarFn6 (n : Name) (vs : List Value) (colls : List (Option (Coll × Bool))) : M Value := do
+  let name := n.toLower
+  let wrong {α} : M α := err s!"wrong number of arguments to function {n}()"
+  let a0 := vs[0]?.getD .null
+  let a1 := vs[1]?.getD .null
+  let nargs := vs.length
+  match name with
+  | "changes" => return .int (← getDb).changes
+  | "total_changes" => return .int (← getDb).totalChanges
+  | "last_insert_rowid" => return .int (← getDb).lastRowid
+  | "concat" =>
+    if nargs < 1 then wrong
+    return .text (vs.foldl (fun acc v => acc ++ textOf v) .empty)
+  | "concat_ws" =>
+    if nargs < 2 then wrong
+    if a0.isNull then return .null
+    let parts := (vs.drop 1).filter (!·.isNull) |>.map textOf
+    return .text (match parts with
+      | [] => .empty
+      | p :: ps => ps.foldl (fun acc x => acc ++ textOf a0 ++ x) p)
+  | "glob" | "like" =>
+    if nargs < 2 || nargs > 3 then wrong
+    if a0.isNull || a1.isNull then return .null
+    let cstr (b : ByteArray) : ByteArray := ⟨(b.data.toList.takeWhile (· != 0)).toArray⟩
+    let r := if name == "glob" then globMatch (utf8Chars (cstr (textOf a0))) (utf8Chars (cstr (textOf a1)))
+      else likeMatch (utf8Chars (cstr (textOf a0))) (utf8Chars (cstr (textOf a1)))
+        (if nargs == 3 then (utf8Chars (textOf vs[2]!)).head? else none) true
+    return .int (if r then 1 else 0)
+  | "pi" => if nargs != 0 then wrong else return .real 3.141592653589793
+  | "log" =>
+    if nargs < 1 || nargs > 2 then wrong
+    if nargs == 1 then
+      match mathArg a0 with
+      | some x => return mathResult (Float.log10 x)
+      | none => return .null
+    match mathArg a0, mathArg a1 with
+    | some b, some x => return mathResult (Float.log x / Float.log b)
+    | _, _ => return .null
+  | _ => scalarFn7 n vs colls
+
+/-- Scalar functions, part 5 of 7 (`scalarFn`). -/
+def scalarFn5 (n : Name) (vs : List Value) (colls : List (Option (Coll × Bool))) : M Value := do
+  let name := n.toLower
+  let wrong {α} : M α := err s!"wrong number of arguments to function {n}()"
+  let a0 := vs[0]?.getD .null
+  let a1 := vs[1]?.getD .null
+  let nargs := vs.length
+  match name with
+  -- random(), randomblob(N): SQLite's PRNG; the semantics allows any value
+  -- (`Choices.random`); this executable draws from a counter
+  | "random" =>
+    if nargs != 0 then wrong
+    let x ← draw fun ch seed =>
+      let x : Nat := ch.random seed 0 % 2 ^ 64
+      if x ≥ 2 ^ 63 then ((x : Int) - 2 ^ 64 : Int) else (x : Int)
+    return .int x
+  | "randomblob" =>
+    if nargs != 1 then wrong
+    let n := max 1 a0.toInt
+    if n > maxLength then err "string or blob too big" SQLITE_TOOBIG
+    let b ← draw fun ch seed => (⟨(Array.range n.toNat).map fun i => (ch.random seed (i + 1) % 256).toUInt8⟩ : ByteArray)
+    return .blob b
+  | _ => scalarFn6 n vs colls
+
+/-- Scalar functions, part 4 of 7 (`scalarFn`). -/
+def scalarFn4 (n : Name) (vs : List Value) (colls : List (Option (Coll × Bool))) : M Value := do
+  let name := n.toLower
+  let wrong {α} : M α := err s!"wrong number of arguments to function {n}()"
+  let a0 := vs[0]?.getD .null
+  let a1 := vs[1]?.getD .null
+  let nargs := vs.length
+  match name with
+  | "min" | "max" =>
+    if nargs < 2 then wrong
+    if vs.any (·.isNull) then return .null
+    let coll := (colls.findSome? id).map (·.1) |>.getD .binary
+    -- minmaxFunc: min() moves to a later argument on a tie, max() does not
+    let better (a b : Value) : Bool :=
+      let o := compareValues coll a b
+      if name == "min" then o != .gt else o == .gt
+    return vs.foldl (fun acc v => if better v acc then v else acc) a0
+  | "zeroblob" =>
+    if nargs != 1 then wrong
+    let n := max 0 a0.toInt
+    if n > maxLength then err "string or blob too big" SQLITE_TOOBIG
+    return .blob ⟨Array.replicate n.toNat 0⟩
+  | "likelihood" | "likely" | "unlikely" => return a0
+  | "sqlite_version" => return .ofString "3.54.1"
+  -- the options of the ccomp build, which the Clight export is (Sql.PragmaData)
+  | "sqlite_compileoption_used" =>
+    if nargs != 1 then wrong
+    match a0.toText? with
+    | some b => return .int (if Pragma.compileOptionUsed b.toList then 1 else 0)
+    | none => return .null
+  | "sqlite_compileoption_get" =>
+    if nargs != 1 then wrong
+    match Pragma.compileOptionGet a0.toInt with
+    | some o => return .ofString o
+    | none => return .null
+  | "sqlite_source_id" => return .ofString "2026-10-16 14:45:20 555e07ef33f69a0957d24d8e555b702464a131d6f1607f4c3c1e4551e8e6ca76"
+  | _ => scalarFn5 n vs colls
+
+/-- Scalar functions, part 3 of 7 (`scalarFn`). -/
+def scalarFn3 (n : Name) (vs : List Value) (colls : List (Option (Coll × Bool))) : M Value := do
+  let name := n.toLower
+  let wrong {α} : M α := err s!"wrong number of arguments to function {n}()"
+  let a0 := vs[0]?.getD .null
+  let a1 := vs[1]?.getD .null
+  let nargs := vs.length
+  match name with
+  | "char" =>
+    let cs := vs.map fun v => Char.ofNat v.toInt.toNat
+    return .text (String.ofList cs).toUTF8
+  | "unicode" =>
+    if nargs != 1 then wrong
+    -- the first code point of the text (read up to its first NUL), as sqlite3Utf8Read
+    let bs := (textOf a0).toList.takeWhile (· != 0)
+    if a0.isNull || bs.isEmpty then return .null
+    return .int (utf8Read bs).1
+  | "instr" =>
+    if nargs != 2 then wrong
+    if a0.isNull || a1.isNull then return .null
+    match a0, a1 with
+    | .blob h, _ | _, .blob h =>
+      let hay := (textOf a0).toList
+      let nee := (textOf a1).toList
+      let _ := h
+      let idx := (List.range (hay.length + 1)).find? fun i => (hay.drop i).take nee.length == nee
+      return .int (match idx with | some i => i + 1 | none => 0)
+    | _, _ =>
+      let hay := utf8Chars (textOf a0)
+      let nee := utf8Chars (textOf a1)
+      let idx := (List.range (hay.length + 1)).find? fun i => (hay.drop i).take nee.length == nee
+      return .int (match idx with | some i => i + 1 | none => 0)
+  | "substr" | "substring" =>
+    if nargs < 2 || nargs > 3 then wrong
+    if a0.isNull || a1.isNull then return .null
+    if nargs == 3 && vs[2]!.isNull then return .null
+    let z : Option Int := if nargs == 3 then some vs[2]!.toInt else none
+    let y := a1.toInt
+    match a0 with
+    | .blob b =>
+      -- sqlite3_value_blob of an empty blob is a null pointer: no result
+      if b.size == 0 then return .null
+      let units := b.toList.map ([·])
+      return .blob ⟨((substrOf units y z).flatten).toArray⟩
+    | _ =>
+      let units := utf8Chars (cstrOf (textOf a0))
+      return .text ⟨((substrOf units y z).flatten).toArray⟩
+  | "trim" | "ltrim" | "rtrim" =>
+    if nargs < 1 || nargs > 2 then wrong
+    if a0.isNull then return .null
+    if nargs == 2 && a1.isNull then return .null
+    let set := if nargs == 2 then utf8Chars (textOf a1) else [[32]]
+    let s := utf8Chars (textOf a0)
+    return .text ⟨(trimBy s set (name != "rtrim") (name != "ltrim")).flatten.toArray⟩
+  | "replace" =>
+    if nargs != 3 then wrong
+    if vs.any (·.isNull) then return .null
+    let s := (textOf a0).toList
+    let pat := (textOf a1).toList
+    let rep := (textOf vs[2]!).toList
+    if pat.isEmpty then return .text (textOf a0)
+    return .text ⟨(replaceAll pat rep s s.length).toArray⟩
+  | "round" =>
+    if nargs < 1 || nargs > 2 then wrong
+    if a0.isNull then return .null
+    if nargs == 2 && a1.isNull then return .null
+    let digits : Int := if nargs == 2 then a1.numeric.toInt else 0
+    let digits := if digits > 30 then 30 else if digits < 0 then 0 else digits
+    return .real ((Printf.round? a0.toReal digits).getD (roundTo a0.toReal digits))
+  | "sign" =>
+    if nargs != 1 then wrong
+    -- sqlite3_value_numeric_type: only an INTEGER or REAL (a TEXT after numeric affinity)
+    let nv := match a0 with
+      | .text t => (numericOfText t false).getD a0
+      | v => v
+    match nv with
+    | .int _ | .real _ => pure ()
+    | _ => return .null
+    match mathArg nv with
+    | none => return .null
+    | some r => return .int (if r > 0 then 1 else if r < 0 then -1 else 0)
+  | _ => scalarFn4 n vs colls
+
+/-- Scalar functions, part 2 of 7 (`scalarFn`). -/
+def scalarFn2 (n : Name) (vs : List Value) (colls : List (Option (Coll × Bool))) : M Value := do
+  let name := n.toLower
+  let wrong {α} : M α := err s!"wrong number of arguments to function {n}()"
+  let a0 := vs[0]?.getD .null
+  let a1 := vs[1]?.getD .null
+  let nargs := vs.length
+  match name with
+  | "load_extension" =>
+    if nargs < 1 || nargs > 2 then wrong
+    err "not authorized"
+  -- the MATCH operator's function form: only virtual tables provide it
+  | "match" =>
+    if nargs != 2 then wrong
+    err "unable to use function MATCH in the requested context"
+  -- sqlite_log(code, msg) writes to the error log and returns NULL
+  | "sqlite_log" =>
+    if nargs != 2 then wrong
+    return .null
+  | "unistr" =>
+    if nargs != 1 then wrong
+    if a0.isNull then return .null
+    match unistrBytes (textOf a0) with
+    | some b => return .text b
+    | none => err "invalid Unicode escape"
+  | "unistr_quote" =>
+    if nargs != 1 then wrong
+    -- quote(), with %#Q for text: control characters through unistr()
+    match a0 with
+    | .text _ => match Printf.scalar? "printf" [.ofString "%#Q", a0] with
+      | some (.ok v) => return v
+      | some (.error e) => throw e
+      | none => return .ofString (quoteValue a0)
+    | .real r => return .ofString ((Printf.quoteReal? r).getD (quoteValue a0))
+    | _ => return .ofString (quoteValue a0)
+  | "quote" =>
+    if nargs != 1 then wrong
+    match a0 with
+    | .real r => return .ofString ((Printf.quoteReal? r).getD (quoteValue a0))
+    | .text t => return .text (quoteText (cstrOf t))
+    | _ => return .ofString (quoteValue a0)
+  | "hex" =>
+    if nargs != 1 then wrong
+    return .ofString (hexOf (textOf a0))
+  | "unhex" =>
+    if nargs < 1 || nargs > 2 then wrong
+    if a0.isNull then return .null
+    let ign := if nargs == 2 then textOf a1 else .empty
+    match unhexBytes ign (textOf a0).toList with
+    | some l => return .blob ⟨l.toArray⟩
+    | none => return .null
+  | _ => scalarFn3 n vs colls
+
+/-- Scalar functions, part 1 of 7 (`scalarFn`). -/
+def scalarFn1 (n : Name) (vs : List Value) (colls : List (Option (Coll × Bool))) : M Value := do
+  let name := n.toLower
+  let wrong {α} : M α := err s!"wrong number of arguments to function {n}()"
+  let a0 := vs[0]?.getD .null
+  let a1 := vs[1]?.getD .null
+  let nargs := vs.length
+  match name with
+  | "abs" =>
+    if nargs != 1 then wrong
+    -- an integer stays an integer; anything else is read as a double
+    match a0 with
+    | .null => return .null
+    | .int i => if i == minI64 then err "integer overflow" else return .int i.natAbs
+    | v => return .real v.toReal.abs
+  | "length" =>
+    if nargs != 1 then wrong
+    match a0 with
+    | .null => return .null
+    | .blob b => return .int b.size
+    -- a TEXT is read as a C string (up to its first NUL)
+    | .text s => return .int (utf8Len (cstrOf s))
+    | v => return .int (utf8Len (textOf v))
+  | "octet_length" =>
+    if nargs != 1 then wrong
+    if a0.isNull then return .null
+    return .int (textOf a0).size
+  | "lower" | "upper" =>
+    if nargs != 1 then wrong
+    if a0.isNull then return .null
+    let f := if name == "lower" then lowerB else fun c => if 97 ≤ c && c ≤ 122 then c - 32 else c
+    return .text (ByteArray.mk ((textOf a0).data.map f))
+  | "typeof" =>
+    if nargs != 1 then wrong
+    return .ofString (match a0 with
+      | .null => "null" | .int _ => "integer" | .real _ => "real" | .text _ => "text" | .blob _ => "blob")
+  | "coalesce" | "ifnull" =>
+    if name == "ifnull" && nargs != 2 then wrong
+    if nargs < 2 then wrong
+    return (vs.find? (!·.isNull)).getD .null
+  | "nullif" =>
+    if nargs != 2 then wrong
+    let coll := match colls[0]?.join, colls[1]?.join with
+      | some (c, _), _ => c | _, some (c, _) => c | _, _ => .binary
+    if !a0.isNull && !a1.isNull && compareValues coll a0 a1 == .eq then return .null
+    return a0
+  | "iif" | "if" =>
+    if nargs < 2 then wrong
+    -- iif(c1, v1, c2, v2, …, else)
+    return iifPick vs
+  -- extension loading is off by default (SQLITE_LoadExtFunc)
+  | _ => scalarFn2 n vs colls
+
+/-- A scalar function (sqlite3.c's func.c and friends), by name. -/
+def scalarFn (n : Name) (vs : List Value) (colls : List (Option (Coll × Bool))) : M Value :=
+  scalarFn1 n vs colls
+
+/-- The rows of a compound SELECT from its SELECTs' (multiSelect): each
+    column's collation is that of the leftmost SELECT that has one for it;
+    UNION, INTERSECT, EXCEPT, UNION ALL in turn; then ORDER BY, which refers to
+    result columns. -/
+def combineCompound (cols : Array ColMeta) (rows0 : Array (Array Value × Array Value))
+    (mutable_cores : List (CompoundOp × Array ColMeta × Array (Array Value × Array Value)))
+    (orderBy : List OrderTerm) (dirs : List (SortDir × NullsOrder)) : M (Array ColMeta × Array (Array Value) × Bool) := do
+  let colls := (List.range cols.size).map fun i =>
+    let all := (cols :: mutable_cores.map (·.2.1)).filterMap fun cs => cs[i]?.map (·.coll)
+    (all.find? (· != .binary)).getD .binary
+  let cols := cols.mapIdx fun i c => { c with coll := colls[i]! }
+  let mut acc := rows0.map (·.1)
+  for (op, cs, rs) in mutable_cores do
+    if cs.size != cols.size then
+      err s!"SELECTs to the left and right of {match op with | .union => "UNION" | .unionAll => "UNION ALL" | .intersect => "INTERSECT" | .except => "EXCEPT"} do not have the same number of result columns"
+    let rs := rs.map (·.1)
+    match op with
+    | .unionAll => acc := acc ++ rs
+    | .union =>
+      -- SQLite's union index: the left side's duplicates keep the first row;
+      -- a row of the right side replaces an equal row already there
+      let mut idx : Std.HashMap String Nat := {}
+      let mut out : Array (Array Value) := #[]
+      for r in acc do
+        let k := canonKey colls r
+        if !idx.contains k then
+          idx := idx.insert k out.size
+          out := out.push r
+      -- within this SELECT the first of equal rows wins; it replaces an
+      -- equal row from an earlier SELECT of the compound
+      let mut mine : Std.HashSet String := {}
+      for r in rs do
+        let k := canonKey colls r
+        if mine.contains k then continue
+        mine := mine.insert k
+        match idx.get? k with
+        | some i => out := out.set! i r
+        | none =>
+          idx := idx.insert k out.size
+          out := out.push r
+      acc := stableSort (lexCompare colls []) out
+    | .intersect =>
+      let rk : Std.HashSet String := rs.foldl (fun st r => st.insert (canonKey colls r)) {}
+      acc := stableSort (lexCompare colls []) (dedupe colls (acc.filter fun r => rk.contains (canonKey colls r)))
+    | .except =>
+      let rk : Std.HashSet String := rs.foldl (fun st r => st.insert (canonKey colls r)) {}
+      acc := stableSort (lexCompare colls []) (dedupe colls (acc.filter fun r => !rk.contains (canonKey colls r)))
+  -- ORDER BY of a compound refers to result columns
+  if orderBy.isEmpty then pure (cols, acc, false) else
+  let mut idx := #[]
+  for h : k in [0:orderBy.length] do
+    let .mk e _ _ := orderBy[k]
+    let i ← match e with
+      | .lit (.int i) =>
+        if i < 1 || i > cols.size then err s!"ORDER BY term out of range - should be between 1 and {cols.size}"
+        pure (i - 1).toNat
+      | .col none none c | .collate (.col none none c) _ =>
+        match cols.toList.findIdx? (fun m => nameEq m.name c) with
+        | some i => pure i
+        | none => err s!"{ordinal (k + 1)} ORDER BY term does not match any column in the result set"
+      | _ => err s!"{ordinal (k + 1)} ORDER BY term does not match any column in the result set"
+    idx := idx.push i
+  let ocolls := (List.range orderBy.length).map fun k =>
+    match orderBy[k]! with
+    | .mk (.collate _ c) _ _ => (collOfName c).getD .binary
+    | _ => (cols[idx[k]!]?.map (·.coll)).getD .binary
+  let keyed := acc.map fun r => (r, idx.map fun i => r[i]!)
+  pure (cols, (stableSort (fun a b => lexCompare ocolls dirs a.2 b.2) keyed).map (·.1), false)
+
 
 mutual
 
@@ -1060,7 +1491,7 @@ def callFnST (fuel : Nat) (q : QEnv) (n : Name) (args : List Expr) (_distinct : 
       match DateTime.scalar? { unixMs := (← get).choices.clockMs } n.toLower vs with
       | some r => lift r
       | none =>
-        let v ← (try scalarFn fuel n vs (args.map fun a => exprColl q.env a) catch e => throw (fixName e))
+        let v ← (try scalarFn n vs (args.map fun a => exprColl q.env a) catch e => throw (fixName e))
         -- the argument whose value is returned passes its subtype on
         let pick : Option Nat := match n.toLower with
           | "coalesce" | "ifnull" => vs.findIdx? (!·.isNull)
@@ -1162,301 +1593,6 @@ def evalExprST (fuel : Nat) (q : QEnv) (e : Expr) : M (Value × Bool) :=
       | .col _ _ _ => return (← evalExpr fuel q e, ← argIsJson fuel q e)
       | _ => return (← evalExpr fuel q e, false)
 
-/-- Scalar functions. -/
-def scalarFn (fuel : Nat) (n : Name) (vs : List Value) (colls : List (Option (Coll × Bool))) : M Value :=
-  match fuel with
-  | 0 => outOfFuel
-  | fuel + 1 =>
-    do
-      let name := n.toLower
-      let wrong {α} : M α := err s!"wrong number of arguments to function {n}()"
-      let a0 := vs[0]?.getD .null
-      let a1 := vs[1]?.getD .null
-      let nargs := vs.length
-      match name with
-      | "abs" =>
-        if nargs != 1 then wrong
-        -- an integer stays an integer; anything else is read as a double
-        match a0 with
-        | .null => return .null
-        | .int i => if i == minI64 then err "integer overflow" else return .int i.natAbs
-        | v => return .real v.toReal.abs
-      | "length" =>
-        if nargs != 1 then wrong
-        match a0 with
-        | .null => return .null
-        | .blob b => return .int b.size
-        -- a TEXT is read as a C string (up to its first NUL)
-        | .text s => return .int (utf8Len (cstrOf s))
-        | v => return .int (utf8Len (textOf v))
-      | "octet_length" =>
-        if nargs != 1 then wrong
-        if a0.isNull then return .null
-        return .int (textOf a0).size
-      | "lower" | "upper" =>
-        if nargs != 1 then wrong
-        if a0.isNull then return .null
-        let f := if name == "lower" then lowerB else fun c => if 97 ≤ c && c ≤ 122 then c - 32 else c
-        return .text (ByteArray.mk ((textOf a0).data.map f))
-      | "typeof" =>
-        if nargs != 1 then wrong
-        return .ofString (match a0 with
-          | .null => "null" | .int _ => "integer" | .real _ => "real" | .text _ => "text" | .blob _ => "blob")
-      | "coalesce" | "ifnull" =>
-        if name == "ifnull" && nargs != 2 then wrong
-        if nargs < 2 then wrong
-        return (vs.find? (!·.isNull)).getD .null
-      | "nullif" =>
-        if nargs != 2 then wrong
-        let coll := match colls[0]?.join, colls[1]?.join with
-          | some (c, _), _ => c | _, some (c, _) => c | _, _ => .binary
-        if !a0.isNull && !a1.isNull && compareValues coll a0 a1 == .eq then return .null
-        return a0
-      | "iif" | "if" =>
-        if nargs < 2 then wrong
-        -- iif(c1, v1, c2, v2, …, else)
-        return iifPick vs
-      -- extension loading is off by default (SQLITE_LoadExtFunc)
-      | "load_extension" =>
-        if nargs < 1 || nargs > 2 then wrong
-        err "not authorized"
-      -- the MATCH operator's function form: only virtual tables provide it
-      | "match" =>
-        if nargs != 2 then wrong
-        err "unable to use function MATCH in the requested context"
-      -- sqlite_log(code, msg) writes to the error log and returns NULL
-      | "sqlite_log" =>
-        if nargs != 2 then wrong
-        return .null
-      | "unistr" =>
-        if nargs != 1 then wrong
-        if a0.isNull then return .null
-        match unistrBytes (textOf a0) with
-        | some b => return .text b
-        | none => err "invalid Unicode escape"
-      | "unistr_quote" =>
-        if nargs != 1 then wrong
-        -- quote(), with %#Q for text: control characters through unistr()
-        match a0 with
-        | .text _ => match Printf.scalar? "printf" [.ofString "%#Q", a0] with
-          | some (.ok v) => return v
-          | some (.error e) => throw e
-          | none => return .ofString (quoteValue a0)
-        | .real r => return .ofString ((Printf.quoteReal? r).getD (quoteValue a0))
-        | _ => return .ofString (quoteValue a0)
-      | "quote" =>
-        if nargs != 1 then wrong
-        match a0 with
-        | .real r => return .ofString ((Printf.quoteReal? r).getD (quoteValue a0))
-        | .text t => return .text (quoteText (cstrOf t))
-        | _ => return .ofString (quoteValue a0)
-      | "hex" =>
-        if nargs != 1 then wrong
-        return .ofString (hexOf (textOf a0))
-      | "unhex" =>
-        if nargs < 1 || nargs > 2 then wrong
-        if a0.isNull then return .null
-        let ign := if nargs == 2 then textOf a1 else .empty
-        let hv (c : UInt8) : Option Nat :=
-          if 48 ≤ c && c ≤ 57 then some (c - 48).toNat
-          else if 65 ≤ c && c ≤ 70 then some (c - 55).toNat
-          else if 97 ≤ c && c ≤ 102 then some (c - 87).toNat else none
-        let rec goHex : List UInt8 → Option (List UInt8)
-          | [] => some []
-          | c :: rest =>
-            if ign.toList.contains c && (hv c).isNone then goHex rest else
-            match rest with
-            | d :: rest' => match hv c, hv d with
-              | some x, some y => (goHex rest').map ((x * 16 + y).toUInt8 :: ·)
-              | _, _ => none
-            | [] => none
-        match goHex (textOf a0).toList with
-        | some l => return .blob ⟨l.toArray⟩
-        | none => return .null
-      | "char" =>
-        let cs := vs.map fun v => Char.ofNat v.toInt.toNat
-        return .text (String.ofList cs).toUTF8
-      | "unicode" =>
-        if nargs != 1 then wrong
-        -- the first code point of the text (read up to its first NUL), as sqlite3Utf8Read
-        let bs := (textOf a0).toList.takeWhile (· != 0)
-        if a0.isNull || bs.isEmpty then return .null
-        return .int (utf8Read bs).1
-      | "instr" =>
-        if nargs != 2 then wrong
-        if a0.isNull || a1.isNull then return .null
-        match a0, a1 with
-        | .blob h, _ | _, .blob h =>
-          let hay := (textOf a0).toList
-          let nee := (textOf a1).toList
-          let _ := h
-          let idx := (List.range (hay.length + 1)).find? fun i => (hay.drop i).take nee.length == nee
-          return .int (match idx with | some i => i + 1 | none => 0)
-        | _, _ =>
-          let hay := utf8Chars (textOf a0)
-          let nee := utf8Chars (textOf a1)
-          let idx := (List.range (hay.length + 1)).find? fun i => (hay.drop i).take nee.length == nee
-          return .int (match idx with | some i => i + 1 | none => 0)
-      | "substr" | "substring" =>
-        if nargs < 2 || nargs > 3 then wrong
-        if a0.isNull || a1.isNull then return .null
-        if nargs == 3 && vs[2]!.isNull then return .null
-        let z : Option Int := if nargs == 3 then some vs[2]!.toInt else none
-        let y := a1.toInt
-        match a0 with
-        | .blob b =>
-          -- sqlite3_value_blob of an empty blob is a null pointer: no result
-          if b.size == 0 then return .null
-          let units := b.toList.map ([·])
-          return .blob ⟨((substrOf units y z).flatten).toArray⟩
-        | _ =>
-          let units := utf8Chars (cstrOf (textOf a0))
-          return .text ⟨((substrOf units y z).flatten).toArray⟩
-      | "trim" | "ltrim" | "rtrim" =>
-        if nargs < 1 || nargs > 2 then wrong
-        if a0.isNull then return .null
-        if nargs == 2 && a1.isNull then return .null
-        let set := if nargs == 2 then utf8Chars (textOf a1) else [[32]]
-        let s := utf8Chars (textOf a0)
-        return .text ⟨(trimBy s set (name != "rtrim") (name != "ltrim")).flatten.toArray⟩
-      | "replace" =>
-        if nargs != 3 then wrong
-        if vs.any (·.isNull) then return .null
-        let s := (textOf a0).toList
-        let pat := (textOf a1).toList
-        let rep := (textOf vs[2]!).toList
-        if pat.isEmpty then return .text (textOf a0)
-        let rec goRep (s : List UInt8) (k : Nat) : List UInt8 :=
-          match k with
-          | 0 => s
-          | f + 1 =>
-            match s with
-            | [] => []
-            | c :: rest => if s.take pat.length == pat then rep ++ goRep (s.drop pat.length) f else c :: goRep rest f
-        return .text ⟨(goRep s s.length).toArray⟩
-      | "round" =>
-        if nargs < 1 || nargs > 2 then wrong
-        if a0.isNull then return .null
-        if nargs == 2 && a1.isNull then return .null
-        let digits : Int := if nargs == 2 then a1.numeric.toInt else 0
-        let digits := if digits > 30 then 30 else if digits < 0 then 0 else digits
-        return .real ((Printf.round? a0.toReal digits).getD (roundTo a0.toReal digits))
-      | "sign" =>
-        if nargs != 1 then wrong
-        -- sqlite3_value_numeric_type: only an INTEGER or REAL (a TEXT after numeric affinity)
-        let nv := match a0 with
-          | .text t => (numericOfText t false).getD a0
-          | v => v
-        match nv with
-        | .int _ | .real _ => pure ()
-        | _ => return .null
-        match mathArg nv with
-        | none => return .null
-        | some r => return .int (if r > 0 then 1 else if r < 0 then -1 else 0)
-      | "min" | "max" =>
-        if nargs < 2 then wrong
-        if vs.any (·.isNull) then return .null
-        let coll := (colls.findSome? id).map (·.1) |>.getD .binary
-        -- minmaxFunc: min() moves to a later argument on a tie, max() does not
-        let better (a b : Value) : Bool :=
-          let o := compareValues coll a b
-          if name == "min" then o != .gt else o == .gt
-        return vs.foldl (fun acc v => if better v acc then v else acc) a0
-      | "zeroblob" =>
-        if nargs != 1 then wrong
-        let n := max 0 a0.toInt
-        if n > maxLength then err "string or blob too big" SQLITE_TOOBIG
-        return .blob ⟨Array.replicate n.toNat 0⟩
-      | "likelihood" | "likely" | "unlikely" => return a0
-      | "sqlite_version" => return .ofString "3.54.1"
-      -- the options of the ccomp build, which the Clight export is (Sql.PragmaData)
-      | "sqlite_compileoption_used" =>
-        if nargs != 1 then wrong
-        match a0.toText? with
-        | some b => return .int (if Pragma.compileOptionUsed b.toList then 1 else 0)
-        | none => return .null
-      | "sqlite_compileoption_get" =>
-        if nargs != 1 then wrong
-        match Pragma.compileOptionGet a0.toInt with
-        | some o => return .ofString o
-        | none => return .null
-      | "sqlite_source_id" => return .ofString "2026-10-16 14:45:20 555e07ef33f69a0957d24d8e555b702464a131d6f1607f4c3c1e4551e8e6ca76"
-      -- random(), randomblob(N): SQLite's PRNG; the semantics allows any value
-      -- (Phase 2.5 states this as a choice); this executable draws from a counter
-      | "random" =>
-        if nargs != 0 then wrong
-        let c ← get
-        let seed := c.prng
-        set { c with prng := seed + 1 }
-        let x : Nat := c.choices.random seed 0 % 2 ^ 64
-        return .int (if x ≥ 2 ^ 63 then (x : Int) - 2 ^ 64 else x)
-      | "randomblob" =>
-        if nargs != 1 then wrong
-        let n := max 1 a0.toInt
-        if n > maxLength then err "string or blob too big" SQLITE_TOOBIG
-        let c ← get
-        let seed := c.prng
-        set { c with prng := seed + 1 }
-        return .blob ⟨(Array.range n.toNat).map fun i => (c.choices.random seed (i + 1) % 256).toUInt8⟩
-      | "changes" => return .int (← getDb).changes
-      | "total_changes" => return .int (← getDb).totalChanges
-      | "last_insert_rowid" => return .int (← getDb).lastRowid
-      | "concat" =>
-        if nargs < 1 then wrong
-        return .text (vs.foldl (fun acc v => acc ++ textOf v) .empty)
-      | "concat_ws" =>
-        if nargs < 2 then wrong
-        if a0.isNull then return .null
-        let parts := (vs.drop 1).filter (!·.isNull) |>.map textOf
-        return .text (match parts with
-          | [] => .empty
-          | p :: ps => ps.foldl (fun acc x => acc ++ textOf a0 ++ x) p)
-      | "glob" | "like" =>
-        if nargs < 2 || nargs > 3 then wrong
-        if a0.isNull || a1.isNull then return .null
-        let cstr (b : ByteArray) : ByteArray := ⟨(b.data.toList.takeWhile (· != 0)).toArray⟩
-        let r := if name == "glob" then globMatch (utf8Chars (cstr (textOf a0))) (utf8Chars (cstr (textOf a1)))
-          else likeMatch (utf8Chars (cstr (textOf a0))) (utf8Chars (cstr (textOf a1)))
-            (if nargs == 3 then (utf8Chars (textOf vs[2]!)).head? else none) true
-        return .int (if r then 1 else 0)
-      | "pi" => if nargs != 0 then wrong else return .real 3.141592653589793
-      | "log" =>
-        if nargs < 1 || nargs > 2 then wrong
-        if nargs == 1 then
-          match mathArg a0 with
-          | some x => return mathResult (Float.log10 x)
-          | none => return .null
-        match mathArg a0, mathArg a1 with
-        | some b, some x => return mathResult (Float.log x / Float.log b)
-        | _, _ => return .null
-      | "pow" | "power" | "atan2" | "mod" =>
-        if nargs != 2 then wrong
-        match mathArg a0, mathArg a1 with
-        | some x, some y =>
-          return mathResult (match name with
-            | "atan2" => Float.atan2 x y
-            | "mod" => x - y * (let t := x / y; if t < 0 then t.ceil else t.floor)
-            | _ => Float.pow x y)
-        | _, _ => return .null
-      | "ceil" | "ceiling" | "floor" | "trunc" =>
-        if nargs != 1 then wrong
-        match a0 with
-        | .int i => return .int i
-        | .null => return .null
-        | _ =>
-          match mathArg a0 with
-          | some x => return mathResult (match name with
-              | "floor" => x.floor | "trunc" => (if x < 0 then x.ceil else x.floor) | _ => x.ceil)
-          | none => return .null
-      | _ =>
-        match mathUnary name with
-        | some f =>
-          if nargs != 1 then wrong
-          match mathArg a0 with
-          | some x => return mathResult (f x)
-          | none => return .null
-        | none => err s!"no such function: {n}"
-
 /-- A window definition with its base window (named in the WINDOW clause) merged in. -/
 def resolveWindow (fuel : Nat) (windows : List (Name × Window)) (w : Window) : M Window :=
   match fuel with
@@ -1506,141 +1642,155 @@ def computeWindow (fuel : Nat) (ctxs : Array QEnv) (windows : List (Name × Wind
       let pass ← ctxs.mapM fun c => match filter with
         | some f => condHolds fuel c f
         | none => pure true
-      let constArg (k : Nat) (dflt : Int) : M Int := do
-        match args[k]? with
-        | none => return dflt
-        | some e => match ← evalExpr fuel (ctxs[0]?.getD {}) e with
-          | .int i => return i
-          | v => match realAsInt v.numeric.toReal with
-            | some i => return i
-            | none => return (if v.isNull then dflt else v.numeric.toInt)
       let mut result := Array.replicate nrows Value.null
-      let isPeer (a b : Nat) : Bool := lexCompare ocolls odirs okeys[a]! okeys[b]! == .eq
       for p in parts do
-        let m := p.size
-        let mut firstPeer := Array.replicate m 0
-        let mut lastPeer := Array.replicate m 0
-        let mut groupIdx := Array.replicate m 0
-        let mut g : Nat := 0
-        for j in [0:m] do
-          if j > 0 && isPeer p[j - 1]! p[j]! then
-            firstPeer := firstPeer.set! j firstPeer[j - 1]!
-            groupIdx := groupIdx.set! j groupIdx[j - 1]!
-          else
-            firstPeer := firstPeer.set! j j
-            if j > 0 then g := g + 1
-            groupIdx := groupIdx.set! j g
-        for j' in [0:m] do
-          let j := m - 1 - j'
-          if j + 1 < m && isPeer p[j]! p[j + 1]! then lastPeer := lastPeer.set! j lastPeer[j + 1]!
-          else lastPeer := lastPeer.set! j j
-        let ngroups : Nat := g + 1
-        let gIdx := groupIdx
-        let groupStart (k : Nat) : Nat := ((List.range m).find? (fun x => gIdx[x]! == k)).getD m
-        let groupEnd (k : Nat) : Nat := ((List.range m).reverse.find? (fun x => gIdx[x]! == k)).getD 0
-        let fP := firstPeer
-        let lP := lastPeer
-        let frameOf (j : Nat) : M (List Nat) := do
-          let fr := frame.getD (if ord.isEmpty then .mk .rows .unboundedPreceding .unboundedFollowing .noOthers
-                                else .mk .range .unboundedPreceding .currentRow .noOthers)
-          let .mk unit st en excl := fr
-          let offset (e : Expr) (start : Bool) : M Value := do
-            let v ← evalExpr fuel (ctxs[p[j]!]!) e
-            let bad : Bool := match v with
-              | .int i => decide (i < 0) | .real r => r < 0.0 | _ => true
-            if bad then
-              err (if start then "frame starting offset must be a non-negative number" else "frame ending offset must be a non-negative number")
-            return v
-          let bound (b : FrameBound) (isStart : Bool) : M Int := do
-            match b with
-            | .unboundedPreceding => return 0
-            | .unboundedFollowing => return (m : Int) - 1
-            | .currentRow =>
-              match unit with
-              | .rows => return j
-              | _ => return (if isStart then fP[j]! else lP[j]!)
-            | .preceding e | .following e =>
-              let v ← offset e isStart
-              let prec := match b with | .preceding _ => true | _ => false
-              match unit with
-              | .rows =>
-                let k := v.numeric.toInt
-                return (if prec then (j : Int) - k else j + k)
-              | .groups =>
-                let k := v.numeric.toInt
-                let tg : Int := if prec then (gIdx[j]! : Int) - k else gIdx[j]! + k
-                if tg < 0 then return (if isStart then 0 else -1)
-                if tg ≥ ngroups then return (if isStart then m else (m : Int) - 1)
-                return (if isStart then groupStart tg.toNat else groupEnd tg.toNat)
-              | .range =>
-                let key := okeys[p[j]!]![0]?.getD .null
-                if key.isNull then return (if isStart then fP[j]! else lP[j]!)
-                let desc := match ord.head? with | some (.mk _ d _) => d == .desc | none => false
-                let x := key.toReal
-                let d := v.toReal
-                let target := if prec != desc then x - d else x + d
-                let inside (k : Nat) : Bool :=
-                  let kv := okeys[p[k]!]![0]?.getD .null
-                  if kv.isNull then false else
-                  let y := kv.toReal
-                  if isStart then (if desc then y ≤ target else y ≥ target)
-                  else (if desc then y ≥ target else y ≤ target)
-                if isStart then return (((List.range m).find? inside).getD m : Nat)
-                else return (match (List.range m).reverse.find? inside with | some k => (k : Int) | none => -1)
-          let lo ← bound st true
-          let hi ← bound en false
-          let mut out := []
-          let mut k := lo
-          for _ in [0:(hi - lo + 1).toNat] do
-            if k ≥ 0 && k < m then
-              let kk := k.toNat
-              let excluded := match excl with
-                | .noOthers => false
-                | .currentRow => kk == j
-                | .group => isPeer p[kk]! p[j]!
-                | .ties => kk != j && isPeer p[kk]! p[j]!
-              if !excluded then out := kk :: out
-            k := k + 1
-          return out.reverse
-        for j in [0:m] do
-          let row := p[j]!
-          let v ← match name with
-            | "row_number" => pure (Value.int (j + 1))
-            | "rank" => pure (.int (fP[j]! + 1))
-            | "dense_rank" => pure (.int (gIdx[j]! + 1))
-            | "percent_rank" => pure (.real (if m ≤ 1 then 0.0 else intToReal fP[j]! / intToReal ((m : Int) - 1)))
-            | "cume_dist" => pure (.real (intToReal (lP[j]! + 1) / intToReal m))
-            | "ntile" =>
-              let nt ← constArg 0 1
-              if nt ≤ 0 then err "argument of ntile must be a positive integer"
-              let nt := nt.toNat
-              let base := m / nt
-              let extra := m % nt
-              let bucket := if j < extra * (base + 1) then j / (base + 1) else extra + (j - extra * (base + 1)) / (max base 1)
-              pure (.int (bucket + 1))
-            | "lag" | "lead" =>
-              let off ← constArg 1 1
-              let k : Int := if name == "lag" then (j : Int) - off else j + off
-              if k ≥ 0 && k < m then pure ((argv[p[k.toNat]!]!)[0]?.getD .null)
-              else match args[2]? with
-                | some e => evalExpr fuel ctxs[row]! e
-                | none => pure .null
-            | "first_value" | "last_value" | "nth_value" =>
-              let fr ← frameOf j
-              let nth ← constArg 1 1
-              if name == "nth_value" && nth ≤ 0 then err "second argument to nth_value must be a positive integer"
-              let pick := if name == "first_value" then fr.head?
-                else if name == "last_value" then fr.getLast?
-                else fr[(nth - 1).toNat]?
-              pure ((pick.bind fun k => (argv[p[k]!]!)[0]?).getD .null)
-            | _ =>
-              if !(isAggCall n args.length star false) then err s!"no such window function: {n}"
-              let fr ← frameOf j
-              let vals := (fr.filter fun k => pass[p[k]!]!).toArray.map fun k => argv[p[k]!]!
-              let coll := ((args.head?.bind fun e => (ctxs[0]?.bind fun c => exprColl c.env e)).map (·.1)).getD .binary
-              aggFinish fuel ctxs[row]! n star args coll vals
-          result := result.set! row v
+        result ← windowPartition fuel ctxs name n args star ord frame okeys ocolls odirs argv pass p result
       return (result, order)
+
+
+/-- The values of a window function over one partition `p` (row indices in
+    the window's order) of the rows `ctxs` (`computeWindow`). -/
+def windowPartition (fuel : Nat) (ctxs : Array QEnv) (name : String) (n : Name) (args : List Expr) (star : Bool)
+    (ord : List OrderTerm) (frame : Option Frame) (okeys : Array (Array Value)) (ocolls : List Coll)
+    (odirs : List (SortDir × NullsOrder)) (argv : Array (List Value)) (pass : Array Bool) (p : Array Nat)
+    (result : Array Value) : M (Array Value) :=
+  match fuel with
+  | 0 => outOfFuel
+  | fuel + 1 => do
+    let constArg (k : Nat) (dflt : Int) : M Int := do
+      match args[k]? with
+      | none => return dflt
+      | some e => match ← evalExpr fuel (ctxs[0]?.getD {}) e with
+        | .int i => return i
+        | v => match realAsInt v.numeric.toReal with
+          | some i => return i
+          | none => return (if v.isNull then dflt else v.numeric.toInt)
+    let isPeer (a b : Nat) : Bool := lexCompare ocolls odirs okeys[a]! okeys[b]! == .eq
+    let mut result := result
+    let m := p.size
+    let mut firstPeer := Array.replicate m 0
+    let mut lastPeer := Array.replicate m 0
+    let mut groupIdx := Array.replicate m 0
+    let mut g : Nat := 0
+    for j in [0:m] do
+      if j > 0 && isPeer p[j - 1]! p[j]! then
+        firstPeer := firstPeer.set! j firstPeer[j - 1]!
+        groupIdx := groupIdx.set! j groupIdx[j - 1]!
+      else
+        firstPeer := firstPeer.set! j j
+        if j > 0 then g := g + 1
+        groupIdx := groupIdx.set! j g
+    for j' in [0:m] do
+      let j := m - 1 - j'
+      if j + 1 < m && isPeer p[j]! p[j + 1]! then lastPeer := lastPeer.set! j lastPeer[j + 1]!
+      else lastPeer := lastPeer.set! j j
+    let ngroups : Nat := g + 1
+    let gIdx := groupIdx
+    let groupStart (k : Nat) : Nat := ((List.range m).find? (fun x => gIdx[x]! == k)).getD m
+    let groupEnd (k : Nat) : Nat := ((List.range m).reverse.find? (fun x => gIdx[x]! == k)).getD 0
+    let fP := firstPeer
+    let lP := lastPeer
+    let frameOf (j : Nat) : M (List Nat) := do
+      let fr := frame.getD (if ord.isEmpty then .mk .rows .unboundedPreceding .unboundedFollowing .noOthers
+                            else .mk .range .unboundedPreceding .currentRow .noOthers)
+      let .mk unit st en excl := fr
+      let offset (e : Expr) (start : Bool) : M Value := do
+        let v ← evalExpr fuel (ctxs[p[j]!]!) e
+        let bad : Bool := match v with
+          | .int i => decide (i < 0) | .real r => r < 0.0 | _ => true
+        if bad then
+          err (if start then "frame starting offset must be a non-negative number" else "frame ending offset must be a non-negative number")
+        return v
+      let bound (b : FrameBound) (isStart : Bool) : M Int := do
+        match b with
+        | .unboundedPreceding => return 0
+        | .unboundedFollowing => return (m : Int) - 1
+        | .currentRow =>
+          match unit with
+          | .rows => return j
+          | _ => return (if isStart then fP[j]! else lP[j]!)
+        | .preceding e | .following e =>
+          let v ← offset e isStart
+          let prec := match b with | .preceding _ => true | _ => false
+          match unit with
+          | .rows =>
+            let k := v.numeric.toInt
+            return (if prec then (j : Int) - k else j + k)
+          | .groups =>
+            let k := v.numeric.toInt
+            let tg : Int := if prec then (gIdx[j]! : Int) - k else gIdx[j]! + k
+            if tg < 0 then return (if isStart then 0 else -1)
+            if tg ≥ ngroups then return (if isStart then m else (m : Int) - 1)
+            return (if isStart then groupStart tg.toNat else groupEnd tg.toNat)
+          | .range =>
+            let key := okeys[p[j]!]![0]?.getD .null
+            if key.isNull then return (if isStart then fP[j]! else lP[j]!)
+            let desc := match ord.head? with | some (.mk _ d _) => d == .desc | none => false
+            let x := key.toReal
+            let d := v.toReal
+            let target := if prec != desc then x - d else x + d
+            let inside (k : Nat) : Bool :=
+              let kv := okeys[p[k]!]![0]?.getD .null
+              if kv.isNull then false else
+              let y := kv.toReal
+              if isStart then (if desc then y ≤ target else y ≥ target)
+              else (if desc then y ≥ target else y ≤ target)
+            if isStart then return (((List.range m).find? inside).getD m : Nat)
+            else return (match (List.range m).reverse.find? inside with | some k => (k : Int) | none => -1)
+      let lo ← bound st true
+      let hi ← bound en false
+      let mut out := []
+      let mut k := lo
+      for _ in [0:(hi - lo + 1).toNat] do
+        if k ≥ 0 && k < m then
+          let kk := k.toNat
+          let excluded := match excl with
+            | .noOthers => false
+            | .currentRow => kk == j
+            | .group => isPeer p[kk]! p[j]!
+            | .ties => kk != j && isPeer p[kk]! p[j]!
+          if !excluded then out := kk :: out
+        k := k + 1
+      return out.reverse
+    for j in [0:m] do
+      let row := p[j]!
+      let v ← match name with
+        | "row_number" => pure (Value.int (j + 1))
+        | "rank" => pure (.int (fP[j]! + 1))
+        | "dense_rank" => pure (.int (gIdx[j]! + 1))
+        | "percent_rank" => pure (.real (if m ≤ 1 then 0.0 else intToReal fP[j]! / intToReal ((m : Int) - 1)))
+        | "cume_dist" => pure (.real (intToReal (lP[j]! + 1) / intToReal m))
+        | "ntile" =>
+          let nt ← constArg 0 1
+          if nt ≤ 0 then err "argument of ntile must be a positive integer"
+          let nt := nt.toNat
+          let base := m / nt
+          let extra := m % nt
+          let bucket := if j < extra * (base + 1) then j / (base + 1) else extra + (j - extra * (base + 1)) / (max base 1)
+          pure (.int (bucket + 1))
+        | "lag" | "lead" =>
+          let off ← constArg 1 1
+          let k : Int := if name == "lag" then (j : Int) - off else j + off
+          if k ≥ 0 && k < m then pure ((argv[p[k.toNat]!]!)[0]?.getD .null)
+          else match args[2]? with
+            | some e => evalExpr fuel ctxs[row]! e
+            | none => pure .null
+        | "first_value" | "last_value" | "nth_value" =>
+          let fr ← frameOf j
+          let nth ← constArg 1 1
+          if name == "nth_value" && nth ≤ 0 then err "second argument to nth_value must be a positive integer"
+          let pick := if name == "first_value" then fr.head?
+            else if name == "last_value" then fr.getLast?
+            else fr[(nth - 1).toNat]?
+          pure ((pick.bind fun k => (argv[p[k]!]!)[0]?).getD .null)
+        | _ =>
+          if !(isAggCall n args.length star false) then err s!"no such window function: {n}"
+          let fr ← frameOf j
+          let vals := (fr.filter fun k => pass[p[k]!]!).toArray.map fun k => argv[p[k]!]!
+          let coll := ((args.head?.bind fun e => (ctxs[0]?.bind fun c => exprColl c.env e)).map (·.1)).getD .binary
+          aggFinish fuel ctxs[row]! n star args coll vals
+      result := result.set! row v
+    return result
 
 /-- FROM with WHERE: a chain of inner joins is evaluated as nested loops, each
     conjunct of WHERE and of the ON clauses applied as soon as every source it
@@ -2416,125 +2566,93 @@ def runSelect (fuel : Nat) (q : QEnv) (sel : Select) (cap : Bool := false) (stre
         | some o, _ => limitValue (← evalExpr fuel q o)
         | none, _ => pure 0
       let dirs := orderBy.map fun (.mk _ d nl) => (d, nl)
-      let (cols, rows, applied) ← if rest.isEmpty then do
-          -- without ORDER BY, LIMIT and OFFSET act inside the loop
-          let direct := orderBy.isEmpty
-          let limNat : Option Nat := limitN.bind fun l => if l < 0 then none else some l.toNat
-          let (cols, rows) ← if direct then runCore fuel q first [] (limitN == some 0) limNat offsetN.toNat stream
-            else runCore fuel q first orderBy (limitN == some 0)
-          let colls := orderBy.map fun (.mk e _ _) =>
-            match e with
-            | .collate _ c => (collOfName c).getD .binary
-            | .lit (.int i) => (cols[(i - 1).toNat]?.map (·.coll)).getD .binary
-            | _ => ((exprColl { q.env with frames := q.env.frames } e).map (·.1)).getD
-                ((cols.toList.find? fun c => match e with | .col _ _ n => nameEq c.name n | _ => false).map (·.coll) |>.getD .binary)
-          if direct then pure (cols, rows.map (·.1), true) else
-          let rows := stableSort (fun a b => lexCompare colls dirs a.2 b.2) rows
-          pure (cols, rows.map (·.1), false)
-        else if orderBy.isEmpty && rest.all (fun (op, _) => match op with | .unionAll => true | _ => false) then do
-          -- UNION ALL without ORDER BY: the SELECTs run one after the other into
-          -- the output, sharing LIMIT (multiSelect), so an error in one leaves
-          -- the rows of those before it out
-          let limNat : Option Nat := limitN.bind fun l => if l < 0 then none else some l.toNat
-          let off := offsetN.toNat
-          let total := limNat.map (· + off)
-          let mut acc : Array (Array Value) := #[]
-          let mut metas : List (Array ColMeta) := []
-          for core in first :: rest.map (·.2) do
-            if total.any (acc.size ≥ ·) then break
-            let remaining := total.map (· - acc.size)
-            let r ← tryCatch (do
-                let (cs, rs) ← runCore fuel q core [] (limitN == some 0) remaining 0 stream
-                pure (Except.ok (cs, rs)))
-              (fun e => pure (Except.error e))
-            match r with
-            | .ok (cs, rs) =>
-              metas := metas ++ [cs]
-              acc := acc ++ rs.map (·.1)
-            | .error e =>
-              throw (if stream then { e with printed := (acc ++ e.printed).extract off (acc.size + e.printed.size) } else e)
-          let cols := metas.head?.getD #[]
-          -- multiSelectCollSeq: the leftmost SELECT with a collation for a column
-          let colls := (List.range cols.size).map fun i =>
-            ((metas.filterMap fun cs => cs[i]?.map (·.coll)).find? (· != .binary)).getD .binary
-          let cols := cols.mapIdx fun i c => { c with coll := colls[i]! }
-          let rows := acc.extract off acc.size
-          let rows := match limNat with | some l => rows.extract 0 l | none => rows
-          pure (cols, rows, true)
-        else do
-          let (cols, rows0) ← runCore fuel q first []
-          -- multiSelectCollSeq: each column's collation is that of the leftmost
-          -- SELECT that has one for it
-          let mutable_cores ← rest.mapM fun (op, core) => do
-            let (cs, rs) ← runCore fuel q core []
-            pure (op, cs, rs)
-          let colls := (List.range cols.size).map fun i =>
-            let all := (cols :: mutable_cores.map (·.2.1)).filterMap fun cs => cs[i]?.map (·.coll)
-            (all.find? (· != .binary)).getD .binary
-          let cols := cols.mapIdx fun i c => { c with coll := colls[i]! }
-          let mut acc := rows0.map (·.1)
-          for (op, cs, rs) in mutable_cores do
-            if cs.size != cols.size then
-              err s!"SELECTs to the left and right of {match op with | .union => "UNION" | .unionAll => "UNION ALL" | .intersect => "INTERSECT" | .except => "EXCEPT"} do not have the same number of result columns"
-            let rs := rs.map (·.1)
-            match op with
-            | .unionAll => acc := acc ++ rs
-            | .union =>
-              -- SQLite's union index: the left side's duplicates keep the first row;
-              -- a row of the right side replaces an equal row already there
-              let mut idx : Std.HashMap String Nat := {}
-              let mut out : Array (Array Value) := #[]
-              for r in acc do
-                let k := canonKey colls r
-                if !idx.contains k then
-                  idx := idx.insert k out.size
-                  out := out.push r
-              -- within this SELECT the first of equal rows wins; it replaces an
-              -- equal row from an earlier SELECT of the compound
-              let mut mine : Std.HashSet String := {}
-              for r in rs do
-                let k := canonKey colls r
-                if mine.contains k then continue
-                mine := mine.insert k
-                match idx.get? k with
-                | some i => out := out.set! i r
-                | none =>
-                  idx := idx.insert k out.size
-                  out := out.push r
-              acc := stableSort (lexCompare colls []) out
-            | .intersect =>
-              let rk : Std.HashSet String := rs.foldl (fun st r => st.insert (canonKey colls r)) {}
-              acc := stableSort (lexCompare colls []) (dedupe colls (acc.filter fun r => rk.contains (canonKey colls r)))
-            | .except =>
-              let rk : Std.HashSet String := rs.foldl (fun st r => st.insert (canonKey colls r)) {}
-              acc := stableSort (lexCompare colls []) (dedupe colls (acc.filter fun r => !rk.contains (canonKey colls r)))
-          -- ORDER BY of a compound refers to result columns
-          if orderBy.isEmpty then pure (cols, acc, false) else
-          let mut idx := #[]
-          for h : k in [0:orderBy.length] do
-            let .mk e _ _ := orderBy[k]
-            let i ← match e with
-              | .lit (.int i) =>
-                if i < 1 || i > cols.size then err s!"ORDER BY term out of range - should be between 1 and {cols.size}"
-                pure (i - 1).toNat
-              | .col none none c | .collate (.col none none c) _ =>
-                match cols.toList.findIdx? (fun m => nameEq m.name c) with
-                | some i => pure i
-                | none => err s!"{ordinal (k + 1)} ORDER BY term does not match any column in the result set"
-              | _ => err s!"{ordinal (k + 1)} ORDER BY term does not match any column in the result set"
-            idx := idx.push i
-          let ocolls := (List.range orderBy.length).map fun k =>
-            match orderBy[k]! with
-            | .mk (.collate _ c) _ _ => (collOfName c).getD .binary
-            | _ => (cols[idx[k]!]?.map (·.coll)).getD .binary
-          let keyed := acc.map fun r => (r, idx.map fun i => r[i]!)
-          pure (cols, (stableSort (fun a b => lexCompare ocolls dirs a.2 b.2) keyed).map (·.1), false)
+      let (cols, rows, applied) ←
+        if rest.isEmpty then runSimple fuel q first orderBy limitN offsetN dirs stream
+        else if orderBy.isEmpty && rest.all (fun (op, _) => match op with | .unionAll => true | _ => false) then
+          runUnionAll fuel q first rest limitN offsetN stream
+        else runCompound fuel q first rest orderBy dirs
       if applied then return (cols, rows)
       let rows := rows.extract offsetN.toNat rows.size
       let rows := match limitN with
         | some l => if l < 0 then rows else rows.extract 0 l.toNat
         | none => rows
       return (cols, rows)
+
+/-- A SELECT without compound (`runSelect`): its rows, and whether LIMIT and
+    OFFSET were applied (in the loop, without ORDER BY). -/
+def runSimple (fuel : Nat) (q : QEnv) (first : SelectCore) (orderBy : List OrderTerm) (limitN : Option Int)
+    (offsetN : Int) (dirs : List (SortDir × NullsOrder)) (stream : Bool) :
+    M (Array ColMeta × Array (Array Value) × Bool) :=
+  match fuel with
+  | 0 => outOfFuel
+  | fuel + 1 => do
+    -- without ORDER BY, LIMIT and OFFSET act inside the loop
+    let direct := orderBy.isEmpty
+    let limNat : Option Nat := limitN.bind fun l => if l < 0 then none else some l.toNat
+    let (cols, rows) ← if direct then runCore fuel q first [] (limitN == some 0) limNat offsetN.toNat stream
+      else runCore fuel q first orderBy (limitN == some 0)
+    let colls := orderBy.map fun (.mk e _ _) =>
+      match e with
+      | .collate _ c => (collOfName c).getD .binary
+      | .lit (.int i) => (cols[(i - 1).toNat]?.map (·.coll)).getD .binary
+      | _ => ((exprColl { q.env with frames := q.env.frames } e).map (·.1)).getD
+          ((cols.toList.find? fun c => match e with | .col _ _ n => nameEq c.name n | _ => false).map (·.coll) |>.getD .binary)
+    if direct then pure (cols, rows.map (·.1), true) else
+    let rows := stableSort (fun a b => lexCompare colls dirs a.2 b.2) rows
+    pure (cols, rows.map (·.1), false)
+
+/-- UNION ALL without ORDER BY (`runSelect`): the SELECTs one after the other
+    into the output, sharing LIMIT (multiSelect), so an error in one leaves the
+    rows of those before it out. -/
+def runUnionAll (fuel : Nat) (q : QEnv) (first : SelectCore) (rest : List (CompoundOp × SelectCore))
+    (limitN : Option Int) (offsetN : Int) (stream : Bool) : M (Array ColMeta × Array (Array Value) × Bool) :=
+  match fuel with
+  | 0 => outOfFuel
+  | fuel + 1 => do
+    -- UNION ALL without ORDER BY: the SELECTs run one after the other into
+    -- the output, sharing LIMIT (multiSelect), so an error in one leaves
+    -- the rows of those before it out
+    let limNat : Option Nat := limitN.bind fun l => if l < 0 then none else some l.toNat
+    let off := offsetN.toNat
+    let total := limNat.map (· + off)
+    let mut acc : Array (Array Value) := #[]
+    let mut metas : List (Array ColMeta) := []
+    for core in first :: rest.map (·.2) do
+      if total.any (acc.size ≥ ·) then break
+      let remaining := total.map (· - acc.size)
+      let r ← tryCatch (do
+          let (cs, rs) ← runCore fuel q core [] (limitN == some 0) remaining 0 stream
+          pure (Except.ok (cs, rs)))
+        (fun e => pure (Except.error e))
+      match r with
+      | .ok (cs, rs) =>
+        metas := metas ++ [cs]
+        acc := acc ++ rs.map (·.1)
+      | .error e =>
+        throw (if stream then { e with printed := (acc ++ e.printed).extract off (acc.size + e.printed.size) } else e)
+    let cols := metas.head?.getD #[]
+    -- multiSelectCollSeq: the leftmost SELECT with a collation for a column
+    let colls := (List.range cols.size).map fun i =>
+      ((metas.filterMap fun cs => cs[i]?.map (·.coll)).find? (· != .binary)).getD .binary
+    let cols := cols.mapIdx fun i c => { c with coll := colls[i]! }
+    let rows := acc.extract off acc.size
+    let rows := match limNat with | some l => rows.extract 0 l | none => rows
+    pure (cols, rows, true)
+
+/-- Another compound SELECT (`runSelect`): every SELECT's rows, combined
+    (`combineCompound`). -/
+def runCompound (fuel : Nat) (q : QEnv) (first : SelectCore) (rest : List (CompoundOp × SelectCore))
+    (orderBy : List OrderTerm) (dirs : List (SortDir × NullsOrder)) : M (Array ColMeta × Array (Array Value) × Bool) :=
+  match fuel with
+  | 0 => outOfFuel
+  | fuel + 1 => do
+    let (cols, rows0) ← runCore fuel q first []
+    -- multiSelectCollSeq: each column's collation is that of the leftmost
+    -- SELECT that has one for it
+    let mutable_cores ← rest.mapM fun (op, core) => do
+      let (cs, rs) ← runCore fuel q core []
+      pure (op, cs, rs)
+    combineCompound cols rows0 mutable_cores orderBy dirs
 
 end
 
