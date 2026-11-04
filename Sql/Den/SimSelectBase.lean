@@ -26,6 +26,7 @@ theorem Sim.scalarFn7 {ch : Choices} (n : Name) (vs : List Value) (colls : List 
   sim
   -- PRNG draws (random, randomblob): the drawn values are the denotation's
   all_goals first
+    | omega
     | ((try intro _); split <;> omega)
     | ((try intro _); simp [ByteArray.size])
 
@@ -35,6 +36,7 @@ theorem Sim.scalarFn6 {ch : Choices} (n : Name) (vs : List Value) (colls : List 
   sim
   -- PRNG draws (random, randomblob): the drawn values are the denotation's
   all_goals first
+    | omega
     | ((try intro _); split <;> omega)
     | ((try intro _); simp [ByteArray.size])
 
@@ -44,6 +46,7 @@ theorem Sim.scalarFn5 {ch : Choices} (n : Name) (vs : List Value) (colls : List 
   sim
   -- PRNG draws (random, randomblob): the drawn values are the denotation's
   all_goals first
+    | omega
     | ((try intro _); split <;> omega)
     | ((try intro _); simp [ByteArray.size])
 
@@ -53,6 +56,7 @@ theorem Sim.scalarFn4 {ch : Choices} (n : Name) (vs : List Value) (colls : List 
   sim
   -- PRNG draws (random, randomblob): the drawn values are the denotation's
   all_goals first
+    | omega
     | ((try intro _); split <;> omega)
     | ((try intro _); simp [ByteArray.size])
 
@@ -62,6 +66,7 @@ theorem Sim.scalarFn3 {ch : Choices} (n : Name) (vs : List Value) (colls : List 
   sim
   -- PRNG draws (random, randomblob): the drawn values are the denotation's
   all_goals first
+    | omega
     | ((try intro _); split <;> omega)
     | ((try intro _); simp [ByteArray.size])
 
@@ -71,6 +76,7 @@ theorem Sim.scalarFn2 {ch : Choices} (n : Name) (vs : List Value) (colls : List 
   sim
   -- PRNG draws (random, randomblob): the drawn values are the denotation's
   all_goals first
+    | omega
     | ((try intro _); split <;> omega)
     | ((try intro _); simp [ByteArray.size])
 
@@ -80,6 +86,7 @@ theorem Sim.scalarFn1 {ch : Choices} (n : Name) (vs : List Value) (colls : List 
   sim
   -- PRNG draws (random, randomblob): the drawn values are the denotation's
   all_goals first
+    | omega
     | ((try intro _); split <;> omega)
     | ((try intro _); simp [ByteArray.size])
 
@@ -114,6 +121,7 @@ structure SelectSim (ch : Choices) (fuel : Nat) : Prop where
   computeWindow : ∀ (ctxs : Array QEnv) (windows : List (Name × Window)) (call : Expr), Sim ch (Sql.computeWindow fuel ctxs windows call) (Den.computeWindow ctxs windows call)
   windowRowValue : ∀ (ctxs : Array QEnv) (name : String) (n : Name) (args : List Expr) (star : Bool) (ord : List OrderTerm) (frame : Option Frame) (okeys : Array (Array Value)) (ocolls : List Coll) (odirs : List (SortDir × NullsOrder)) (argv : Array (List Value)) (pass : Array Bool) (p : Array Nat) (pi : PeerInfo) (j : Nat), Sim ch (Sql.windowRowValue fuel ctxs name n args star ord frame okeys ocolls odirs argv pass p pi j) (Den.windowRowValue ctxs name n args star ord frame okeys ocolls odirs argv pass p pi j)
   windowPartition : ∀ (ctxs : Array QEnv) (name : String) (n : Name) (args : List Expr) (star : Bool) (ord : List OrderTerm) (frame : Option Frame) (okeys : Array (Array Value)) (ocolls : List Coll) (odirs : List (SortDir × NullsOrder)) (argv : Array (List Value)) (pass : Array Bool) (p : Array Nat) (result : Array Value), Sim ch (Sql.windowPartition fuel ctxs name n args star ord frame okeys ocolls odirs argv pass p result) (Den.windowPartition ctxs name n args star ord frame okeys ocolls odirs argv pass p result)
+  evalFromWhereS : ∀ {σ : Type} (q : QEnv) (f : FromItem) (where_ : Option Expr) (aliases : List (Name × Expr)) (init : σ) (step : σ → Array Src → Array Cur → M (σ × Bool)) (step' : σ → Array Src → Array Cur → D (σ × Bool)), (∀ a srcs cur, Sim ch (step a srcs cur) (step' a srcs cur)) → Sim ch (Sql.evalFromWhereS fuel q f where_ aliases init step) (joinRun (Den.joinPrepare q f where_ aliases) (Den.joinRowsAt q) (Den.joinCheck q) init step')
   evalFromWhere : ∀ (q : QEnv) (f : FromItem) (where_ : Option Expr) (aliases : List (Name × Expr)), Sim ch (Sql.evalFromWhere fuel q f where_ aliases) (Den.evalFromWhere q f where_ aliases)
   namedSource : ∀ (q : QEnv) (sch : Option Name) (n : Name) («alias» : Name), Sim ch (Sql.namedSource fuel q sch n «alias») (Den.namedSource q sch n «alias»)
   cteRows : ∀ (q : QEnv) (n : Name) (cv0 : CteVal), Sim ch (Sql.cteRows fuel q n cv0) (Den.cteRows q n cv0)
@@ -123,6 +131,12 @@ structure SelectSim (ch : Choices) (fuel : Nat) : Prop where
   tableFunction : ∀ (n : Name) (argsJ : List (Value × Bool)), Sim ch (Sql.tableFunction fuel n argsJ) (Den.tableFunction n argsJ)
   expandCols : ∀ (srcs : Array Src) (cols : List ResultCol), Sim ch (Sql.expandCols fuel srcs cols) (Den.expandCols srcs cols)
   runCore : ∀ (q : QEnv) (core : SelectCore) (orderBy : List OrderTerm) (noRows : Bool) (lim : Option Nat) (off : Nat) (stream : Bool), Sim ch (Sql.runCore fuel q core orderBy noRows lim off stream) (Den.runCore q core orderBy noRows lim off stream)
+  runStream : ∀ (q : QEnv) (distinct : Bool) (cols : List ResultCol) (f : FromItem) (where_ : Option Expr) (aliases0 : List (Name × Expr)) (lim : Option Nat) (off : Nat) (stream : Bool), Sim ch (Sql.runStream fuel q distinct cols f where_ aliases0 lim off stream) (Den.runStream q distinct cols f where_ aliases0 lim off stream)
+  runGrouped : ∀ (q : QEnv) (distinct : Bool) (cols : List ResultCol) (from_ : Option FromItem) (where_ : Option Expr) (groupBy : List Expr) (having : Option Expr) (windows : List (Name × Window)) (orderBy : List OrderTerm) (noRows : Bool) (lim : Option Nat) (off : Nat) (aliases0 : List (Name × Expr)), Sim ch (Sql.runGrouped fuel q distinct cols from_ where_ groupBy having windows orderBy noRows lim off aliases0) (Den.runGrouped q distinct cols from_ where_ groupBy having windows orderBy noRows lim off aliases0)
+  runRows : ∀ (q : QEnv) (distinct : Bool) (srcs : Array Src) (rcols : List ResultCol) (kept : Array (Array Cur)) (cmeta : Array ColMeta) (groupBy : List Expr) (having : Option Expr) (windows : List (Name × Window)) (orderBy : List OrderTerm) (lim : Option Nat) (off : Nat), Sim ch (Sql.runRows fuel q distinct srcs rcols kept cmeta groupBy having windows orderBy lim off) (Den.runRows q distinct srcs rcols kept cmeta groupBy having windows orderBy lim off)
+  windowOut : ∀ (ctxs : Array QEnv) (windows : List (Name × Window)) (wcalls : List Expr) (exprs : List Expr) (obExprs : List Expr) (distinct : Bool) (cmeta : Array ColMeta) (lim : Option Nat) (off : Nat), Sim ch (Sql.windowOut fuel ctxs windows wcalls exprs obExprs distinct cmeta lim off) (Den.windowOut ctxs windows wcalls exprs obExprs distinct cmeta lim off)
+  aggCtxs : ∀ (q : QEnv) (srcs : Array Src) (kept : Array (Array Cur)) (exprs : List Expr) (aliases : List (Name × Expr)) (groupBy : List Expr) (having : Option Expr), Sim ch (Sql.aggCtxs fuel q srcs kept exprs aliases groupBy having) (Den.aggCtxs q srcs kept exprs aliases groupBy having)
+  groupCtx : ∀ (q : QEnv) (srcs : Array Src) (grp : Array (Array Cur)) (minmax : List (Bool × Bool × Expr)) (aliases : List (Name × Expr)) (having : Option Expr), Sim ch (Sql.groupCtx fuel q srcs grp minmax aliases having) (Den.groupCtx q srcs grp minmax aliases having)
   runSelect : ∀ (q : QEnv) (sel : Select) (cap : Bool) (stream : Bool), Sim ch (Sql.runSelect fuel q sel cap stream) (Den.runSelect q sel cap stream)
   limitOffset : ∀ (q : QEnv) (limit : Option Expr) (offset : Option Expr) (cap : Bool), Sim ch (Sql.limitOffset fuel q limit offset cap) (Den.limitOffset q limit offset cap)
   runSimple : ∀ (q : QEnv) (first : SelectCore) (orderBy : List OrderTerm) (limitN : Option Int) (offsetN : Int) (dirs : List (SortDir × NullsOrder)) (stream : Bool), Sim ch (Sql.runSimple fuel q first orderBy limitN offsetN dirs stream) (Den.runSimple q first orderBy limitN offsetN dirs stream)
@@ -147,6 +161,7 @@ theorem selectSim_zero (ch : Choices) : SelectSim ch 0 where
   computeWindow := by intros; unfold Sql.computeWindow; exact Sim.outOfFuel _
   windowRowValue := by intros; unfold Sql.windowRowValue; exact Sim.outOfFuel _
   windowPartition := by intros; unfold Sql.windowPartition; exact Sim.outOfFuel _
+  evalFromWhereS := by intros; unfold Sql.evalFromWhereS; exact Sim.outOfFuel _
   evalFromWhere := by intros; unfold Sql.evalFromWhere; exact Sim.outOfFuel _
   namedSource := by intros; unfold Sql.namedSource; exact Sim.outOfFuel _
   cteRows := by intros; unfold Sql.cteRows; exact Sim.outOfFuel _
@@ -156,10 +171,22 @@ theorem selectSim_zero (ch : Choices) : SelectSim ch 0 where
   tableFunction := by intros; unfold Sql.tableFunction; exact Sim.outOfFuel _
   expandCols := by intros; unfold Sql.expandCols; exact Sim.outOfFuel _
   runCore := by intros; unfold Sql.runCore; exact Sim.outOfFuel _
+  runStream := by intros; unfold Sql.runStream; exact Sim.outOfFuel _
+  runGrouped := by intros; unfold Sql.runGrouped; exact Sim.outOfFuel _
+  runRows := by intros; unfold Sql.runRows; exact Sim.outOfFuel _
+  windowOut := by intros; unfold Sql.windowOut; exact Sim.outOfFuel _
+  aggCtxs := by intros; unfold Sql.aggCtxs; exact Sim.outOfFuel _
+  groupCtx := by intros; unfold Sql.groupCtx; exact Sim.outOfFuel _
   runSelect := by intros; unfold Sql.runSelect; exact Sim.outOfFuel _
   limitOffset := by intros; unfold Sql.limitOffset; exact Sim.outOfFuel _
   runSimple := by intros; unfold Sql.runSimple; exact Sim.outOfFuel _
   runUnionAll := by intros; unfold Sql.runUnionAll; exact Sim.outOfFuel _
   runCompound := by intros; unfold Sql.runCompound; exact Sim.outOfFuel _
+
+set_option hygiene false in
+/-- The fields of an induction hypothesis `SelectSim ch fuel`, as hypotheses
+    `h_f` (the names `sim` looks for). -/
+macro "select_ih " ih:ident : tactic =>
+  `(tactic| obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowRowValue, h_windowPartition, h_evalFromWhereS, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runStream, h_runGrouped, h_runRows, h_windowOut, h_aggCtxs, h_groupCtx, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := $ih)
 
 end Sql.Den

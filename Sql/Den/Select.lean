@@ -1173,12 +1173,14 @@ partial_fixpoint monotonicity by (try simp only []); repeat' monotonicity
 
 /-- A FROM clause joined and filtered by WHERE: its sources and rows. -/
 def evalFromWhere (q : QEnv) (f : FromItem) (where_ : Option Expr) (aliases : List (Name × Expr)) :
-    D (Array Src × Array (Array Cur)) := do
-  let p ← joinPrepare q f where_ aliases
-  let (rows, _, failure) ← joinLoops p.leaves.size p.nest (joinRowsAt q p) p.place (joinCheck q p)
-    (fun acc cur => pure (acc.push cur, true)) 0 p.empty (#[] : Array (Array Cur))
-  if let some e := failure then throw e
-  return (p.srcs, rows)
+    D (Array Src × Array (Array Cur)) :=
+  do
+    let (srcs, rows, failure) ← joinRun (joinPrepare q f where_ aliases) (joinRowsAt q) (joinCheck q) (#[] : Array (Array Cur))
+      (fun acc _ cur => pure (acc.push cur, true))
+    if let some e := failure then throw e
+    return (srcs, rows)
+
+    -- FROM
 partial_fixpoint monotonicity by (try simp only []); repeat' monotonicity
 
 /-- The rows of a named table, view or CTE, with its source description. -/
@@ -1477,187 +1479,241 @@ def runCore (q : QEnv) (core : SelectCore) (orderBy : List OrderTerm) (noRows : 
         let where_ := if noRows then some (.lit (.int 0)) else where_
         -- result-column aliases usable in WHERE (`*` columns resolve as columns anyway)
         let aliases0 := cols.filterMap fun | .expr e (some a) _ => some (a, e) | _ => none
-        -- the column metadata of the result
-        let metaOf (srcs : Array Src) (rcols : List ResultCol) : Array ColMeta :=
-          let qm : QEnv := { q with env := { q.env with frames := { srcs, cur := Array.replicate srcs.size none } :: q.env.frames, group := none } }
-          rcols.toArray.map fun rc =>
-            match rc with
-            | .expr e _ _ => ⟨resultName q srcs rc, exprAff qm.env e, ((exprColl qm.env e).map (·.1)).getD .binary⟩
-            | _ => ⟨"", none, .binary⟩
         -- a SELECT without aggregates, windows or ORDER BY computes and hands
         -- out each row inside the join loop (selectInnerLoop): OFFSET skips a
         -- row before its result columns are computed (after DISTINCT's check
         -- with DISTINCT), LIMIT ends the loop, and an error leaves the rows
         -- already out (a top-level SELECT has printed them)
-        let streamable := !noRows && groupBy.isEmpty && having.isNone && orderBy.isEmpty &&
-          !(cols.any fun | .expr e _ _ => hasAgg e || hasWindow e | _ => false)
-        if let (true, some f) := (streamable, from_) then
-          let step (a : StreamAcc) (srcs : Array Src) (cur : Array Cur) : D (StreamAcc × Bool) := do
-            if !distinct && a.skipped < off then return ({ a with skipped := a.skipped + 1 }, true)
-            let (rcols, colls) ← match a.rcols with
-              | some rc => pure rc
-              | none => do
-                let rcols ← expandCols srcs cols
-                pure (rcols, (metaOf srcs rcols).toList.map (·.coll))
-            let a := { a with rcols := some (rcols, colls) }
-            let exprs := rcols.filterMap fun | .expr e _ _ => some e | _ => none
-            let aliases := rcols.filterMap fun | .expr e (some a) _ => some (a, e) | _ => none
-            let qr := { q with env := { q.env with frames := { srcs, cur, aliases } :: q.env.frames, group := none } }
-            let vals ← exprs.toArray.mapM (evalExpr qr)
-            let a ← if distinct then do
-                let k := canonKey colls vals
-                if a.seen.contains k then return (a, true)
-                let a := { a with seen := a.seen.insert k }
-                if a.skipped < off then return ({ a with skipped := a.skipped + 1 }, true)
-                pure a
-              else pure a
-            let a := { a with rows := a.rows.push vals }
-            return (a, lim.all (a.rows.size < ·))
-          let p ← joinPrepare q f where_ aliases0
-          let srcs := p.srcs
-          let (a, _, failure) ← joinLoops p.leaves.size p.nest (joinRowsAt q p) p.place (joinCheck q p)
-            (step · srcs ·) 0 p.empty ({} : StreamAcc)
-          if let some e := failure then throw (if stream then { e with printed := a.rows } else e)
-          let rcols ← match a.rcols with
-            | some (rc, _) => pure rc
-            | none => expandCols srcs cols
-          return (metaOf srcs rcols, a.rows.map (·, #[]))
-        let (srcs, rows) ← match from_ with
-          | some f => evalFromWhere q f where_ aliases0
-          | none => pure (#[], #[#[]])
-        let rcols ← expandCols srcs cols
-        let frameOf (cur : Array Cur) : Scope := { srcs, cur }
-        let withFrame (cur : Array Cur) (aliases : List (Name × Expr) := []) : QEnv :=
-          { q with env := { q.env with frames := { frameOf cur with aliases } :: q.env.frames, group := none } }
-        let exprs := rcols.filterMap fun | .expr e _ _ => some e | _ => none
-        let aliases := rcols.filterMap fun | .expr e (some a) _ => some (a, e) | _ => none
-        -- WHERE (with a FROM clause it was applied while joining)
-        let mut kept := #[]
-        for cur in rows do
-          match where_, from_ with
-          | some w, none =>
-            if hasAgg w then err "misuse of aggregate function"
-            if ← condHolds (withFrame cur aliases) w then kept := kept.push cur
-          | _, _ => kept := kept.push cur
-        -- the order the plan visits the joined rows: it decides group and
-        -- DISTINCT representatives and the input order of aggregates
-        kept ← permA kept
-        let qm := withFrame (Array.replicate srcs.size none)
-        let cmeta : Array ColMeta := rcols.toArray.map fun rc =>
-          match rc with
-          | .expr e _ _ => ⟨resultName q srcs rc, exprAff qm.env e, ((exprColl qm.env e).map (·.1)).getD .binary⟩
-          | _ => ⟨"", none, .binary⟩
-        if noRows then return (cmeta, #[])
-        -- ORDER BY terms: a result column number, a result «alias», or an expression
-        let obExpr (t : OrderTerm) : D Expr := do
-          let .mk e _ _ := t
-          match e with
-          | .lit (.int i) =>
-            if i < 1 || i > exprs.length then
-              err s!"ORDER BY term out of range - should be between 1 and {exprs.length}"
-            return exprs[(i - 1).toNat]!
-          | .col none none c =>
-            match aliases.find? (fun (a, _) => nameEq a c) with
-            | some (_, x) => return x
-            | none => return e
-          | _ => return e
-        let obExprs ← orderBy.mapM obExpr
-        let isAgg := !groupBy.isEmpty || exprs.any hasAgg || (having.map hasAgg).getD false || obExprs.any hasAgg
-        -- window calls become numbered placeholders, computed over the row contexts
-        let (wexprs, wcalls) := replaceWindows (exprs ++ obExprs)
-        let exprs := wexprs.take exprs.length
-        let obExprs := wexprs.drop exprs.length
-        let mut ctxs : Array QEnv := #[]
-        let mut out : Array (Array Value × Array Value) := #[]
-        if isAgg then
-          -- groups, in order of their key
-          let mut groups : Array (Array Value × Array (Array Cur)) := #[]
-          let mut gindex : Std.HashMap String Nat := {}
-          for cur in kept do
-            let key ← groupBy.toArray.mapM fun g => do
-              let g' := match g with
-                | .lit (.int i) => (exprs[(i - 1).toNat]?).getD g
-                | _ => g
-              if hasAgg g' then err "aggregate functions are not allowed in the GROUP BY clause"
-              evalExpr (withFrame cur aliases) g'
-            let gcolls := groupBy.map fun g => ((exprColl qm.env g).map (·.1)).getD .binary
-            let ck := canonKey gcolls key
-            match gindex.get? ck with
-            | some i => groups := groups.modify i fun (k, rs) => (k, rs.push cur)
-            | none =>
-              gindex := gindex.insert ck groups.size
-              groups := groups.push (key, #[cur])
-          if groupBy.isEmpty && groups.isEmpty then groups := #[(#[], #[])]
-          let gcolls := groupBy.map fun g => ((exprColl qm.env g).map (·.1)).getD .binary
-          if !groupBy.isEmpty then groups := stableSort (fun a b => lexCompare gcolls [] a.1 b.1) groups
-          -- the row bare columns are read from: the min/max row if there is exactly one
-          -- min()/max() aggregate, else the first row of the group (SQLite 3.54)
-          let minmax := exprs.filterMap fun e => match e with
-            | .call n d [a] false [] none none =>
-              if nameEq n "min" || nameEq n "max" then some (nameEq n "min", d, a) else none
-            | _ => none
-          for (_, grp) in groups do
-            let mut rep : Array Cur := grp[0]?.getD (Array.replicate srcs.size none)
-            -- with one min()/max(), minmaxStep tells the accumulator when not to
-            -- load the bare columns: they come from each row until the first
-            -- non-NULL value, then only from rows that strictly improve it; a
-            -- DISTINCT duplicate skips the step itself, so its row is loaded
-            if minmax.length == 1 && !grp.isEmpty then
-              let (isMin, dist, a) := minmax[0]!
-              let coll := ((exprColl qm.env a).map (·.1)).getD .binary
-              let mut best : Option Value := none
-              let mut seen : Std.HashSet String := {}
-              for cur in grp do
-                let v ← evalExpr (withFrame cur) a
-                if dist && !v.isNull then
-                  let k := canonKey [coll] #[v]
-                  if seen.contains k then rep := cur; continue
-                  seen := seen.insert k
-                if v.isNull then
-                  if best.isNone then rep := cur
-                  continue
-                match best with
-                | none => best := some v; rep := cur
-                | some bv =>
-                  let o := compareValues coll v bv
-                  if (isMin && o == .lt) || (!isMin && o == .gt) then best := some v; rep := cur
-            let qg := { withFrame rep aliases with env := { (withFrame rep aliases).env with group := some grp } }
-            if let some h := having then
-              if !(← condHolds qg h) then continue
-            ctxs := ctxs.push qg
-        else
-          if having.isSome then err "HAVING clause on a non-aggregate query"
-          for cur in kept do
-            ctxs := ctxs.push (withFrame cur aliases)
-        -- window functions: each call's values; rows come out in the windows' sort order
-        let mut order := Array.range ctxs.size
-        let mut wvals : Array (Array Value) := #[]
-        for c in wcalls do
-          let (vs, ord) ← computeWindow ctxs windows c
-          wvals := wvals.push vs
-          if !(match c with | .call _ _ _ _ _ _ (some (.mk none [] [] _)) => true | _ => false) then order := ord
-        for i in order do
-          let base := ctxs[i]!
-          let qi := { base with env := { base.env with params := (wvals.toList.zipIdx.map fun (vs, k) => (windowParamBase + k, vs[i]!)) ++ base.env.params } }
-          let vals ← exprs.toArray.mapM (evalExpr qi)
-          let keys ← obExprs.toArray.mapM (evalExpr qi)
-          out := out.push (vals, keys)
-        if distinct then
-          let colls := cmeta.toList.map (·.coll)
-          let mut d := #[]
-          let mut seen : Std.HashSet String := {}
-          for r in out do
-            let k := canonKey colls r.1
-            if !seen.contains k then
-              seen := seen.insert k
-              d := d.push r
-          out := d
-        -- the order of a SELECT's rows is the plan's (ORDER BY, applied
-        -- after, keeps this order among ties)
-        out ← permA out
-        out := out.extract off out.size
-        if let some l := lim then out := out.extract 0 l
-        return (cmeta, out)
+        let streamable := isStreamable noRows groupBy having orderBy cols
+        match from_ with
+        | some f =>
+          if streamable then runStream q distinct cols f where_ aliases0 lim off stream
+          else runGrouped q distinct cols (some f) where_ groupBy having windows orderBy noRows lim off aliases0
+        | none => runGrouped q distinct cols none where_ groupBy having windows orderBy noRows lim off aliases0
+partial_fixpoint monotonicity by (try simp only []); repeat' monotonicity
+
+/-- A streamed SELECT core (`runCore`): each joined row's result columns are
+    computed and handed out inside the join loop. -/
+def runStream (q : QEnv) (distinct : Bool) (cols : List ResultCol) (f : FromItem)
+    (where_ : Option Expr) (aliases0 : List (Name × Expr)) (lim : Option Nat) (off : Nat) (stream : Bool) :
+    D (Array ColMeta × Array (Array Value × Array Value)) :=
+  do
+    let step (a : StreamAcc) (srcs : Array Src) (cur : Array Cur) : D (StreamAcc × Bool) := do
+      if !distinct && a.skipped < off then return ({ a with skipped := a.skipped + 1 }, true)
+      let (rcols, colls) ← match a.rcols with
+        | some rc => pure rc
+        | none => do
+          let rcols ← expandCols srcs cols
+          pure (rcols, (resultMeta q srcs rcols).toList.map (·.coll))
+      let a := { a with rcols := some (rcols, colls) }
+      let exprs := rcols.filterMap fun | .expr e _ _ => some e | _ => none
+      let aliases := rcols.filterMap fun | .expr e (some a) _ => some (a, e) | _ => none
+      let qr := { q with env := { q.env with frames := { srcs, cur, aliases } :: q.env.frames, group := none } }
+      let vals ← exprs.toArray.mapM (evalExpr qr)
+      let a ← if distinct then do
+          let k := canonKey colls vals
+          if a.seen.contains k then return (a, true)
+          let a := { a with seen := a.seen.insert k }
+          if a.skipped < off then return ({ a with skipped := a.skipped + 1 }, true)
+          pure a
+        else pure a
+      let a := { a with rows := a.rows.push vals }
+      return (a, lim.all (a.rows.size < ·))
+    let (srcs, a, failure) ← joinRun (joinPrepare q f where_ aliases0) (joinRowsAt q) (joinCheck q) ({} : StreamAcc) step
+    if let some e := failure then throw (if stream then { e with printed := a.rows } else e)
+    let rcols ← match a.rcols with
+      | some (rc, _) => pure rc
+      | none => expandCols srcs cols
+    return (resultMeta q srcs rcols, a.rows.map (·, #[]))
+partial_fixpoint monotonicity by (try simp only []); repeat' monotonicity
+
+/-- A SELECT core that is not streamed (`runCore`): the joined rows, then
+    groups and aggregates, windows, DISTINCT, the plan's order, LIMIT/OFFSET. -/
+def runGrouped (q : QEnv) (distinct : Bool) (cols : List ResultCol) (from_ : Option FromItem)
+    (where_ : Option Expr) (groupBy : List Expr) (having : Option Expr) (windows : List (Name × Window))
+    (orderBy : List OrderTerm) (noRows : Bool) (lim : Option Nat) (off : Nat) (aliases0 : List (Name × Expr)) :
+    D (Array ColMeta × Array (Array Value × Array Value)) :=
+  do
+    let (srcs, rows) ← match from_ with
+      | some f => evalFromWhere q f where_ aliases0
+      | none => pure (#[], #[#[]])
+    let rcols ← expandCols srcs cols
+    let frameOf (cur : Array Cur) : Scope := { srcs, cur }
+    let withFrame (cur : Array Cur) (aliases : List (Name × Expr) := []) : QEnv :=
+      { q with env := { q.env with frames := { frameOf cur with aliases } :: q.env.frames, group := none } }
+    let exprs := rcols.filterMap fun | .expr e _ _ => some e | _ => none
+    let aliases := rcols.filterMap fun | .expr e (some a) _ => some (a, e) | _ => none
+    -- WHERE (with a FROM clause it was applied while joining)
+    let mut kept := #[]
+    for cur in rows do
+      match where_, from_ with
+      | some w, none =>
+        if hasAgg w then err "misuse of aggregate function"
+        if ← condHolds (withFrame cur aliases) w then kept := kept.push cur
+      | _, _ => kept := kept.push cur
+    -- the order the plan visits the joined rows: it decides group and
+    -- DISTINCT representatives and the input order of aggregates
+    kept ← permA kept
+    let qm := withFrame (Array.replicate srcs.size none)
+    let cmeta : Array ColMeta := rcols.toArray.map fun rc =>
+      match rc with
+      | .expr e _ _ => ⟨resultName q srcs rc, exprAff qm.env e, ((exprColl qm.env e).map (·.1)).getD .binary⟩
+      | _ => ⟨"", none, .binary⟩
+    if noRows then return (cmeta, #[])
+    runRows q distinct srcs rcols kept cmeta groupBy having windows orderBy lim off
+partial_fixpoint monotonicity by (try simp only []); repeat' monotonicity
+
+/-- The rows of a SELECT core that is not streamed (`runGrouped`), from its
+    joined rows `kept` in the plan's order: groups and aggregates, windows,
+    DISTINCT, the plan's order, LIMIT/OFFSET. -/
+def runRows (q : QEnv) (distinct : Bool) (srcs : Array Src) (rcols : List ResultCol)
+    (kept : Array (Array Cur)) (cmeta : Array ColMeta) (groupBy : List Expr) (having : Option Expr)
+    (windows : List (Name × Window)) (orderBy : List OrderTerm) (lim : Option Nat) (off : Nat) :
+    D (Array ColMeta × Array (Array Value × Array Value)) :=
+  do
+    let frameOf (cur : Array Cur) : Scope := { srcs, cur }
+    let withFrame (cur : Array Cur) (aliases : List (Name × Expr) := []) : QEnv :=
+      { q with env := { q.env with frames := { frameOf cur with aliases } :: q.env.frames, group := none } }
+    let exprs := rcols.filterMap fun | .expr e _ _ => some e | _ => none
+    let aliases := rcols.filterMap fun | .expr e (some a) _ => some (a, e) | _ => none
+    -- ORDER BY terms: a result column number, a result «alias», or an expression
+    let obExpr (t : OrderTerm) : D Expr := do
+      let .mk e _ _ := t
+      match e with
+      | .lit (.int i) =>
+        if i < 1 || i > exprs.length then
+          err s!"ORDER BY term out of range - should be between 1 and {exprs.length}"
+        return exprs[(i - 1).toNat]!
+      | .col none none c =>
+        match aliases.find? (fun (a, _) => nameEq a c) with
+        | some (_, x) => return x
+        | none => return e
+      | _ => return e
+    let obExprs ← orderBy.mapM obExpr
+    let isAgg := !groupBy.isEmpty || exprs.any hasAgg || (having.map hasAgg).getD false || obExprs.any hasAgg
+    -- window calls become numbered placeholders, computed over the row contexts
+    let (wexprs, wcalls) := replaceWindows (exprs ++ obExprs)
+    let exprs := wexprs.take exprs.length
+    let obExprs := wexprs.drop exprs.length
+    let ctxs ← if isAgg then aggCtxs q srcs kept exprs aliases groupBy having
+      else do
+        if having.isSome then err "HAVING clause on a non-aggregate query"
+        pure (kept.map fun cur => withFrame cur aliases)
+    windowOut ctxs windows wcalls exprs obExprs distinct cmeta lim off
+partial_fixpoint monotonicity by (try simp only []); repeat' monotonicity
+
+/-- The output rows of a SELECT core (`runRows`) from the contexts of its
+    rows: window functions computed over them (rows come out in the windows'
+    sort order), result columns and sort keys, DISTINCT, the plan's order,
+    LIMIT/OFFSET. -/
+def windowOut (ctxs : Array QEnv) (windows : List (Name × Window)) (wcalls : List Expr)
+    (exprs obExprs : List Expr) (distinct : Bool) (cmeta : Array ColMeta) (lim : Option Nat) (off : Nat) :
+    D (Array ColMeta × Array (Array Value × Array Value)) :=
+  do
+    let mut out : Array (Array Value × Array Value) := #[]
+    -- window functions: each call's values; rows come out in the windows' sort order
+    let mut order := Array.range ctxs.size
+    let mut wvals : Array (Array Value) := #[]
+    for c in wcalls do
+      let (vs, ord) ← computeWindow ctxs windows c
+      wvals := wvals.push vs
+      if !(match c with | .call _ _ _ _ _ _ (some (.mk none [] [] _)) => true | _ => false) then order := ord
+    for i in order do
+      let base := ctxs[i]!
+      let qi := { base with env := { base.env with params := (wvals.toList.zipIdx.map fun (vs, k) => (windowParamBase + k, vs[i]!)) ++ base.env.params } }
+      let vals ← exprs.toArray.mapM (evalExpr qi)
+      let keys ← obExprs.toArray.mapM (evalExpr qi)
+      out := out.push (vals, keys)
+    if distinct then out := dedupRows (cmeta.toList.map (·.coll)) out
+    -- the order of a SELECT's rows is the plan's (ORDER BY, applied
+    -- after, keeps this order among ties)
+    out ← permA out
+    out := out.extract off out.size
+    if let some l := lim then out := out.extract 0 l
+    return (cmeta, out)
+partial_fixpoint monotonicity by (try simp only []); repeat' monotonicity
+
+/-- The groups of an aggregate query (`runRows`), in order of their key, as
+    the contexts their result columns are evaluated in (the group's rows, and
+    the row bare columns are read from); HAVING applied. -/
+def aggCtxs (q : QEnv) (srcs : Array Src) (kept : Array (Array Cur)) (exprs : List Expr)
+    (aliases : List (Name × Expr)) (groupBy : List Expr) (having : Option Expr) : D (Array QEnv) :=
+  do
+    let frameOf (cur : Array Cur) : Scope := { srcs, cur }
+    let withFrame (cur : Array Cur) (aliases : List (Name × Expr) := []) : QEnv :=
+      { q with env := { q.env with frames := { frameOf cur with aliases } :: q.env.frames, group := none } }
+    let qm := withFrame (Array.replicate srcs.size none)
+    let mut ctxs : Array QEnv := #[]
+    -- groups, in order of their key
+    let mut groups : Array (Array Value × Array (Array Cur)) := #[]
+    let mut gindex : Std.HashMap String Nat := {}
+    for cur in kept do
+      let key ← groupBy.toArray.mapM fun g => do
+        let g' := match g with
+          | .lit (.int i) => (exprs[(i - 1).toNat]?).getD g
+          | _ => g
+        if hasAgg g' then err "aggregate functions are not allowed in the GROUP BY clause"
+        evalExpr (withFrame cur aliases) g'
+      let gcolls := groupBy.map fun g => ((exprColl qm.env g).map (·.1)).getD .binary
+      let ck := canonKey gcolls key
+      match gindex.get? ck with
+      | some i => groups := groups.modify i fun (k, rs) => (k, rs.push cur)
+      | none =>
+        gindex := gindex.insert ck groups.size
+        groups := groups.push (key, #[cur])
+    if groupBy.isEmpty && groups.isEmpty then groups := #[(#[], #[])]
+    let gcolls := groupBy.map fun g => ((exprColl qm.env g).map (·.1)).getD .binary
+    if !groupBy.isEmpty then groups := stableSort (fun a b => lexCompare gcolls [] a.1 b.1) groups
+    -- the row bare columns are read from: the min/max row if there is exactly one
+    -- min()/max() aggregate, else the first row of the group (SQLite 3.54)
+    let minmax := exprs.filterMap fun e => match e with
+      | .call n d [a] false [] none none =>
+        if nameEq n "min" || nameEq n "max" then some (nameEq n "min", d, a) else none
+      | _ => none
+    for (_, grp) in groups do
+      if let some qg ← groupCtx q srcs grp minmax aliases having then ctxs := ctxs.push qg
+    return ctxs
+partial_fixpoint monotonicity by (try simp only []); repeat' monotonicity
+
+/-- The context a group's result columns are evaluated in (`aggCtxs`): its
+    rows, and the row bare columns are read from (the min/max row if there is
+    exactly one min()/max() aggregate, `minmax`, else the first row of the
+    group, SQLite 3.54); none when HAVING rejects the group. -/
+def groupCtx (q : QEnv) (srcs : Array Src) (grp : Array (Array Cur))
+    (minmax : List (Bool × Bool × Expr)) (aliases : List (Name × Expr)) (having : Option Expr) : D (Option QEnv) :=
+  do
+    let frameOf (cur : Array Cur) : Scope := { srcs, cur }
+    let withFrame (cur : Array Cur) (aliases : List (Name × Expr) := []) : QEnv :=
+      { q with env := { q.env with frames := { frameOf cur with aliases } :: q.env.frames, group := none } }
+    let qm := withFrame (Array.replicate srcs.size none)
+    let mut rep : Array Cur := grp[0]?.getD (Array.replicate srcs.size none)
+    -- with one min()/max(), minmaxStep tells the accumulator when not to
+    -- load the bare columns: they come from each row until the first
+    -- non-NULL value, then only from rows that strictly improve it; a
+    -- DISTINCT duplicate skips the step itself, so its row is loaded
+    if minmax.length == 1 && !grp.isEmpty then
+      let (isMin, dist, a) := minmax[0]!
+      let coll := ((exprColl qm.env a).map (·.1)).getD .binary
+      let mut best : Option Value := none
+      let mut seen : Std.HashSet String := {}
+      for cur in grp do
+        let v ← evalExpr (withFrame cur) a
+        if dist && !v.isNull then
+          let k := canonKey [coll] #[v]
+          if seen.contains k then rep := cur; continue
+          seen := seen.insert k
+        if v.isNull then
+          if best.isNone then rep := cur
+          continue
+        match best with
+        | none => best := some v; rep := cur
+        | some bv =>
+          let o := compareValues coll v bv
+          if (isMin && o == .lt) || (!isMin && o == .gt) then best := some v; rep := cur
+    let qg := { withFrame rep aliases with env := { (withFrame rep aliases).env with group := some grp } }
+    if let some h := having then
+      if !(← condHolds qg h) then return none
+    return some qg
 partial_fixpoint monotonicity by (try simp only []); repeat' monotonicity
 
 def runSelect (q : QEnv) (sel : Select) (cap : Bool := false) (stream : Bool := false) :

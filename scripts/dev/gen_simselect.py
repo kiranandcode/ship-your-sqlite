@@ -11,7 +11,15 @@ if '--manual' in sys.argv:
 fields = subprocess.run(['python3', 'scripts/dev/sim_fields.py', 'Sql/Select.lean', 'evalExpr'],
                         capture_output=True, text=True, check=True).stdout
 fields = re.sub(r'(?<![.\w«])alias(?![\w»])', '«alias»', fields)
-lines = [l for l in fields.split('\n') if l.strip() and not l.strip().startswith('--')]
+# the join (generic in the state of its step, whose simulation it assumes):
+# its denotation is `joinRun` over the plan
+JOIN = ('  evalFromWhereS : ∀ {σ : Type} (q : QEnv) (f : FromItem) (where_ : Option Expr) (aliases : List (Name × Expr))'
+        ' (init : σ) (step : σ → Array Src → Array Cur → M (σ × Bool)) (step\' : σ → Array Src → Array Cur → D (σ × Bool)),'
+        ' (∀ a srcs cur, Sim ch (step a srcs cur) (step\' a srcs cur)) →'
+        ' Sim ch (Sql.evalFromWhereS fuel q f where_ aliases init step)'
+        ' (joinRun (Den.joinPrepare q f where_ aliases) (Den.joinRowsAt q) (Den.joinCheck q) init step\')')
+lines = [JOIN if l.strip().startswith('-- evalFromWhereS:') else l for l in fields.split('\n')]
+lines = [l for l in lines if l.strip() and not l.strip().startswith('--')]
 names = [l.split(':')[0].strip() for l in lines]
 SF = 'theorem Sim.scalarFn{k} {{ch : Choices}} (n : Name) (vs : List Value) (colls : List (Option (Coll × Bool))) :\n    Sim ch (Sql.scalarFn{k} n vs colls) (Den.scalarFn{k} n vs colls) := by\n'
 nparts = len(re.findall(r'^def scalarFn\d+ ', open('Sql/Select.lean').read(), re.M))
@@ -40,7 +48,7 @@ theorem Sim.affOf {ch : Choices} (env : Env) (e : Expr) : Sim ch (Sql.affOf env 
 for k in range(nparts, 0, -1):
     base.append(SF.format(k=k) + f'  unfold Sql.scalarFn{k} Den.scalarFn{k}\n  sim\n'
                 + '  -- PRNG draws (random, randomblob): the drawn values are the denotation\'s\n'
-                + '  all_goals first\n    | ((try intro _); split <;> omega)\n    | ((try intro _); simp [ByteArray.size])\n')
+                + '  all_goals first\n    | omega\n    | ((try intro _); split <;> omega)\n    | ((try intro _); simp [ByteArray.size])\n')
 base.append('''theorem Sim.combineCompound {ch : Choices} (cols : Array ColMeta) (rows0 : Array (Array Value × Array Value))
     (cores : List (CompoundOp × Array ColMeta × Array (Array Value × Array Value)))
     (orderBy : List OrderTerm) (dirs : List (SortDir × NullsOrder)) :
@@ -62,6 +70,12 @@ base.append('/-- At fuel 0 every function of the block runs out of fuel. -/')
 base.append('theorem selectSim_zero (ch : Choices) : SelectSim ch 0 where')
 for n in names:
     base.append(f'  {n} := by intros; unfold Sql.{n}; exact Sim.outOfFuel _')
+base.append('''
+set_option hygiene false in
+/-- The fields of an induction hypothesis `SelectSim ch fuel`, as hypotheses
+    `h_f` (the names `sim` looks for). -/
+macro "select_ih " ih:ident : tactic =>
+  `(tactic| obtain ⟨''' + ", ".join("h_" + x for x in names) + '''⟩ := $ih)''')
 base.append('\nend Sql.Den\n')
 open('Sql/Den/SimSelectBase.lean', 'w').write('\n'.join(base))
 auto = ['''/-
@@ -79,7 +93,7 @@ for l, n in zip(lines, names):
     if n in manual: continue
     stmt = l.split(' : ', 1)[1].replace('Sql.' + n + ' fuel', 'Sql.' + n + ' (fuel + 1)')
     auto.append(f'theorem sim_{n} {{ch : Choices}} {{fuel : Nat}} (ih : SelectSim ch fuel) :\n    {stmt} := by')
-    auto.append(f'  obtain ⟨{", ".join("h_" + x for x in names)}⟩ := ih')
+    auto.append('  select_ih ih')
     auto.append(f'  intros; unfold Sql.{n} Den.{n}; sim')
     auto.append('')
 auto.append('end Sql.Den')

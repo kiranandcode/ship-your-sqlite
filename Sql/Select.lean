@@ -1143,6 +1143,368 @@ def frameBound (ord : List OrderTerm) (unit : FrameUnit) (okeys : Array (Array V
       else (match (List.range m).reverse.find? inside with | some k => (k : Int) | none => -1)
 
 
+/-- A SELECT core is streamed (`runCore`): no LIMIT 0, GROUP BY, HAVING,
+    ORDER BY, aggregate or window in its result columns. -/
+def isStreamable (noRows : Bool) (groupBy : List Expr) (having : Option Expr) (orderBy : List OrderTerm)
+    (cols : List ResultCol) : Bool :=
+  !noRows && groupBy.isEmpty && having.isNone && orderBy.isEmpty &&
+    !(cols.any fun | .expr e _ _ => hasAgg e || hasWindow e | _ => false)
+
+/-- DISTINCT on output rows: the first of each set of rows equal under the
+    result columns' collations `colls`. -/
+def dedupRows (colls : List Coll) (out : Array (Array Value × Array Value)) : Array (Array Value × Array Value) := Id.run do
+  let mut d := #[]
+  let mut seen : Std.HashSet String := {}
+  for r in out do
+    let k := canonKey colls r.1
+    if !seen.contains k then
+      seen := seen.insert k
+      d := d.push r
+  return d
+
+/-- The column metadata of a SELECT's result columns over sources `srcs`. -/
+def resultMeta (q : QEnv) (srcs : Array Src) (rcols : List ResultCol) : Array ColMeta :=
+  let qm : QEnv := { q with env := { q.env with frames := { srcs, cur := Array.replicate srcs.size none } :: q.env.frames, group := none } }
+  rcols.toArray.map fun rc =>
+    match rc with
+    | .expr e _ _ => ⟨resultName q srcs rc, exprAff qm.env e, ((exprColl qm.env e).map (·.1)).getD .binary⟩
+    | _ => ⟨"", none, .binary⟩
+
+/-! ## Joins: SQLite's nested loops
+
+The plan of a join (`JoinPlan`, shared with the denotation), the loops
+(`joinLoopsM`: the denotation's `joinLoops`, with the automatic index's
+skipping of rows), and the executable's choice of a nesting order. -/
+
+/-- A join prepared for SQLite's nested loops (`evalFromWhereS`): the leaves
+    of the chain of inner joins, their sources, the rows of the table leaves
+    (in scan order; a table-valued function's are computed per partial row),
+    the nesting order (depth → leaf), each conjunct with the depth where the
+    last leaf it names is bound, and the result-column aliases. -/
+structure JoinPlan where
+  leaves : Array FromItem
+  leafSrcs : Array (Array Src)
+  leafRows : Array (Option (Array (Array Cur)))
+  nest : Array Nat
+  byDepth : List (Nat × Expr)
+  aliases : List (Name × Expr)
+
+namespace JoinPlan
+
+/-- The sources of all leaves, in FROM's order. -/
+def srcs (p : JoinPlan) : Array Src := p.leafSrcs.foldl (· ++ ·) #[]
+
+/-- Where each leaf's columns start in a row. -/
+def offsets (p : JoinPlan) : Array Nat :=
+  (p.leafSrcs.foldl (fun (acc : Array Nat × Nat) ss => (acc.1.push acc.2, acc.2 + ss.size)) (#[], 0)).1
+
+/-- The partial row with no leaf bound. -/
+def empty (p : JoinPlan) : Array Cur := Array.replicate p.srcs.size none
+
+/-- Bind leaf `k` to row `r` in a partial row. -/
+def place (p : JoinPlan) (cur : Array Cur) (k : Nat) (r : Array Cur) : Array Cur := Id.run do
+  let mut c := cur
+  for h : j in [0:r.size] do c := c.set! (p.offsets[k]! + j) r[j]
+  return c
+
+/-- The plan, the depth of each conjunct computed from the names it uses
+    (the leaves whose sources those names hit). -/
+def make (leaves : Array FromItem) (leafSrcs : Array (Array Src)) (leafRows : Array (Option (Array (Array Cur))))
+    (nest : Array Nat) (conds : List Expr) (aliases : List (Name × Expr)) : JoinPlan :=
+  let srcs := leafSrcs.foldl (· ++ ·) #[]
+  let leafOf : Array Nat := (leafSrcs.mapIdx fun i ss => Array.replicate ss.size i).foldl (· ++ ·) #[]
+  let leavesOf (e : Expr) : List Nat := Id.run do
+    let mut ls : List Nat := []
+    for (t, c) in exprRefs e do
+      for h : si in [0:srcs.size] do
+        let s := srcs[si]
+        let hit := match t with
+          | some tn => nameEq s.alias tn
+          | none => s.cols.any (fun (n, _, _) => nameEq n c) || (s.hasRowid && isRowidName c)
+        if hit && !ls.contains leafOf[si]! then ls := leafOf[si]! :: ls
+    return ls
+  let depthOf : Array Nat := Id.run do
+    let mut d := Array.replicate leaves.size 0
+    for h : i in [0:nest.size] do d := d.set! nest[i] i
+    return d
+  { leaves, leafSrcs, leafRows, nest, aliases,
+    byDepth := conds.map fun e => ((leavesOf e).foldl (fun m l => max m depthOf[l]!) 0, e) }
+
+/-- The scope of the join's conjuncts on a partial row. -/
+def scope (p : JoinPlan) (cur : Array Cur) : Scope := { srcs := p.srcs, cur, aliases := p.aliases }
+
+end JoinPlan
+
+/-- An action's outcome as a value: its result, or the error it raised. -/
+def attemptM {α : Type} (m : M α) : M (Except Err α) :=
+  tryCatch (do return .ok (← m)) (fun e => return .error e)
+
+/-- SQLite's nested loops over the `nL` leaves of a join (the denotation's
+    `joinLoops`), the leaf at depth `d` being `nest[d]`: from depth `d` with
+    partial row `pre`, each row of the leaf that passes the depth's conjuncts
+    goes one level deeper, and a completed row goes to `step`, which may end
+    the loops (`false`). A row that `skip` rules out (the automatic index: a
+    conjunct of the depth is not true on it) is not visited. The result:
+    `step`'s state, whether to go on, and the error that ended the loops. -/
+def joinLoopsM {σ : Type} (nL : Nat) (nest : Array Nat)
+    (rowsAt : Nat → Array Cur → M (Array (Array Cur)))
+    (place : Array Cur → Nat → Array Cur → Array Cur) (skip : Nat → Array Cur → Bool)
+    (check : Array Cur → Nat → M Bool) (step : σ → Array Cur → M (σ × Bool))
+    (d : Nat) (pre : Array Cur) (acc : σ) : M (σ × Bool × Option Err) := do
+  if d < nL then
+    let k := nest[d]!
+    match ← attemptM (rowsAt k pre) with
+    | .error e => return (acc, false, some e)
+    | .ok rows =>
+      let mut acc := acc
+      for row in rows do
+        let cur := place pre k row
+        if skip d cur then continue
+        match ← attemptM (check cur d) with
+        | .error e => return (acc, false, some e)
+        | .ok false => continue
+        | .ok true =>
+          if d + 1 = nL then
+            match ← attemptM (step acc cur) with
+            | .error e => return (acc, false, some e)
+            | .ok (a, more) =>
+              acc := a
+              if !more then return (acc, false, none)
+          else
+            let (a, more, e?) ← joinLoopsM nL nest rowsAt place skip check step (d + 1) cur acc
+            acc := a
+            if e?.isSome || !more then return (acc, more, e?)
+      return (acc, true, none)
+  else return (acc, true, none)
+termination_by nL - d
+
+/-- A column's value in a partial row (as `valueOf` reads it). -/
+def curValue (cur : Array Cur) (si ci : Nat) : Value :=
+  match cur[si]? with
+  | some (some r) => r.vals[ci]?.getD .null
+  | _ => .null
+
+/-- A term of a compiled conjunct: a column of the join's own scope (source
+    `si`, column `ci`) or a literal. -/
+inductive PTerm where
+  | col (si ci : Nat)
+  | lit (v : Value)
+  deriving Inhabited
+
+/-- A term's value on a partial row. -/
+def PTerm.eval (cur : Array Cur) : PTerm → Value
+  | .col si ci => curValue cur si ci
+  | .lit v => v
+
+/-- A column of the join's own scope `env`, or a literal, as a term. -/
+def compileTerm (env : Env) (e : Expr) : Option PTerm :=
+  match e with
+  | .col _ t c =>
+    match resolveCol env t c with
+    | .ok (.col 0 si ci) => some (.col si ci)
+    | _ => none
+  | .lit v => some (.lit v)
+  | _ => none
+
+/-- A conjunct compiled to a test on partial rows (an automatic index, as
+    SQLite builds for a join): comparisons and IN lists of columns and
+    literals (with the comparison's affinity and collations), and AND, OR
+    and NOT of such, coded as jumps as `condJump` codes them. -/
+inductive PCond where
+  | cmp (op : BinOp) (aff : Option Aff) (coll : Coll) (a b : PTerm)
+  | inList (x : PTerm) (aff : Option Aff) (items : List (PTerm × Coll))
+  | and (a b : PCond)
+  | or (a b : PCond)
+  | not (a : PCond)
+  deriving Inhabited
+
+/-- `x IN (w, …)` on values (the IN list's loop of `evalExpr`). -/
+def inListValue (v : Value) (aff : Option Aff) (ws : List (Value × Coll)) : Value :=
+  if v.isNull then .null else
+  let found := ws.any fun (w, coll) => truth (compareOp .eq aff coll v w) == some true
+  let sawNull := ws.any fun (w, coll) => (compareOp .eq aff coll v w).isNull
+  boolV (if found then some true else if sawNull then none else some false)
+
+/-- Whether the jump a compiled conjunct codes is taken on a partial row
+    (`condJump`). -/
+def PCond.jump (cur : Array Cur) : PCond → Bool → Bool → Bool
+  | .cmp op aff coll a b, sense, jn => jumpOf (compareOp op aff coll (a.eval cur) (b.eval cur)) sense jn
+  | .inList x aff items, sense, jn =>
+    jumpOf (inListValue (x.eval cur) aff (items.map fun (t, c) => (t.eval cur, c))) sense jn
+  | .and a b, sense, jn =>
+    let ((s1, j1), short, (s2, j2)) := jumpPlan true sense jn
+    if a.jump cur s1 j1 then short else b.jump cur s2 j2
+  | .or a b, sense, jn =>
+    let ((s1, j1), short, (s2, j2)) := jumpPlan false sense jn
+    if a.jump cur s1 j1 then short else b.jump cur s2 j2
+  | .not a, sense, jn => a.jump cur (!sense) jn
+
+/-- A conjunct compiled in the join's scope `env` (`k` bounds the depth). -/
+def compileCondK (env : Env) : Nat → Expr → Option PCond
+  | 0, _ => none
+  | k + 1, e =>
+    match e with
+    | .binop op a b =>
+      match op with
+      | .and =>
+        if (andOrAlt env e).isNone && !hasSubquery a && !hasSubquery b then
+          match compileCondK env k a, compileCondK env k b with
+          | some ca, some cb => some (.and ca cb)
+          | _, _ => none
+        else none
+      | .or =>
+        if (andOrAlt env e).isNone && !hasSubquery a && !hasSubquery b then
+          match compileCondK env k a, compileCondK env k b with
+          | some ca, some cb => some (.or ca cb)
+          | _, _ => none
+        else none
+      | .lt | .le | .gt | .ge | .eq | .ne =>
+        match compileTerm env a, compileTerm env b with
+        | some ta, some tb => some (.cmp op (cmpAff (exprAff env a) (exprAff env b)) (cmpColl env a b) ta tb)
+        | _, _ => none
+      | _ => none
+    | .unop .not a => (compileCondK env k a).map .not
+    | .inList false x items =>
+      if items.isEmpty then none else
+      match compileTerm env x, items.mapM (compileTerm env) with
+      | some tx, some tis => some (.inList tx (exprAff env x) (tis.zip (items.map (cmpColl env x))))
+      | _, _ => none
+    | _ => none
+
+/-- The compiled conjuncts of each depth of a join, in the join's scope `env`. -/
+def JoinPlan.pconds (p : JoinPlan) (env : Env) : Array (List PCond) :=
+  (Array.range p.leaves.size).map fun d =>
+    (p.byDepth.filter (·.1 == d)).filterMap fun (_, e) => if hasAgg e then none else compileCondK env syntaxFuel e
+
+/-- The automatic index rules out the partial row `cur` at depth `d`: a
+    compiled conjunct of the depth does not hold on it. -/
+def skipRow (pconds : Array (List PCond)) (d : Nat) (cur : Array Cur) : Bool :=
+  (pconds[d]?.getD []).any fun c => c.jump cur false true
+
+/-- `m` run for its result only: the state is restored after it (but for
+    the oracle's counters and the fuel flag); an error gives `dflt`. -/
+def sandbox {α : Type} (m : M α) (dflt : α) : M α := do
+  let saved ← get
+  let r ← tryCatch m (fun _ => pure dflt)
+  modify fun c => { saved with orderPos := c.orderPos, prng := c.prng, exhausted := saved.exhausted || c.exhausted }
+  return r
+
+/-- Greedy nesting: next the leaf that least multiplies the partial rows (one
+    joined by a conjunct to those nested, else the one with the fewest rows
+    after its own conjuncts). `refs`: the leaves each conjunct names. -/
+def greedyNest (nL : Nat) (refs : List (List Nat)) (sizes : Array Nat) : Array Nat := Id.run do
+  let size (k : Nat) : Nat := sizes[k]!
+  let mut chosen : Array Nat := #[]
+  for _ in [0:nL] do
+    let linked (k : Nat) : Bool := refs.any fun ls =>
+      ls.contains k && ls.any (fun l => l != k && chosen.contains l)
+    let cands := (List.range nL).filter (!chosen.contains ·)
+    -- the growth of the partial rows a leaf brings: about one row per
+    -- partial row when a conjunct joins it to those nested, else its rows
+    let factor (k : Nat) : Nat := if linked k then min 1 (size k) else size k
+    match cands.foldl (fun best k => match best with
+        | none => some k
+        | some b =>
+          if factor k < factor b || (factor k == factor b && size k < size b) then some k else some b) none with
+    | some k => chosen := chosen.push k
+    | none => pure ()
+  return chosen
+
+/-- A nesting order: `n0` if it is one (a permutation of the leaves), else FROM's. -/
+def nestGuard (nL : Nat) (n0 : Array Nat) : Array Nat :=
+  if n0.toList.isPerm (List.range nL) then n0 else Array.range nL
+
+/-- The executable's nesting order before the oracle's: FROM's, or, when the
+    cross product is large, greedy (`greedyNest`) on the leaves' sizes after
+    their own conjuncts. `condC` is the evaluator's `condHolds`. -/
+def greedyOrder (condC : QEnv → Expr → M Bool) (q : QEnv) (leaves : Array FromItem)
+    (leafSrcs : Array (Array Src)) (leafRows : Array (Option (Array (Array Cur))))
+    (conds : List Expr) (aliases : List (Name × Expr)) : M (Array Nat) := do
+  let nL := leaves.size
+  let p := JoinPlan.make leaves leafSrcs leafRows (Array.range nL) conds aliases
+  let srcs := p.srcs
+  let leafOf : Array Nat := (leafSrcs.mapIdx fun i ss => Array.replicate ss.size i).foldl (· ++ ·) #[]
+  -- the leaves an expression names, and whether every name hit a source
+  let leavesOf (e : Expr) : List Nat × Bool := Id.run do
+    let mut ls : List Nat := []
+    let mut allHit := true
+    for (t, c) in exprRefs e do
+      let mut hit1 := false
+      for h : si in [0:srcs.size] do
+        let s := srcs[si]
+        let hit := match t with
+          | some tn => nameEq s.alias tn
+          | none => s.cols.any (fun (n, _, _) => nameEq n c) || (s.hasRowid && isRowidName c)
+        if hit then
+          hit1 := true
+          if !ls.contains leafOf[si]! then ls := leafOf[si]! :: ls
+      if !hit1 then allHit := false
+    return (ls, allHit)
+  let refs := conds.map fun e => (e, leavesOf e)
+  -- the leaf a conjunct is local to (every name it uses a column of it)
+  let locOf : List (Option Nat × Expr) := refs.map fun (e, ls, allHit) =>
+    (match ls with | [l] => if allHit then some l else none | _ => none, e)
+  let rawSize (k : Nat) : Nat := ((leafRows[k]!).map (·.size)).getD 0
+  let product := (List.range nL).foldl (fun p k => p * max 1 (rawSize k)) 1
+  if !(nL > 2 && product > 1000000) then return Array.range nL
+  let localHolds (k : Nat) (r : Array Cur) : M Bool := do
+    let qr := { q with env := { q.env with frames := p.scope (p.place p.empty k r) :: q.env.frames, group := none } }
+    for (loc, e) in locOf do
+      if loc == some k then
+        if hasAgg e then err "misuse of aggregate function"
+        if !(← condC qr e) then return false
+    return true
+  let mut sizes : Array Nat := (Array.range nL).map rawSize
+  for h : k in [0:nL] do
+    if let some rs := leafRows[k]! then
+      let r ← tryCatch (do
+          let mut n := 0
+          for r in rs do
+            if ← localHolds k r then n := n + 1
+          pure (some n))
+        (fun _ => pure none)
+      if let some n := r then sizes := sizes.set! k n
+  return greedyNest nL (refs.map (·.2.1)) sizes
+
+/-- The nesting order of a join of table leaves: a permutation the oracle
+    picks of the executable's (`greedyOrder`, computed on a copy of the
+    state so that it has no effect but that choice). -/
+def chooseNest (condC : QEnv → Expr → M Bool) (q : QEnv) (leaves : Array FromItem)
+    (leafSrcs : Array (Array Src)) (leafRows : Array (Option (Array (Array Cur))))
+    (conds : List Expr) (aliases : List (Name × Expr)) : M (Array Nat) := do
+  let n0 ← sandbox (greedyOrder condC q leaves leafSrcs leafRows conds aliases) (Array.range leaves.size)
+  chooseOrder (nestGuard leaves.size n0)
+
+/-- The plan of a join (the denotation's `joinPrepare`, with the
+    executable's nesting order). `evalFromC`, `tableFnSrcC` and `condC` are
+    the evaluator's `evalFrom`, `tableFnSrc` and `condHolds`. -/
+def joinPrepareM (evalFromC : FromItem → M (Array Src × Array (Array Cur)))
+    (tableFnSrcC : Name → Option Name → M Src) (condC : QEnv → Expr → M Bool)
+    (q : QEnv) (f : FromItem) (where_ : Option Expr) (aliases : List (Name × Expr)) : M JoinPlan := do
+  let (leavesL, onConds) := innerChain f
+  let leaves := leavesL.toArray
+  -- a table-valued function's rows depend on earlier leaves (its arguments)
+  let mut leafSrcs : Array (Array Src) := #[]
+  let mut leafRows : Array (Option (Array (Array Cur))) := #[]
+  for lf in leaves do
+    match lf with
+    | .tableFn _ n _ alias =>
+      leafSrcs := leafSrcs.push #[← tableFnSrcC n alias]
+      leafRows := leafRows.push none
+    | _ =>
+      let (ss, rs) ← evalFromC lf
+      leafSrcs := leafSrcs.push ss
+      -- the order the plan scans the leaf in
+      leafRows := leafRows.push (some (← chooseOrder rs))
+  let nL := leaves.size
+  -- the order of the loops; FROM's with a table-valued function (its
+  -- arguments name earlier leaves)
+  let nest ← if leafRows.any (·.isNone) then pure (Array.range nL)
+    else chooseNest condC q leaves leafSrcs leafRows (onConds ++ (where_.map conjuncts).getD []) aliases
+  return JoinPlan.make leaves leafSrcs leafRows nest (onConds ++ (where_.map conjuncts).getD []) aliases
+
+
+
 mutual
 
 def evalExpr (fuel : Nat) (q : QEnv) (e : Expr) : M Value :=
@@ -1847,261 +2209,41 @@ def windowPartition (fuel : Nat) (ctxs : Array QEnv) (name : String) (n : Name) 
 
 /-- FROM with WHERE: a chain of inner joins is evaluated as nested loops, each
     conjunct of WHERE and of the ON clauses applied as soon as every source it
-    may refer to is bound. Equal to evaluating the joins and then filtering. -/
+    may refer to is bound (`joinPrepareM`, `joinLoopsM`). Each completed row
+    goes to `step` at once (which may stop the loops); an error leaves what
+    was done before it (`step`'s state is returned with the error). -/
 def evalFromWhereS {σ : Type} (fuel : Nat) (q : QEnv) (f : FromItem) (where_ : Option Expr) (aliases : List (Name × Expr))
     (init : σ) (step : σ → Array Src → Array Cur → M (σ × Bool)) : M (Array Src × σ × Option Err) :=
   match fuel with
   | 0 => outOfFuel
   | fuel + 1 =>
     do
-      let (leavesL, onConds) := innerChain f
-      let leaves := leavesL.toArray
-      -- leaves whose rows do not depend on earlier leaves are evaluated once;
-      -- table-valued functions are evaluated per partial row (their arguments may
-      -- refer to earlier sources)
-      let mut leafSrcs : Array (Array Src) := #[]
-      let mut leafRows : Array (Option (Array (Array Cur))) := #[]
-      for lf in leaves do
-        match lf with
-        | .tableFn _ n _ alias =>
-          leafSrcs := leafSrcs.push #[← tableFnSrc fuel n alias]
-          leafRows := leafRows.push none
-        | _ =>
-          let (ss, rs) ← evalFrom fuel q lf
-          leafSrcs := leafSrcs.push ss
-          -- the order the plan scans the leaf in
-          leafRows := leafRows.push (some (← chooseOrder rs))
-      let srcs := leafSrcs.foldl (· ++ ·) #[]
-      let nL := leaves.size
-      -- the leaf of each source position, and each leaf's first position
-      let leafOf : Array Nat := (leafSrcs.mapIdx fun i ss => Array.replicate ss.size i).foldl (· ++ ·) #[]
-      let offsets : Array Nat := (leafSrcs.foldl (fun (acc : Array Nat × Nat) ss => (acc.1.push acc.2, acc.2 + ss.size)) (#[], 0)).1
-      let conds := onConds ++ (where_.map conjuncts).getD []
-      -- the leaves an expression names (by the sources its names hit)
-      let leavesOf (e : Expr) : List Nat × Bool := Id.run do
-        let mut ls : List Nat := []
-        let mut allHit := true
-        for (t, c) in exprRefs e do
-          let mut hit1 := false
-          for h : si in [0:srcs.size] do
-            let s := srcs[si]
-            let hit := match t with
-              | some tn => nameEq s.alias tn
-              | none => s.cols.any (fun (n, _, _) => nameEq n c) || (s.hasRowid && isRowidName c)
-            if hit then
-              hit1 := true
-              if !ls.contains leafOf[si]! then ls := leafOf[si]! :: ls
-          if !hit1 then allHit := false
-        return (ls, allHit)
-      let refs := conds.map fun e => (e, leavesOf e)
-      -- the leaf a conjunct is local to (every name it uses a column of it)
-      let locOf : List (Option Nat × Expr) := refs.map fun (e, ls, allHit) =>
-        (match ls with | [l] => if allHit then some l else none | _ => none, e)
-      let frameQ (cur : Array Cur) : QEnv :=
-        { q with env := { q.env with frames := { srcs, cur, aliases } :: q.env.frames, group := none } }
-      let empty : Array Cur := Array.replicate srcs.size none
-      let place (cur : Array Cur) (k : Nat) (r : Array Cur) : Array Cur := Id.run do
-        let mut c := cur
-        for h : j in [0:r.size] do c := c.set! (offsets[k]! + j) r[j]
-        return c
-      -- a leaf's own conjuncts on one of its rows: the pure ones (`pureExpr`:
-      -- deterministic, no effect on the state), then the others
-      let localPure (k : Nat) (r : Array Cur) : M Bool := do
-        let qr := frameQ (place empty k r)
-        for (loc, e) in locOf do
-          if loc == some k && pureExpr e then
-            if hasAgg e then err "misuse of aggregate function"
-            if !(← condHolds fuel qr e) then return false
-        return true
-      let localImpure (k : Nat) (r : Array Cur) : M Bool := do
-        let qr := frameQ (place empty k r)
-        for (loc, e) in locOf do
-          if loc == some k && !pureExpr e then
-            if hasAgg e then err "misuse of aggregate function"
-            if !(← condHolds fuel qr e) then return false
-        return true
-      let localHolds (k : Nat) (r : Array Cur) : M Bool := do
-        if !(← localPure k r) then return false
-        localImpure k r
-      -- the nesting order of the loops (depth → leaf). It is the plan's choice
-      -- (SQLite reorders inner joins); the executable keeps FROM's order, or,
-      -- when the cross product is large, nests greedily: next the leaf that
-      -- least multiplies the partial rows (one joined by a conjunct to those
-      -- nested, else the one with the fewest rows after its own conjuncts).
-      -- Table-valued functions (whose arguments name earlier leaves) keep it.
-      let hasFn := leafRows.any (·.isNone)
-      let rawSize (k : Nat) : Nat := ((leafRows[k]!).map (·.size)).getD 0
-      let product := (List.range nL).foldl (fun p k => p * max 1 (rawSize k)) 1
-      let reorder := !hasFn && nL > 2 && product > 1000000
-      -- the leaves' sizes after their own conjuncts, to choose the nesting
-      -- order (itself a choice): computed on a copy of the state, restored
-      -- after, so that it has no effect but that choice; an error leaves the
-      -- raw size
-      let mut sizes : Array Nat := (Array.range nL).map rawSize
-      if reorder then
-        let saved ← get
-        for h : k in [0:nL] do
-          if let some rs := leafRows[k]! then
-            let r ← tryCatch (do
-                let mut n := 0
-                for r in rs do
-                  if ← localHolds k r then n := n + 1
-                pure (some n))
-              (fun _ => pure none)
-            if let some n := r then sizes := sizes.set! k n
-        restoreTo saved saved.db
-      let sizesNow := sizes
-      let size (k : Nat) : Nat := sizesNow[k]!
-      let nest0 : Array Nat := Id.run do
-        if !reorder then return (Array.range nL)
-        let mut chosen : Array Nat := #[]
-        for _ in [0:nL] do
-          let linked (k : Nat) : Bool := refs.any fun (_, ls, _) =>
-            ls.contains k && ls.any (fun l => l != k && chosen.contains l)
-          let cands := (List.range nL).filter (!chosen.contains ·)
-          -- the growth of the partial rows a leaf brings: about one row per
-          -- partial row when a conjunct joins it to those nested, else its rows
-          let factor (k : Nat) : Nat := if linked k then min 1 (size k) else size k
-          match cands.foldl (fun best k => match best with
-              | none => some k
-              | some b =>
-                if factor k < factor b || (factor k == factor b && size k < size b) then some k else some b) none with
-          | some k => chosen := chosen.push k
-          | none => pure ()
-        return chosen
-      let nest ← if hasFn then pure nest0 else chooseOrder nest0
-      -- the depth of each leaf
-      let depthOf : Array Nat := Id.run do
-        let mut d := Array.replicate nL 0
-        for h : i in [0:nest.size] do d := d.set! nest[i] i
-        return d
-      -- the depth at which a conjunct is tested: when the last leaf it names
-      -- is bound; and the leaf it is local to (every name a column of it)
-      let byLevel := (refs.zip locOf).map fun ((e, ls, _), (loc, _)) =>
-        let lv := ls.foldl (fun m l => max m depthOf[l]!) 0
-        (lv, loc, e)
-      let check (cur : Array Cur) (d : Nat) (skipLocal : Bool) : M Bool := do
-        let qr := frameQ cur
-        for (l, loc, e) in byLevel do
-          if l == d && !(skipLocal && loc == some nest[d]!) then
-            if hasAgg e then err "misuse of aggregate function"
-            if !(← condHolds fuel qr e) then return false
-        return true
-      -- an automatic index (SQLite builds one for such joins): a conjunct
-      -- `c = x` at depth d with `c` a column of the leaf nested there and `x`
-      -- a column of a leaf nested before. The index only narrows the rows the
-      -- loop visits to those whose key matches; every conjunct is still tested
-      -- on them, so rows are as with the scan (in scan order).
-      let mut probes : Array (Option (Expr × Expr × Option Aff × Coll)) := #[]
-      for d in [0:nL] do
-        let k := nest[d]!
-        let mut found := none
-        if leafRows[k]!.isSome then
-          for (l, _, e) in byLevel do
-            if found.isSome || l != d then continue
-            if let .binop .eq a b := e then
-              let isCol (x : Expr) := match x with | .col .. => true | _ => false
-              if !(isCol a && isCol b) then continue
-              let (la, ha) := leavesOf a
-              let (lb, hb) := leavesOf b
-              let earlier (ls : List Nat) := !ls.isEmpty && ls.all (fun l => depthOf[l]! < d)
-              let env := (frameQ empty).env
-              let aff := cmpAff (← affOf env a) (← affOf env b)
-              let coll := cmpColl env a b
-              if ha && hb && la == [k] && earlier lb then found := some (a, b, aff, coll)
-              else if ha && hb && lb == [k] && earlier la then found := some (b, a, aff, coll)
-        probes := probes.push found
-      -- per leaf: its index (key → rows, and the rows without a key), once built
-      let mut indexes : Array (Option (Std.HashMap String (Array Nat) × Array Nat)) := Array.replicate nL none
-      -- a leaf's own conjuncts (naming only its columns) are tested when the
-      -- loop reaches one of its rows, before the others of that depth
+      let p ← joinPrepareM (evalFrom fuel q) (tableFnSrc fuel) (condHolds fuel) q f where_ aliases
+      -- the automatic indexes, in the scope of the join's conjuncts
+      let pconds := p.pconds { q.env with frames := p.scope p.empty :: q.env.frames, group := none }
       -- the rows of leaf `k` after the partial row `pre`
       let rowsAt (k : Nat) (pre : Array Cur) : M (Array (Array Cur)) := do
-        match leafRows[k]! with
+        match p.leafRows[k]! with
         | some rs => return rs
         | none =>
-          match leaves[k]! with
+          match p.leaves[k]! with
           | .tableFn _ n args _ =>
-            let qp := { q with env := { q.env with frames := { srcs, cur := pre } :: q.env.frames } }
+            let qp := { q with env := { q.env with frames := { srcs := p.srcs, cur := pre } :: q.env.frames } }
             let vs ← args.mapM (evalExpr fuel qp)
             let rs ← tableFunction fuel n (vs.zip (← args.mapM (argIsJson fuel qp)))
             return rs.map fun r => #[some r]
           | _ => return #[]
-      -- SQLite's nested loops, depth first: each completed row goes to `step`
-      -- at once (which may stop the loop), and an error leaves what was done
-      -- before it (`step`'s state is returned with the error)
-      let mut acc := init
-      -- frames: depth, partial row, the leaf's rows (once computed), next index
-      -- per leaf of a table: the value of its pure own conjuncts on each row,
-      -- once evaluated (evaluating them again would give the same)
-      let mut own : Array (Array (Option Bool)) :=
-        leafRows.map fun rs? => Array.replicate ((rs?.map (·.size)).getD 0) none
-      let mut stack : List (Nat × Array Cur × Option (Array (Nat × Array Cur)) × Nat) := [(0, empty, none, 0)]
-      let mut failure : Option Err := none
-      let mut finished := false
-      for _ in [0:fuel] do
-        match stack with
-        | [] => finished := true; break
-        | (d, pre, rowsO, i) :: rest =>
-          let k := nest[d]!
-          let r ← tryCatch (do
-              let (rows, indexes') ← match rowsO with
-                | some rs => pure (rs, indexes)
-                | none => do
-                  let all ← rowsAt k pre
-                  match probes[d]!, leafRows[k]! with
-                  | some (kc, xc, aff, coll), some rs =>
-                    if rs.isEmpty then return .ok (some rest, own, acc, indexes)
-                    let (map, loose, ix') ← match indexes[k]! with
-                      | some (m, l) => pure (m, l, indexes)
-                      | none => do
-                        let mut m : Std.HashMap String (Array Nat) := {}
-                        let mut l : Array Nat := #[]
-                        for h : j in [0:rs.size] do
-                          let w := cmpConvert aff (← evalExpr fuel (frameQ (place empty k rs[j])) kc)
-                          match eqKey coll w with
-                          | some key => m := m.insert key ((m.getD key #[]).push j)
-                          | none => if !w.isNull then l := l.push j
-                        pure (m, l, indexes.set! k (some (m, l)))
-                    let v := cmpConvert aff (← evalExpr fuel (frameQ pre) xc)
-                    let sel : Array Nat := match eqKey coll v with
-                      | some key => mergeAsc (map.getD key #[]) loose
-                      | none => if v.isNull then #[] else Array.range rs.size
-                    pure (sel.map fun j => (j, rs[j]!), ix')
-                  | _, _ => pure (all.mapIdx fun j r => (j, r), indexes)
-              if h : i < rows.size then
-                let (j, row) := rows[i]
-                let cur := place pre k row
-                let next := (d, pre, some rows, i + 1) :: rest
-                -- the leaf's own conjuncts on this row (a table leaf)
-                let (ownOk, own') ← if leafRows[k]!.isSome then do
-                    let (p, own') ← match own[k]![j]? with
-                      | some (some b) => pure (b, own)
-                      | _ => do
-                        let b ← localPure k row
-                        pure (b, own.modify k (·.set! j (some b)))
-                    if !p then pure (false, own') else pure (← localImpure k row, own')
-                  else pure (true, own)
-                if !ownOk then return .ok (some next, own', acc, indexes')
-                if ← check cur d (leafRows[k]!.isSome) then
-                  if d + 1 == nL then
-                    let (a, more) ← step acc srcs cur
-                    return Except.ok (if more then some next else none, own', a, indexes')
-                  else return .ok (some ((d + 1, cur, none, 0) :: next), own', acc, indexes')
-                else return .ok (some next, own', acc, indexes')
-              else return .ok (some rest, own, acc, indexes'))
-            (fun e => pure (Except.error e))
-          match r with
-          | .error e => failure := some e; break
-          | .ok (st, own', a, ix') =>
-            own := own'
-            acc := a
-            indexes := ix'
-            match st with
-            | some st => stack := st
-            | none => finished := true; break
-      if !finished && failure.isNone then outOfFuel
-      return (srcs, acc, failure)
+      -- the conjuncts of depth `d` on a row, in order; the first that does
+      -- not hold rejects the row
+      let check (cur : Array Cur) (d : Nat) : M Bool := do
+        let qr := { q with env := { q.env with frames := { srcs := p.srcs, cur, aliases := p.aliases } :: q.env.frames, group := none } }
+        for e in (p.byDepth.filter (·.1 == d)).map (·.2) do
+          if hasAgg e then err "misuse of aggregate function"
+          if !(← condHolds fuel qr e) then return false
+        return true
+      let (acc, _, failure) ← joinLoopsM p.leaves.size p.nest rowsAt p.place (skipRow pconds) check
+        (step · p.srcs ·) 0 p.empty init
+      return (p.srcs, acc, failure)
 
 /-- A FROM clause joined and filtered by WHERE: its sources and rows. -/
 def evalFromWhere (fuel : Nat) (q : QEnv) (f : FromItem) (where_ : Option Expr) (aliases : List (Name × Expr)) :
@@ -2420,184 +2562,249 @@ def runCore (fuel : Nat) (q : QEnv) (core : SelectCore) (orderBy : List OrderTer
         let where_ := if noRows then some (.lit (.int 0)) else where_
         -- result-column aliases usable in WHERE (`*` columns resolve as columns anyway)
         let aliases0 := cols.filterMap fun | .expr e (some a) _ => some (a, e) | _ => none
-        -- the column metadata of the result
-        let metaOf (srcs : Array Src) (rcols : List ResultCol) : Array ColMeta :=
-          let qm : QEnv := { q with env := { q.env with frames := { srcs, cur := Array.replicate srcs.size none } :: q.env.frames, group := none } }
-          rcols.toArray.map fun rc =>
-            match rc with
-            | .expr e _ _ => ⟨resultName q srcs rc, exprAff qm.env e, ((exprColl qm.env e).map (·.1)).getD .binary⟩
-            | _ => ⟨"", none, .binary⟩
         -- a SELECT without aggregates, windows or ORDER BY computes and hands
         -- out each row inside the join loop (selectInnerLoop): OFFSET skips a
         -- row before its result columns are computed (after DISTINCT's check
         -- with DISTINCT), LIMIT ends the loop, and an error leaves the rows
         -- already out (a top-level SELECT has printed them)
-        let streamable := !noRows && groupBy.isEmpty && having.isNone && orderBy.isEmpty &&
-          !(cols.any fun | .expr e _ _ => hasAgg e || hasWindow e | _ => false)
-        if let (true, some f) := (streamable, from_) then
-          let step (a : StreamAcc) (srcs : Array Src) (cur : Array Cur) : M (StreamAcc × Bool) := do
-            if !distinct && a.skipped < off then return ({ a with skipped := a.skipped + 1 }, true)
-            let (rcols, colls) ← match a.rcols with
-              | some rc => pure rc
-              | none => do
-                let rcols ← expandCols fuel srcs cols
-                pure (rcols, (metaOf srcs rcols).toList.map (·.coll))
-            let a := { a with rcols := some (rcols, colls) }
-            let exprs := rcols.filterMap fun | .expr e _ _ => some e | _ => none
-            let aliases := rcols.filterMap fun | .expr e (some a) _ => some (a, e) | _ => none
-            let qr := { q with env := { q.env with frames := { srcs, cur, aliases } :: q.env.frames, group := none } }
-            let vals ← exprs.toArray.mapM (evalExpr fuel qr)
-            let a ← if distinct then do
-                let k := canonKey colls vals
-                if a.seen.contains k then return (a, true)
-                let a := { a with seen := a.seen.insert k }
-                if a.skipped < off then return ({ a with skipped := a.skipped + 1 }, true)
-                pure a
-              else pure a
-            let a := { a with rows := a.rows.push vals }
-            return (a, lim.all (a.rows.size < ·))
-          let (srcs, a, failure) ← evalFromWhereS fuel q f where_ aliases0 ({} : StreamAcc) step
-          if let some e := failure then throw (if stream then { e with printed := a.rows } else e)
-          let rcols ← match a.rcols with
-            | some (rc, _) => pure rc
-            | none => expandCols fuel srcs cols
-          return (metaOf srcs rcols, a.rows.map (·, #[]))
-        let (srcs, rows) ← match from_ with
-          | some f => evalFromWhere fuel q f where_ aliases0
-          | none => pure (#[], #[#[]])
-        let rcols ← expandCols fuel srcs cols
-        let frameOf (cur : Array Cur) : Scope := { srcs, cur }
-        let withFrame (cur : Array Cur) (aliases : List (Name × Expr) := []) : QEnv :=
-          { q with env := { q.env with frames := { frameOf cur with aliases } :: q.env.frames, group := none } }
-        let exprs := rcols.filterMap fun | .expr e _ _ => some e | _ => none
-        let aliases := rcols.filterMap fun | .expr e (some a) _ => some (a, e) | _ => none
-        -- WHERE (with a FROM clause it was applied while joining)
-        let mut kept := #[]
-        for cur in rows do
-          match where_, from_ with
-          | some w, none =>
-            if hasAgg w then err "misuse of aggregate function"
-            if ← condHolds fuel (withFrame cur aliases) w then kept := kept.push cur
-          | _, _ => kept := kept.push cur
-        -- the order the plan visits the joined rows: it decides group and
-        -- DISTINCT representatives and the input order of aggregates
-        kept ← chooseOrder kept
-        let qm := withFrame (Array.replicate srcs.size none)
-        let cmeta : Array ColMeta := rcols.toArray.map fun rc =>
-          match rc with
-          | .expr e _ _ => ⟨resultName q srcs rc, exprAff qm.env e, ((exprColl qm.env e).map (·.1)).getD .binary⟩
-          | _ => ⟨"", none, .binary⟩
-        if noRows then return (cmeta, #[])
-        -- ORDER BY terms: a result column number, a result alias, or an expression
-        let obExpr (t : OrderTerm) : M Expr := do
-          let .mk e _ _ := t
-          match e with
-          | .lit (.int i) =>
-            if i < 1 || i > exprs.length then
-              err s!"ORDER BY term out of range - should be between 1 and {exprs.length}"
-            return exprs[(i - 1).toNat]!
-          | .col none none c =>
-            match aliases.find? (fun (a, _) => nameEq a c) with
-            | some (_, x) => return x
-            | none => return e
-          | _ => return e
-        let obExprs ← orderBy.mapM obExpr
-        let isAgg := !groupBy.isEmpty || exprs.any hasAgg || (having.map hasAgg).getD false || obExprs.any hasAgg
-        -- window calls become numbered placeholders, computed over the row contexts
-        let (wexprs, wcalls) := replaceWindows (exprs ++ obExprs)
-        let exprs := wexprs.take exprs.length
-        let obExprs := wexprs.drop exprs.length
-        let mut ctxs : Array QEnv := #[]
-        let mut out : Array (Array Value × Array Value) := #[]
-        if isAgg then
-          -- groups, in order of their key
-          let mut groups : Array (Array Value × Array (Array Cur)) := #[]
-          let mut gindex : Std.HashMap String Nat := {}
-          for cur in kept do
-            let key ← groupBy.toArray.mapM fun g => do
-              let g' := match g with
-                | .lit (.int i) => (exprs[(i - 1).toNat]?).getD g
-                | _ => g
-              if hasAgg g' then err "aggregate functions are not allowed in the GROUP BY clause"
-              evalExpr fuel (withFrame cur aliases) g'
-            let gcolls := groupBy.map fun g => ((exprColl qm.env g).map (·.1)).getD .binary
-            let ck := canonKey gcolls key
-            match gindex.get? ck with
-            | some i => groups := groups.modify i fun (k, rs) => (k, rs.push cur)
-            | none =>
-              gindex := gindex.insert ck groups.size
-              groups := groups.push (key, #[cur])
-          if groupBy.isEmpty && groups.isEmpty then groups := #[(#[], #[])]
-          let gcolls := groupBy.map fun g => ((exprColl qm.env g).map (·.1)).getD .binary
-          if !groupBy.isEmpty then groups := stableSort (fun a b => lexCompare gcolls [] a.1 b.1) groups
-          -- the row bare columns are read from: the min/max row if there is exactly one
-          -- min()/max() aggregate, else the first row of the group (SQLite 3.54)
-          let minmax := exprs.filterMap fun e => match e with
-            | .call n d [a] false [] none none =>
-              if nameEq n "min" || nameEq n "max" then some (nameEq n "min", d, a) else none
-            | _ => none
-          for (_, grp) in groups do
-            let mut rep : Array Cur := grp[0]?.getD (Array.replicate srcs.size none)
-            -- with one min()/max(), minmaxStep tells the accumulator when not to
-            -- load the bare columns: they come from each row until the first
-            -- non-NULL value, then only from rows that strictly improve it; a
-            -- DISTINCT duplicate skips the step itself, so its row is loaded
-            if minmax.length == 1 && !grp.isEmpty then
-              let (isMin, dist, a) := minmax[0]!
-              let coll := ((exprColl qm.env a).map (·.1)).getD .binary
-              let mut best : Option Value := none
-              let mut seen : Std.HashSet String := {}
-              for cur in grp do
-                let v ← evalExpr fuel (withFrame cur) a
-                if dist && !v.isNull then
-                  let k := canonKey [coll] #[v]
-                  if seen.contains k then rep := cur; continue
-                  seen := seen.insert k
-                if v.isNull then
-                  if best.isNone then rep := cur
-                  continue
-                match best with
-                | none => best := some v; rep := cur
-                | some bv =>
-                  let o := compareValues coll v bv
-                  if (isMin && o == .lt) || (!isMin && o == .gt) then best := some v; rep := cur
-            let qg := { withFrame rep aliases with env := { (withFrame rep aliases).env with group := some grp } }
-            if let some h := having then
-              if !(← condHolds fuel qg h) then continue
-            ctxs := ctxs.push qg
-        else
-          if having.isSome then err "HAVING clause on a non-aggregate query"
-          for cur in kept do
-            ctxs := ctxs.push (withFrame cur aliases)
-        -- window functions: each call's values; rows come out in the windows' sort order
-        let mut order := Array.range ctxs.size
-        let mut wvals : Array (Array Value) := #[]
-        for c in wcalls do
-          let (vs, ord) ← computeWindow fuel ctxs windows c
-          wvals := wvals.push vs
-          if !(match c with | .call _ _ _ _ _ _ (some (.mk none [] [] _)) => true | _ => false) then order := ord
-        for i in order do
-          let base := ctxs[i]!
-          let qi := { base with env := { base.env with params := (wvals.toList.zipIdx.map fun (vs, k) => (windowParamBase + k, vs[i]!)) ++ base.env.params } }
-          let vals ← exprs.toArray.mapM (evalExpr fuel qi)
-          let keys ← obExprs.toArray.mapM (evalExpr fuel qi)
-          out := out.push (vals, keys)
-        if distinct then
-          let colls := cmeta.toList.map (·.coll)
-          let mut d := #[]
-          let mut seen : Std.HashSet String := {}
-          for r in out do
-            let k := canonKey colls r.1
-            if !seen.contains k then
-              seen := seen.insert k
-              d := d.push r
-          out := d
-        -- the order of a SELECT's rows is the plan's (ORDER BY, applied
-        -- after, keeps this order among ties)
-        out ← chooseOrder out
-        out := out.extract off out.size
-        if let some l := lim then out := out.extract 0 l
-        return (cmeta, out)
+        let streamable := isStreamable noRows groupBy having orderBy cols
+        match from_ with
+        | some f =>
+          if streamable then runStream fuel q distinct cols f where_ aliases0 lim off stream
+          else runGrouped fuel q distinct cols (some f) where_ groupBy having windows orderBy noRows lim off aliases0
+        | none => runGrouped fuel q distinct cols none where_ groupBy having windows orderBy noRows lim off aliases0
+
+/-- A streamed SELECT core (`runCore`): each joined row's result columns are
+    computed and handed out inside the join loop. -/
+def runStream (fuel : Nat) (q : QEnv) (distinct : Bool) (cols : List ResultCol) (f : FromItem)
+    (where_ : Option Expr) (aliases0 : List (Name × Expr)) (lim : Option Nat) (off : Nat) (stream : Bool) :
+    M (Array ColMeta × Array (Array Value × Array Value)) :=
+  match fuel with
+  | 0 => outOfFuel
+  | fuel + 1 => do
+    let step (a : StreamAcc) (srcs : Array Src) (cur : Array Cur) : M (StreamAcc × Bool) := do
+      if !distinct && a.skipped < off then return ({ a with skipped := a.skipped + 1 }, true)
+      let (rcols, colls) ← match a.rcols with
+        | some rc => pure rc
+        | none => do
+          let rcols ← expandCols fuel srcs cols
+          pure (rcols, (resultMeta q srcs rcols).toList.map (·.coll))
+      let a := { a with rcols := some (rcols, colls) }
+      let exprs := rcols.filterMap fun | .expr e _ _ => some e | _ => none
+      let aliases := rcols.filterMap fun | .expr e (some a) _ => some (a, e) | _ => none
+      let qr := { q with env := { q.env with frames := { srcs, cur, aliases } :: q.env.frames, group := none } }
+      let vals ← exprs.toArray.mapM (evalExpr fuel qr)
+      let a ← if distinct then do
+          let k := canonKey colls vals
+          if a.seen.contains k then return (a, true)
+          let a := { a with seen := a.seen.insert k }
+          if a.skipped < off then return ({ a with skipped := a.skipped + 1 }, true)
+          pure a
+        else pure a
+      let a := { a with rows := a.rows.push vals }
+      return (a, lim.all (a.rows.size < ·))
+    let (srcs, a, failure) ← evalFromWhereS fuel q f where_ aliases0 ({} : StreamAcc) step
+    if let some e := failure then throw (if stream then { e with printed := a.rows } else e)
+    let rcols ← match a.rcols with
+      | some (rc, _) => pure rc
+      | none => expandCols fuel srcs cols
+    return (resultMeta q srcs rcols, a.rows.map (·, #[]))
+
+/-- A SELECT core that is not streamed (`runCore`): the joined rows, then
+    groups and aggregates, windows, DISTINCT, the plan's order, LIMIT/OFFSET. -/
+def runGrouped (fuel : Nat) (q : QEnv) (distinct : Bool) (cols : List ResultCol) (from_ : Option FromItem)
+    (where_ : Option Expr) (groupBy : List Expr) (having : Option Expr) (windows : List (Name × Window))
+    (orderBy : List OrderTerm) (noRows : Bool) (lim : Option Nat) (off : Nat) (aliases0 : List (Name × Expr)) :
+    M (Array ColMeta × Array (Array Value × Array Value)) :=
+  match fuel with
+  | 0 => outOfFuel
+  | fuel + 1 => do
+    let (srcs, rows) ← match from_ with
+      | some f => evalFromWhere fuel q f where_ aliases0
+      | none => pure (#[], #[#[]])
+    let rcols ← expandCols fuel srcs cols
+    let frameOf (cur : Array Cur) : Scope := { srcs, cur }
+    let withFrame (cur : Array Cur) (aliases : List (Name × Expr) := []) : QEnv :=
+      { q with env := { q.env with frames := { frameOf cur with aliases } :: q.env.frames, group := none } }
+    let exprs := rcols.filterMap fun | .expr e _ _ => some e | _ => none
+    let aliases := rcols.filterMap fun | .expr e (some a) _ => some (a, e) | _ => none
+    -- WHERE (with a FROM clause it was applied while joining)
+    let mut kept := #[]
+    for cur in rows do
+      match where_, from_ with
+      | some w, none =>
+        if hasAgg w then err "misuse of aggregate function"
+        if ← condHolds fuel (withFrame cur aliases) w then kept := kept.push cur
+      | _, _ => kept := kept.push cur
+    -- the order the plan visits the joined rows: it decides group and
+    -- DISTINCT representatives and the input order of aggregates
+    kept ← chooseOrder kept
+    let qm := withFrame (Array.replicate srcs.size none)
+    let cmeta : Array ColMeta := rcols.toArray.map fun rc =>
+      match rc with
+      | .expr e _ _ => ⟨resultName q srcs rc, exprAff qm.env e, ((exprColl qm.env e).map (·.1)).getD .binary⟩
+      | _ => ⟨"", none, .binary⟩
+    if noRows then return (cmeta, #[])
+    runRows fuel q distinct srcs rcols kept cmeta groupBy having windows orderBy lim off
+
+/-- The rows of a SELECT core that is not streamed (`runGrouped`), from its
+    joined rows `kept` in the plan's order: groups and aggregates, windows,
+    DISTINCT, the plan's order, LIMIT/OFFSET. -/
+def runRows (fuel : Nat) (q : QEnv) (distinct : Bool) (srcs : Array Src) (rcols : List ResultCol)
+    (kept : Array (Array Cur)) (cmeta : Array ColMeta) (groupBy : List Expr) (having : Option Expr)
+    (windows : List (Name × Window)) (orderBy : List OrderTerm) (lim : Option Nat) (off : Nat) :
+    M (Array ColMeta × Array (Array Value × Array Value)) :=
+  match fuel with
+  | 0 => outOfFuel
+  | fuel + 1 => do
+    let frameOf (cur : Array Cur) : Scope := { srcs, cur }
+    let withFrame (cur : Array Cur) (aliases : List (Name × Expr) := []) : QEnv :=
+      { q with env := { q.env with frames := { frameOf cur with aliases } :: q.env.frames, group := none } }
+    let exprs := rcols.filterMap fun | .expr e _ _ => some e | _ => none
+    let aliases := rcols.filterMap fun | .expr e (some a) _ => some (a, e) | _ => none
+    -- ORDER BY terms: a result column number, a result alias, or an expression
+    let obExpr (t : OrderTerm) : M Expr := do
+      let .mk e _ _ := t
+      match e with
+      | .lit (.int i) =>
+        if i < 1 || i > exprs.length then
+          err s!"ORDER BY term out of range - should be between 1 and {exprs.length}"
+        return exprs[(i - 1).toNat]!
+      | .col none none c =>
+        match aliases.find? (fun (a, _) => nameEq a c) with
+        | some (_, x) => return x
+        | none => return e
+      | _ => return e
+    let obExprs ← orderBy.mapM obExpr
+    let isAgg := !groupBy.isEmpty || exprs.any hasAgg || (having.map hasAgg).getD false || obExprs.any hasAgg
+    -- window calls become numbered placeholders, computed over the row contexts
+    let (wexprs, wcalls) := replaceWindows (exprs ++ obExprs)
+    let exprs := wexprs.take exprs.length
+    let obExprs := wexprs.drop exprs.length
+    let ctxs ← if isAgg then aggCtxs fuel q srcs kept exprs aliases groupBy having
+      else do
+        if having.isSome then err "HAVING clause on a non-aggregate query"
+        pure (kept.map fun cur => withFrame cur aliases)
+    windowOut fuel ctxs windows wcalls exprs obExprs distinct cmeta lim off
+
+/-- The output rows of a SELECT core (`runRows`) from the contexts of its
+    rows: window functions computed over them (rows come out in the windows'
+    sort order), result columns and sort keys, DISTINCT, the plan's order,
+    LIMIT/OFFSET. -/
+def windowOut (fuel : Nat) (ctxs : Array QEnv) (windows : List (Name × Window)) (wcalls : List Expr)
+    (exprs obExprs : List Expr) (distinct : Bool) (cmeta : Array ColMeta) (lim : Option Nat) (off : Nat) :
+    M (Array ColMeta × Array (Array Value × Array Value)) :=
+  match fuel with
+  | 0 => outOfFuel
+  | fuel + 1 => do
+    let mut out : Array (Array Value × Array Value) := #[]
+    -- window functions: each call's values; rows come out in the windows' sort order
+    let mut order := Array.range ctxs.size
+    let mut wvals : Array (Array Value) := #[]
+    for c in wcalls do
+      let (vs, ord) ← computeWindow fuel ctxs windows c
+      wvals := wvals.push vs
+      if !(match c with | .call _ _ _ _ _ _ (some (.mk none [] [] _)) => true | _ => false) then order := ord
+    for i in order do
+      let base := ctxs[i]!
+      let qi := { base with env := { base.env with params := (wvals.toList.zipIdx.map fun (vs, k) => (windowParamBase + k, vs[i]!)) ++ base.env.params } }
+      let vals ← exprs.toArray.mapM (evalExpr fuel qi)
+      let keys ← obExprs.toArray.mapM (evalExpr fuel qi)
+      out := out.push (vals, keys)
+    if distinct then out := dedupRows (cmeta.toList.map (·.coll)) out
+    -- the order of a SELECT's rows is the plan's (ORDER BY, applied
+    -- after, keeps this order among ties)
+    out ← chooseOrder out
+    out := out.extract off out.size
+    if let some l := lim then out := out.extract 0 l
+    return (cmeta, out)
+
+
+/-- The groups of an aggregate query (`runRows`), in order of their key, as
+    the contexts their result columns are evaluated in (the group's rows, and
+    the row bare columns are read from); HAVING applied. -/
+def aggCtxs (fuel : Nat) (q : QEnv) (srcs : Array Src) (kept : Array (Array Cur)) (exprs : List Expr)
+    (aliases : List (Name × Expr)) (groupBy : List Expr) (having : Option Expr) : M (Array QEnv) :=
+  match fuel with
+  | 0 => outOfFuel
+  | fuel + 1 => do
+    let frameOf (cur : Array Cur) : Scope := { srcs, cur }
+    let withFrame (cur : Array Cur) (aliases : List (Name × Expr) := []) : QEnv :=
+      { q with env := { q.env with frames := { frameOf cur with aliases } :: q.env.frames, group := none } }
+    let qm := withFrame (Array.replicate srcs.size none)
+    let mut ctxs : Array QEnv := #[]
+    -- groups, in order of their key
+    let mut groups : Array (Array Value × Array (Array Cur)) := #[]
+    let mut gindex : Std.HashMap String Nat := {}
+    for cur in kept do
+      let key ← groupBy.toArray.mapM fun g => do
+        let g' := match g with
+          | .lit (.int i) => (exprs[(i - 1).toNat]?).getD g
+          | _ => g
+        if hasAgg g' then err "aggregate functions are not allowed in the GROUP BY clause"
+        evalExpr fuel (withFrame cur aliases) g'
+      let gcolls := groupBy.map fun g => ((exprColl qm.env g).map (·.1)).getD .binary
+      let ck := canonKey gcolls key
+      match gindex.get? ck with
+      | some i => groups := groups.modify i fun (k, rs) => (k, rs.push cur)
+      | none =>
+        gindex := gindex.insert ck groups.size
+        groups := groups.push (key, #[cur])
+    if groupBy.isEmpty && groups.isEmpty then groups := #[(#[], #[])]
+    let gcolls := groupBy.map fun g => ((exprColl qm.env g).map (·.1)).getD .binary
+    if !groupBy.isEmpty then groups := stableSort (fun a b => lexCompare gcolls [] a.1 b.1) groups
+    -- the row bare columns are read from: the min/max row if there is exactly one
+    -- min()/max() aggregate, else the first row of the group (SQLite 3.54)
+    let minmax := exprs.filterMap fun e => match e with
+      | .call n d [a] false [] none none =>
+        if nameEq n "min" || nameEq n "max" then some (nameEq n "min", d, a) else none
+      | _ => none
+    for (_, grp) in groups do
+      if let some qg ← groupCtx fuel q srcs grp minmax aliases having then ctxs := ctxs.push qg
+    return ctxs
+
+/-- The context a group's result columns are evaluated in (`aggCtxs`): its
+    rows, and the row bare columns are read from (the min/max row if there is
+    exactly one min()/max() aggregate, `minmax`, else the first row of the
+    group, SQLite 3.54); none when HAVING rejects the group. -/
+def groupCtx (fuel : Nat) (q : QEnv) (srcs : Array Src) (grp : Array (Array Cur))
+    (minmax : List (Bool × Bool × Expr)) (aliases : List (Name × Expr)) (having : Option Expr) : M (Option QEnv) :=
+  match fuel with
+  | 0 => outOfFuel
+  | fuel + 1 => do
+    let frameOf (cur : Array Cur) : Scope := { srcs, cur }
+    let withFrame (cur : Array Cur) (aliases : List (Name × Expr) := []) : QEnv :=
+      { q with env := { q.env with frames := { frameOf cur with aliases } :: q.env.frames, group := none } }
+    let qm := withFrame (Array.replicate srcs.size none)
+    let mut rep : Array Cur := grp[0]?.getD (Array.replicate srcs.size none)
+    -- with one min()/max(), minmaxStep tells the accumulator when not to
+    -- load the bare columns: they come from each row until the first
+    -- non-NULL value, then only from rows that strictly improve it; a
+    -- DISTINCT duplicate skips the step itself, so its row is loaded
+    if minmax.length == 1 && !grp.isEmpty then
+      let (isMin, dist, a) := minmax[0]!
+      let coll := ((exprColl qm.env a).map (·.1)).getD .binary
+      let mut best : Option Value := none
+      let mut seen : Std.HashSet String := {}
+      for cur in grp do
+        let v ← evalExpr fuel (withFrame cur) a
+        if dist && !v.isNull then
+          let k := canonKey [coll] #[v]
+          if seen.contains k then rep := cur; continue
+          seen := seen.insert k
+        if v.isNull then
+          if best.isNone then rep := cur
+          continue
+        match best with
+        | none => best := some v; rep := cur
+        | some bv =>
+          let o := compareValues coll v bv
+          if (isMin && o == .lt) || (!isMin && o == .gt) then best := some v; rep := cur
+    let qg := { withFrame rep aliases with env := { (withFrame rep aliases).env with group := some grp } }
+    if let some h := having then
+      if !(← condHolds fuel qg h) then return none
+    return some qg
+
 
 def runSelect (fuel : Nat) (q : QEnv) (sel : Select) (cap : Bool := false) (stream : Bool := false) :
     M (Array ColMeta × Array (Array Value)) :=

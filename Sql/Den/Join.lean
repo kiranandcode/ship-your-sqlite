@@ -2,7 +2,8 @@
   SQLite's nested loops over the sources of a join (Phase 2.6), as a meaning
   function parameterised by the actions of each depth, and its monotonicity in
   those actions (so that the meaning functions that use it, whose actions
-  call back into the mutual recursion, are `partial_fixpoint`s).
+  call back into the mutual recursion, are `partial_fixpoint`s). The plan of
+  a join (`Sql.JoinPlan`) is the interpreter's.
 -/
 import Sql.Den.Domain
 import Sql.Select
@@ -10,62 +11,6 @@ import Sql.Select
 namespace Sql.Den
 
 open Sql Lean.Order
-
-/-- A join prepared for SQLite's nested loops (`joinPrepare`): the leaves
-    of the chain of inner joins, their sources, the rows of the table leaves
-    (in scan order; a table-valued function's are computed per partial row),
-    the nesting order (depth → leaf), each conjunct with the depth where the
-    last leaf it names is bound, and the result-column aliases. -/
-structure JoinPlan where
-  leaves : Array FromItem
-  leafSrcs : Array (Array Src)
-  leafRows : Array (Option (Array (Array Cur)))
-  nest : Array Nat
-  byDepth : List (Nat × Expr)
-  aliases : List (Name × Expr)
-
-namespace JoinPlan
-
-/-- The sources of all leaves, in FROM's order. -/
-def srcs (p : JoinPlan) : Array Src := p.leafSrcs.foldl (· ++ ·) #[]
-
-/-- Where each leaf's columns start in a row. -/
-def offsets (p : JoinPlan) : Array Nat :=
-  (p.leafSrcs.foldl (fun (acc : Array Nat × Nat) ss => (acc.1.push acc.2, acc.2 + ss.size)) (#[], 0)).1
-
-/-- The partial row with no leaf bound. -/
-def empty (p : JoinPlan) : Array Cur := Array.replicate p.srcs.size none
-
-/-- Bind leaf `k` to row `r` in a partial row. -/
-def place (p : JoinPlan) (cur : Array Cur) (k : Nat) (r : Array Cur) : Array Cur := Id.run do
-  let mut c := cur
-  for h : j in [0:r.size] do c := c.set! (p.offsets[k]! + j) r[j]
-  return c
-
-/-- The plan, the depth of each conjunct computed from the names it uses
-    (the leaves whose sources those names hit). -/
-def make (leaves : Array FromItem) (leafSrcs : Array (Array Src)) (leafRows : Array (Option (Array (Array Cur))))
-    (nest : Array Nat) (conds : List Expr) (aliases : List (Name × Expr)) : JoinPlan :=
-  let srcs := leafSrcs.foldl (· ++ ·) #[]
-  let leafOf : Array Nat := (leafSrcs.mapIdx fun i ss => Array.replicate ss.size i).foldl (· ++ ·) #[]
-  let leavesOf (e : Expr) : List Nat := Id.run do
-    let mut ls : List Nat := []
-    for (t, c) in exprRefs e do
-      for h : si in [0:srcs.size] do
-        let s := srcs[si]
-        let hit := match t with
-          | some tn => nameEq s.alias tn
-          | none => s.cols.any (fun (n, _, _) => nameEq n c) || (s.hasRowid && isRowidName c)
-        if hit && !ls.contains leafOf[si]! then ls := leafOf[si]! :: ls
-    return ls
-  let depthOf : Array Nat := Id.run do
-    let mut d := Array.replicate leaves.size 0
-    for h : i in [0:nest.size] do d := d.set! nest[i] i
-    return d
-  { leaves, leafSrcs, leafRows, nest, aliases,
-    byDepth := conds.map fun e => ((leavesOf e).foldl (fun m l => max m depthOf[l]!) 0, e) }
-
-end JoinPlan
 
 /-- An action's outcome as a value: its result, or the error it raised. -/
 def attempt {α : Type} (m : D α) : D (Except Err α) :=
@@ -140,5 +85,37 @@ theorem monotone_joinLoops {σ : Type} {γ : Type w} [Lean.Order.PartialOrder γ
         | exact ih (nL - (d + 1)) (by omega) (d + 1) rfl _ _
     · simp only [hd, if_false]
       exact monotone_const _
+
+/-- A join: its plan, then its loops from depth 0 (the interpreter's
+    `evalFromWhereS`). The result: the sources, `step`'s state, and the error
+    that ended the loops, if any. -/
+def joinRun {σ : Type} (prep : D JoinPlan) (rowsAt : JoinPlan → Nat → Array Cur → D (Array (Array Cur)))
+    (check : JoinPlan → Array Cur → Nat → D Bool) (init : σ)
+    (step : σ → Array Src → Array Cur → D (σ × Bool)) : D (Array Src × σ × Option Err) := do
+  let p ← prep
+  let (acc, _, failure) ← joinLoops p.leaves.size p.nest (rowsAt p) p.place (check p) (step · p.srcs ·) 0 p.empty init
+  return (p.srcs, acc, failure)
+
+/-- `joinRun` is monotone in its actions. -/
+@[partial_fixpoint_monotone]
+theorem monotone_joinRun {σ : Type} {γ : Type w} [Lean.Order.PartialOrder γ] (prep : γ → D JoinPlan)
+    (rowsAt : γ → JoinPlan → Nat → Array Cur → D (Array (Array Cur)))
+    (check : γ → JoinPlan → Array Cur → Nat → D Bool) (init : σ)
+    (step : γ → σ → Array Src → Array Cur → D (σ × Bool))
+    (hp : monotone prep) (hr : monotone rowsAt) (hc : monotone check) (hs : monotone step) :
+    monotone (fun x => joinRun (prep x) (rowsAt x) (check x) init (step x)) := by
+  unfold joinRun
+  apply monotone_bind
+  · exact hp
+  · apply monotone_of_monotone_apply
+    intro p
+    apply monotone_bind
+    · apply monotone_joinLoops
+      · exact monotone_apply p _ hr
+      · exact monotone_apply p _ hc
+      · apply monotone_of_monotone_apply; intro a
+        apply monotone_of_monotone_apply; intro c
+        exact monotone_apply c _ (monotone_apply p.srcs _ (monotone_apply a _ hs))
+    · exact monotone_const _
 
 end Sql.Den

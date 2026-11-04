@@ -27,76 +27,12 @@ rep('''    let x ← draw fun ch seed =>
 rep('''    let b ← draw fun ch seed => (⟨(Array.range n.toNat).map fun i => (ch.random seed (i + 1) % 256).toUInt8⟩ : ByteArray)
     return .blob b''', '''    let b ← anyOf fun (b : ByteArray) => b.size = n.toNat
     return .blob b''')
-rep('''        kept ← chooseOrder kept''', '''        kept ← permA kept''')
-rep('''        out ← chooseOrder out''', '''        out ← permA out''')
+rep('''    kept ← chooseOrder kept''', '''    kept ← permA kept''')
+rep('''    out ← chooseOrder out''', '''    out ← permA out''')
 open(p, 'w').write(s)
 
-# --- the join: SQLite's nested loops, without strategy ---
+# joinLoops, joinRun, attempt and their monotonicity: Sql/Den/Join.lean
 s = open(p).read()
-rep('''          leafRows := leafRows.push (some (← chooseOrder rs))''',
-    '''          leafRows := leafRows.push (some (← permA rs))''')
-i = s.index('def evalFromWhereS')
-a = s.index('      let srcs := leafSrcs.foldl (· ++ ·) #[]\n', i)
-b = s.index('      return (srcs, acc, failure)\n', i) + len('      return (srcs, acc, failure)\n')
-s = s[:a] + '''      let srcs := leafSrcs.foldl (· ++ ·) #[]
-      let nL := leaves.size
-      -- the leaf of each source position, and each leaf's first position
-      let leafOf : Array Nat := (leafSrcs.mapIdx fun i ss => Array.replicate ss.size i).foldl (· ++ ·) #[]
-      let offsets : Array Nat := (leafSrcs.foldl (fun (acc : Array Nat × Nat) ss => (acc.1.push acc.2, acc.2 + ss.size)) (#[], 0)).1
-      let conds := onConds ++ (where_.map conjuncts).getD []
-      -- the leaves an expression names (by the sources its names hit)
-      let leavesOf (e : Expr) : List Nat := Id.run do
-        let mut ls : List Nat := []
-        for (t, c) in exprRefs e do
-          for h : si in [0:srcs.size] do
-            let s := srcs[si]
-            let hit := match t with
-              | some tn => nameEq s.alias tn
-              | none => s.cols.any (fun (n, _, _) => nameEq n c) || (s.hasRowid && isRowidName c)
-            if hit && !ls.contains leafOf[si]! then ls := leafOf[si]! :: ls
-        return ls
-      -- the order of the loops (depth → leaf): any, as the plan picks; a
-      -- table-valued function's arguments name earlier leaves, so with one
-      -- the order is FROM's
-      let hasFn := leafRows.any (·.isNone)
-      let nest ← if hasFn then pure (Array.range nL) else permA (Array.range nL)
-      let depthOf : Array Nat := Id.run do
-        let mut d := Array.replicate nL 0
-        for h : i in [0:nest.size] do d := d.set! nest[i] i
-        return d
-      -- a conjunct is tested at the depth where the last leaf it names is bound
-      let byDepth := conds.map fun e => ((leavesOf e).foldl (fun m l => max m depthOf[l]!) 0, e)
-      let frameQ (cur : Array Cur) : QEnv :=
-        { q with env := { q.env with frames := { srcs, cur, aliases } :: q.env.frames, group := none } }
-      -- the conjuncts of depth d on a row, in an order the plan picks; the
-      -- first that does not hold rejects the row
-      let check (cur : Array Cur) (d : Nat) : D Bool := do
-        let order ← perm ((byDepth.filter (·.1 == d)).map (·.2))
-        for e in order do
-          if hasAgg e then err "misuse of aggregate function"
-          if !(← condHolds (frameQ cur) e) then return false
-        return true
-      let place (cur : Array Cur) (k : Nat) (r : Array Cur) : Array Cur := Id.run do
-        let mut c := cur
-        for h : j in [0:r.size] do c := c.set! (offsets[k]! + j) r[j]
-        return c
-      -- the rows of leaf `k` after the partial row `pre`
-      let rowsAt (k : Nat) (pre : Array Cur) : D (Array (Array Cur)) := do
-        match leafRows[k]! with
-        | some rs => return rs
-        | none =>
-          match leaves[k]! with
-          | .tableFn _ n args _ =>
-            let qp := { q with env := { q.env with frames := { srcs, cur := pre } :: q.env.frames } }
-            let vs ← args.mapM (evalExpr qp)
-            let rs ← tableFunction n (vs.zip (← args.mapM (argIsJson qp)))
-            return rs.map fun r => #[some r]
-          | _ => return #[]
-      let (acc, _, failure) ← joinLoops nL nest rowsAt place check (step · srcs ·) 0
-        (Array.replicate srcs.size none) init
-      return (srcs, acc, failure)
-''' + s[b:]
-# joinLoops, attempt and their monotonicity: Sql/Den/Join.lean
 s = s.replace('import Sql.Den.Domain', 'import Sql.Den.Join', 1)
 open(p, 'w').write(s)
 
@@ -164,7 +100,7 @@ open(p, 'w').write(s)
 # --- the join as a plan (data) and closures over it, run by joinLoops ---
 s = open(p).read()
 i = s.index('/-- FROM with WHERE: a chain of inner joins is evaluated as nested loops, each')
-j = s.index('/-- The rows of a named table, view or CTE, with its source description. -/')
+j = s.index('/-- A FROM clause joined and filtered by WHERE: its sources and rows. -/')
 s = s[:i] + '''/-- A join prepared for the loops: the leaves of the chain of inner joins
     with their sources and (for tables) rows in scan order, the nesting order,
     each conjunct with its depth, and where each leaf's columns start. -/
@@ -217,20 +153,8 @@ def joinCheck (q : QEnv) (p : JoinPlan) (cur : Array Cur) (d : Nat) : D Bool := 
   return true
 partial_fixpoint monotonicity by (try simp only []); repeat' monotonicity
 
-/-- A FROM clause joined and filtered by WHERE: its sources and rows. -/
-def evalFromWhere (q : QEnv) (f : FromItem) (where_ : Option Expr) (aliases : List (Name × Expr)) :
-    D (Array Src × Array (Array Cur)) := do
-  let p ← joinPrepare q f where_ aliases
-  let (rows, _, failure) ← joinLoops p.leaves.size p.nest (joinRowsAt q p) p.place (joinCheck q p)
-    (fun acc cur => pure (acc.push cur, true)) 0 p.empty (#[] : Array (Array Cur))
-  if let some e := failure then throw e
-  return (p.srcs, rows)
-partial_fixpoint monotonicity by (try simp only []); repeat' monotonicity
-
 ''' + s[j:]
-rep('''          let (srcs, a, failure) ← evalFromWhereS q f where_ aliases0 ({} : StreamAcc) step''',
-    '''          let p ← joinPrepare q f where_ aliases0
-          let srcs := p.srcs
-          let (a, _, failure) ← joinLoops p.leaves.size p.nest (joinRowsAt q p) p.place (joinCheck q p)
-            (step · srcs ·) 0 p.empty ({} : StreamAcc)''')
+# the interpreter's evalFromWhereS (plan, then loops) is joinRun here
+s, k = re.subn(r'evalFromWhereS q f where_ (\w+)', r'joinRun (joinPrepare q f where_ \1) (joinRowsAt q) (joinCheck q)', s)
+assert k == 2, k
 open(p, 'w').write(s)

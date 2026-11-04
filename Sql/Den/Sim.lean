@@ -443,6 +443,37 @@ theorem draw {α : Type} {ch : Choices} {P : α → Prop} (f : Choices → Nat �
     show (Except.ok (f c.choices c.prng), proj { c with prng := c.prng + 1 }) ∈ _
     exact mem_outcomes_lift.mpr ⟨_, hch ▸ hP c.prng, rfl⟩
 
+/-- An interpreter result that is an outcome of the denotation from every
+    state, without changing it. -/
+theorem of_mem {α : Type} {ch : Choices} {a : α} {n : D α} (h : ∀ d, (Except.ok a, d) ∈ n.outcomes d) :
+    Sim ch (Pure.pure a : M α) n where
+  exhausted_mono := fun _ _ h => h
+  choices_eq := fun _ h => h
+  sound := fun c _ _ => h (proj c)
+
+/-- The interpreter's order is one of the denotation's: the identity. -/
+theorem perm_self {α β : Type} {ch : Choices} {m : M β} {xs : List α} {g : List α → D β}
+    (h : Sim ch m (g xs)) : Sim ch m (Den.perm xs >>= g) where
+  exhausted_mono := h.exhausted_mono
+  choices_eq := h.choices_eq
+  sound := fun c hch hx => by
+    rw [mem_outcomes_bind]
+    exact ⟨(.ok xs, proj c), mem_outcomes_lift.mpr ⟨xs, List.Perm.refl _, rfl⟩, h.sound c hch hx⟩
+
+/-- A permutation of a permutation of `ys`. -/
+theorem chooseOrder_perm {α : Type} {ch : Choices} {xs ys : Array α} (hp : xs.toList.Perm ys.toList) :
+    Sim ch (Sql.chooseOrder xs) (Den.permA ys) where
+  exhausted_mono := fun c _ h => h
+  choices_eq := fun _ h => h
+  sound := fun c hch _ => by
+    show (Except.ok (permute (c.choices.order c.orderPos) xs), proj { c with orderPos := c.orderPos + 1 }) ∈
+      ((Den.perm ys.toList >>= fun l => Pure.pure l.toArray : D (Array α))).outcomes (proj c)
+    rw [mem_outcomes_bind]
+    refine ⟨(.ok (permute (c.choices.order c.orderPos) xs).toList, proj c), ?_, ?_⟩
+    · exact mem_outcomes_lift.mpr ⟨_, (permute_perm _ _).trans hp, rfl⟩
+    · simp only [Array.toArray_toList]
+      exact mem_outcomes_pure
+
 /-- Running out of fuel is simulated by anything (it ends the run's claim). -/
 theorem outOfFuel {α : Type} {ch : Choices} (n : D α) : Sim ch (Sql.outOfFuel : M α) n where
   exhausted_mono := fun _ _ _ => rfl
@@ -474,7 +505,12 @@ elab "sim_by_head" : tactic => withMainContext do
   -- and the denotation side's head too, in this goal only
   if let .fvar fv := args[2]!.getAppFn then
     let some d ← fv.findDecl? | throwError "sim_by_head: unknown local"
-    unless d.isLet do throwError "sim_by_head: local {d.userName} has no value"
+    unless d.isLet do
+      -- a function parameter `f`: its hypothesis `h_f`
+      let some h := (← getLCtx).findFromUserName? (.mkSimple ("h_" ++ d.userName.toString))
+        | throwError "sim_by_head: local {d.userName} has no value"
+      evalTactic (← `(tactic| apply $(mkIdent h.userName)))
+      return
     let mut fvs := #[fv]
     if let .fvar gv := args[3]!.getAppFn then
       if let some d' ← gv.findDecl? then
@@ -577,6 +613,8 @@ macro_rules
       | ((with_reducible apply Sim.mapM_array_eq); rfl; intro _)
       | ((with_reducible apply Sim.foldlM_list_eq); rfl; rfl; intro _ _)
       | sim_zeta_discr
+      -- a hypothesis a lemma asks for (a simulation for all arguments)
+      | intro _
       -- the interpreter's match (or if); the hypothesis it gives rewrites
       -- the denotation's (up to defeq: their matchers are distinct constants)
       | (split <;> (try simp only [*]) <;> (try (rename_i h; first | sim_rw_match h | erw [h]))

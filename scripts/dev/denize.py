@@ -2,7 +2,7 @@
 """Phase 2.6 helper: derive the denotational counterpart of an interpreter
 module (a starting point, edited by hand afterwards).
 
-    scripts/dev/denize.py SRC.lean OUT.lean [--names a,b,...]
+    scripts/dev/denize.py SRC.lean OUT.lean [--skip a,b,...]
 
 Keeps the definitions of SRC that are monadic (`M`) or take fuel, with their
 doc comments and mutual blocks; drops the pure ones (the denotation uses
@@ -11,11 +11,14 @@ them from namespace `Sql`). In what it keeps:
     fuel + 1 =>` wrapper go, and so does the `fuel` argument of calls;
   * the monad `M` becomes `D`;
   * every definition of a mutual block gets `partial_fixpoint`.
-The result is in namespace `Sql.Den` (so names resolve to the denotation's
+Definitions named by --skip (the executable's strategy) are dropped. The
+result is in namespace `Sql.Den` (so names resolve to the denotation's
 definitions first, then to the interpreter's pure ones)."""
 import re, sys
 
 src, out = sys.argv[1], sys.argv[2]
+# definitions with no counterpart in the denotation (the executable's strategy)
+skip = set(sys.argv[sys.argv.index('--skip') + 1].split(',')) if '--skip' in sys.argv else set()
 text = open(src).read()
 lines = text.split('\n')
 
@@ -66,6 +69,8 @@ for (a, b) in items:
                 kept.append(('mutual', body))
         continue
     if re.match(r'^(/--|partial def |def )', first) and is_monadic(blk.split('\ndef ')[-1] if first.startswith('/--') else blk):
+        m = re.search(r'^(?:partial )?def ([\w.]+)', blk, re.M)
+        if m and m.group(1) in skip: continue
         kept.append(('def', blk))
 
 for kind, blk in kept:

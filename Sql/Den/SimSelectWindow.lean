@@ -17,7 +17,7 @@ theorem sim_windowRowValue_row_number {ch : Choices} {fuel : Nat} (ih : SelectSi
     (h : name = "row_number") :
     Sim ch (Sql.windowRowValue (fuel + 1) ctxs name n args star ord frame okeys ocolls odirs argv pass p pi j)
       (Den.windowRowValue ctxs name n args star ord frame okeys ocolls odirs argv pass p pi j) := by
-  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowRowValue, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
+  select_ih ih
   subst h
   unfold Sql.windowRowValue Den.windowRowValue
   sim
@@ -29,7 +29,7 @@ theorem sim_windowRowValue_rank {ch : Choices} {fuel : Nat} (ih : SelectSim ch f
     (h : name = "rank") :
     Sim ch (Sql.windowRowValue (fuel + 1) ctxs name n args star ord frame okeys ocolls odirs argv pass p pi j)
       (Den.windowRowValue ctxs name n args star ord frame okeys ocolls odirs argv pass p pi j) := by
-  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowRowValue, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
+  select_ih ih
   subst h
   unfold Sql.windowRowValue Den.windowRowValue
   sim
@@ -41,7 +41,7 @@ theorem sim_windowRowValue_dense_rank {ch : Choices} {fuel : Nat} (ih : SelectSi
     (h : name = "dense_rank") :
     Sim ch (Sql.windowRowValue (fuel + 1) ctxs name n args star ord frame okeys ocolls odirs argv pass p pi j)
       (Den.windowRowValue ctxs name n args star ord frame okeys ocolls odirs argv pass p pi j) := by
-  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowRowValue, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
+  select_ih ih
   subst h
   unfold Sql.windowRowValue Den.windowRowValue
   sim
@@ -53,7 +53,7 @@ theorem sim_windowRowValue_percent_rank {ch : Choices} {fuel : Nat} (ih : Select
     (h : name = "percent_rank") :
     Sim ch (Sql.windowRowValue (fuel + 1) ctxs name n args star ord frame okeys ocolls odirs argv pass p pi j)
       (Den.windowRowValue ctxs name n args star ord frame okeys ocolls odirs argv pass p pi j) := by
-  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowRowValue, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
+  select_ih ih
   subst h
   unfold Sql.windowRowValue Den.windowRowValue
   sim
@@ -65,7 +65,7 @@ theorem sim_windowRowValue_cume_dist {ch : Choices} {fuel : Nat} (ih : SelectSim
     (h : name = "cume_dist") :
     Sim ch (Sql.windowRowValue (fuel + 1) ctxs name n args star ord frame okeys ocolls odirs argv pass p pi j)
       (Den.windowRowValue ctxs name n args star ord frame okeys ocolls odirs argv pass p pi j) := by
-  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowRowValue, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
+  select_ih ih
   subst h
   unfold Sql.windowRowValue Den.windowRowValue
   sim
@@ -77,7 +77,7 @@ theorem sim_windowRowValue_ntile {ch : Choices} {fuel : Nat} (ih : SelectSim ch 
     (h : name = "ntile") :
     Sim ch (Sql.windowRowValue (fuel + 1) ctxs name n args star ord frame okeys ocolls odirs argv pass p pi j)
       (Den.windowRowValue ctxs name n args star ord frame okeys ocolls odirs argv pass p pi j) := by
-  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowRowValue, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
+  select_ih ih
   subst h
   unfold Sql.windowRowValue Den.windowRowValue
   sim
@@ -89,7 +89,7 @@ theorem sim_windowRowValue_lag {ch : Choices} {fuel : Nat} (ih : SelectSim ch fu
     (h : name = "lag") :
     Sim ch (Sql.windowRowValue (fuel + 1) ctxs name n args star ord frame okeys ocolls odirs argv pass p pi j)
       (Den.windowRowValue ctxs name n args star ord frame okeys ocolls odirs argv pass p pi j) := by
-  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowRowValue, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
+  select_ih ih
   subst h
   unfold Sql.windowRowValue Den.windowRowValue
   sim
@@ -101,7 +101,7 @@ theorem sim_windowRowValue_lead {ch : Choices} {fuel : Nat} (ih : SelectSim ch f
     (h : name = "lead") :
     Sim ch (Sql.windowRowValue (fuel + 1) ctxs name n args star ord frame okeys ocolls odirs argv pass p pi j)
       (Den.windowRowValue ctxs name n args star ord frame okeys ocolls odirs argv pass p pi j) := by
-  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowRowValue, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
+  select_ih ih
   subst h
   unfold Sql.windowRowValue Den.windowRowValue
   sim
@@ -113,7 +113,7 @@ theorem sim_windowRowValue_first_value {ch : Choices} {fuel : Nat} (ih : SelectS
     (h : name = "first_value") :
     Sim ch (Sql.windowRowValue (fuel + 1) ctxs name n args star ord frame okeys ocolls odirs argv pass p pi j)
       (Den.windowRowValue ctxs name n args star ord frame okeys ocolls odirs argv pass p pi j) := by
-  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowRowValue, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
+  select_ih ih
   subst h
   unfold Sql.windowRowValue Den.windowRowValue
   sim
@@ -125,7 +125,7 @@ theorem sim_windowRowValue_last_value {ch : Choices} {fuel : Nat} (ih : SelectSi
     (h : name = "last_value") :
     Sim ch (Sql.windowRowValue (fuel + 1) ctxs name n args star ord frame okeys ocolls odirs argv pass p pi j)
       (Den.windowRowValue ctxs name n args star ord frame okeys ocolls odirs argv pass p pi j) := by
-  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowRowValue, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
+  select_ih ih
   subst h
   unfold Sql.windowRowValue Den.windowRowValue
   sim
@@ -137,7 +137,7 @@ theorem sim_windowRowValue_nth_value {ch : Choices} {fuel : Nat} (ih : SelectSim
     (h : name = "nth_value") :
     Sim ch (Sql.windowRowValue (fuel + 1) ctxs name n args star ord frame okeys ocolls odirs argv pass p pi j)
       (Den.windowRowValue ctxs name n args star ord frame okeys ocolls odirs argv pass p pi j) := by
-  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowRowValue, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
+  select_ih ih
   subst h
   unfold Sql.windowRowValue Den.windowRowValue
   sim
@@ -159,7 +159,7 @@ theorem sim_windowRowValue_default {ch : Choices} {fuel : Nat} (ih : SelectSim c
     (h10 : name ≠ "nth_value") :
     Sim ch (Sql.windowRowValue (fuel + 1) ctxs name n args star ord frame okeys ocolls odirs argv pass p pi j)
       (Den.windowRowValue ctxs name n args star ord frame okeys ocolls odirs argv pass p pi j) := by
-  obtain ⟨h_evalExpr, h_compareRows, h_valueOf, h_evalAgg, h_aggFinish, h_callAgg, h_argIsJson, h_callFn, h_callFnST, h_condJump, h_condHolds, h_evalExprST, h_resolveWindow, h_computeWindow, h_windowRowValue, h_windowPartition, h_evalFromWhere, h_namedSource, h_cteRows, h_evalFrom, h_viewCols, h_tableFnSrc, h_tableFunction, h_expandCols, h_runCore, h_runSelect, h_limitOffset, h_runSimple, h_runUnionAll, h_runCompound⟩ := ih
+  select_ih ih
   unfold Sql.windowRowValue Den.windowRowValue
   sim
 
