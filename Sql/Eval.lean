@@ -87,6 +87,9 @@ structure Ctx where
   orderPos : Nat := 0
   /-- some fuel ran out (the run is not a derivation, `Sql.Derives`) -/
   exhausted : Bool := false
+  /-- how many PRNG draws (`random()`, the random rowid) were made: the
+      index of the next `Choices.random`/`Choices.rowid` -/
+  prng : Nat := 0
   /-- json.c's cache of parsed JSON texts, per statement (`Sql.Json`) -/
   jsonCache : Json.Cache := {}
   deriving Inhabited
@@ -94,6 +97,11 @@ structure Ctx where
 abbrev M := ExceptT Err (StateM Ctx)
 
 def err {α} (msg : String) (code : Nat := SQLITE_ERROR) : M α := throw { code, msg }
+
+/-- Back to a saved state with database `db`, keeping what is not rolled
+    back: the choices made so far and whether some fuel ran out. -/
+def restoreTo (saved : Ctx) (db : Db) : M Unit :=
+  modify fun c => { saved with db, orderPos := c.orderPos, exhausted := c.exhausted, prng := c.prng }
 
 /-- The fuel `runStmt` gives the evaluator: a bound on the depth of its
     recursion (nested expressions, subqueries, triggers) and on the rounds of a

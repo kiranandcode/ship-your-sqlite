@@ -355,13 +355,13 @@ def insertRow (fuel : Nat) (tname : Name) (vals : Array Value) (rowidV : Option 
       -- OP_NewRowid: up to 100 random candidates in [1, 2^62]; none unused
       -- is SQLITE_FULL
       let c ← get
-      let mut k := c.db.prng
+      let mut k := c.prng
       let mut found : Option Int := none
       for _ in [0:100] do
         k := k + 1
         let cand : Int := (c.choices.rowid k % 2 ^ 62 : Nat) + 1
         if !(t.rows.any (·.rowid == cand)) then found := some cand; break
-      set { c with db := { c.db with prng := k } }
+      set { c with prng := k }
       match found with
       | some cand => pure cand
       | none => err "database or disk is full" 13
@@ -1308,7 +1308,7 @@ def runStmt (fuel : Nat) (s : Stmt) : M (Except Err (Array (Array Value))) := do
       if isDml && fkOrphans db > before then
         -- a DELETE's rows were deleted (and counted) before the check failed
         let counted := match s with | .delete .. => db.changes | _ => 0
-        set { saved with db := { saved.db with changes := 0, totalChanges := saved.db.totalChanges + counted } }
+        restoreTo saved { saved.db with changes := 0, totalChanges := saved.db.totalChanges + counted }
         return .error { code := SQLITE_CONSTRAINT_FOREIGNKEY, msg := "FOREIGN KEY constraint failed" }
     -- schema cookie, pages, table hash order (Sql.Pragma)
     setDb (Pragma.afterStmt saved.db (← getDb) s)
@@ -1330,8 +1330,7 @@ def runStmt (fuel : Nat) (s : Stmt) : M (Except Err (Array (Array Value))) := do
                           inTxn := false, savepoints := [] }
         else saved.db
       -- the choices made and the fuel spent are not rolled back
-      set { saved with db := Pragma.keepModules failed.db { base with changes },
-                       orderPos := failed.orderPos, exhausted := failed.exhausted }
+      restoreTo saved (Pragma.keepModules failed.db { base with changes })
     return .error e
 
 /-- What a run produces: the driver's output, and whether some fuel ran out

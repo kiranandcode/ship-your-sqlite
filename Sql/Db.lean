@@ -156,8 +156,6 @@ structure Db where
   pragmaVals : List (String × Value) := []
   /-- attached databases, in ATTACH order -/
   attached : List Name := []
-  /-- state of the executable's stand-in for SQLite's PRNG (`random()`) -/
-  prng : Nat := 0
   /-- the table hash of each loaded schema, by lower-case database name;
       absent: the schema is (re)loaded from `sqlite_schema` when next needed -/
   tblHash : List (String × TblHash) := []

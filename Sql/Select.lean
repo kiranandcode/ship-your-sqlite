@@ -1386,8 +1386,8 @@ def scalarFn (fuel : Nat) (n : Name) (vs : List Value) (colls : List (Option (Co
       | "random" =>
         if nargs != 0 then wrong
         let c ← get
-        let seed := c.db.prng
-        set { c with db := { c.db with prng := seed + 1 } }
+        let seed := c.prng
+        set { c with prng := seed + 1 }
         let x : Nat := c.choices.random seed 0 % 2 ^ 64
         return .int (if x ≥ 2 ^ 63 then (x : Int) - 2 ^ 64 else x)
       | "randomblob" =>
@@ -1395,8 +1395,8 @@ def scalarFn (fuel : Nat) (n : Name) (vs : List Value) (colls : List (Option (Co
         let n := max 1 a0.toInt
         if n > maxLength then err "string or blob too big" SQLITE_TOOBIG
         let c ← get
-        let seed := c.db.prng
-        set { c with db := { c.db with prng := seed + 1 } }
+        let seed := c.prng
+        set { c with prng := seed + 1 }
         return .blob ⟨(Array.range n.toNat).map fun i => (c.choices.random seed (i + 1) % 256).toUInt8⟩
       | "changes" => return .int (← getDb).changes
       | "total_changes" => return .int (← getDb).totalChanges
@@ -1746,7 +1746,7 @@ def evalFromWhereS {σ : Type} (fuel : Nat) (q : QEnv) (f : FromItem) (where_ : 
                 pure (some n))
               (fun _ => pure none)
             if let some n := r then sizes := sizes.set! k n
-        set saved
+        restoreTo saved saved.db
       let sizesNow := sizes
       let size (k : Nat) : Nat := sizesNow[k]!
       let nest0 : Array Nat := Id.run do

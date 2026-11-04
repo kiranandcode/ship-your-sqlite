@@ -154,6 +154,10 @@ def anyOf {α : Type} (p : α → Prop) : D α := liftM (Nd.any p : Nd _)
 /-- Any permutation of an array. -/
 def permA {α : Type} (xs : Array α) : D (Array α) := do return (← perm xs.toList).toArray
 
+/-- Back to a saved state with database `db` (the interpreter's
+    `Sql.restoreTo`, which also keeps its oracle's counters). -/
+def restoreTo (saved : DCtx) (db : Db) : D Unit := set { saved with db }
+
 /-- An error (as the interpreter's `Sql.err`). -/
 def err {α : Type} (msg : String) (code : Nat := SQLITE_ERROR) : D α := throw { code, msg }
 

@@ -1041,7 +1041,7 @@ def runStmt (s : Stmt) : D (Except Err (Array (Array Value))) := do
       if isDml && fkOrphans db > before then
         -- a DELETE's rows were deleted (and counted) before the check failed
         let counted := match s with | .delete .. => db.changes | _ => 0
-        set { saved with db := { saved.db with changes := 0, totalChanges := saved.db.totalChanges + counted } }
+        restoreTo saved { saved.db with changes := 0, totalChanges := saved.db.totalChanges + counted }
         return .error { code := SQLITE_CONSTRAINT_FOREIGNKEY, msg := "FOREIGN KEY constraint failed" }
     -- schema cookie, pages, table hash order (Sql.Pragma)
     setDb (Pragma.afterStmt saved.db (← getDb) s)
@@ -1062,7 +1062,8 @@ def runStmt (s : Stmt) : D (Except Err (Array (Array Value))) := do
           { saved.db with main := (saved.db.savepoints.getLast?.map (·.2)).getD saved.db.main,
                           inTxn := false, savepoints := [] }
         else saved.db
-      set { saved with db := Pragma.keepModules failed.db { base with changes } }
+      -- the choices made and the spent are not rolled back
+      restoreTo saved (Pragma.keepModules failed.db { base with changes })
     return .error e
 
 
