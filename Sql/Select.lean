@@ -113,64 +113,58 @@ def conjuncts : Expr → List Expr
 mutual
 /-- Column names referred to anywhere in an expression, subqueries included
     (qualifier, name). Conservative: used only to delay a conjunct. -/
-def exprRefs.go (k : Nat)  (x : Expr) : List (Option Name × Name) :=
-  match k with
-  | 0 => []
-  | k + 1 =>
+def exprRefs (x : Expr) : List (Option Name × Name) :=
   match x with
   | .col _ t c => [(t, c)]
   | .dqcol c => [(none, c)]
-  | .unop _ e | .collate e _ | .cast e _ | .isNull _ e => (exprRefs.go k) e
-  | .binop _ a b => (exprRefs.go k) a ++ (exprRefs.go k) b
-  | .between _ a b c => (exprRefs.go k) a ++ (exprRefs.go k) b ++ (exprRefs.go k) c
-  | .inList _ e l => (exprRefs.go k) e ++ l.flatMap (exprRefs.go k)
-  | .inSelect _ e q => (exprRefs.go k) e ++ (selectRefs.go k) q
-  | .inTable _ e _ _ a => (exprRefs.go k) e ++ a.flatMap (exprRefs.go k)
-  | .like _ _ a b c => (exprRefs.go k) a ++ (exprRefs.go k) b ++ (c.map (exprRefs.go k)).getD []
-  | .case_ b ws e => (b.map (exprRefs.go k)).getD [] ++ ws.flatMap (fun (x, y) => (exprRefs.go k) x ++ (exprRefs.go k) y) ++ (e.map (exprRefs.go k)).getD []
-  | .exists_ q | .subquery q => (selectRefs.go k) q
-  | .row l => l.flatMap (exprRefs.go k)
-  | .call _ _ args _ ob f _ => args.flatMap (exprRefs.go k) ++ ob.flatMap (fun (.mk e _ _) => (exprRefs.go k) e) ++ (f.map (exprRefs.go k)).getD []
-  | .raise _ m => (m.map (exprRefs.go k)).getD []
+  | .unop _ e | .collate e _ | .cast e _ | .isNull _ e => exprRefs e
+  | .binop _ a b => exprRefs a ++ exprRefs b
+  | .between _ a b c => exprRefs a ++ exprRefs b ++ exprRefs c
+  | .inList _ e l => exprRefs e ++ l.attach.flatMap fun ⟨a, _⟩ => exprRefs a
+  | .inSelect _ e q => exprRefs e ++ selectRefs q
+  | .inTable _ e _ _ a => exprRefs e ++ a.attach.flatMap fun ⟨x, _⟩ => exprRefs x
+  | .like _ _ a b c => exprRefs a ++ exprRefs b ++ (match c with | some c => exprRefs c | none => [])
+  | .case_ b ws e => (match b with | some b => exprRefs b | none => []) ++
+      ws.attach.flatMap (fun ⟨(x, y), _⟩ => exprRefs x ++ exprRefs y) ++ (match e with | some e => exprRefs e | none => [])
+  | .exists_ q | .subquery q => selectRefs q
+  | .row l => l.attach.flatMap fun ⟨a, _⟩ => exprRefs a
+  | .call _ _ args _ ob f _ => args.attach.flatMap (fun ⟨a, _⟩ => exprRefs a) ++
+      ob.attach.flatMap (fun ⟨.mk e _ _, _⟩ => exprRefs e) ++ (match f with | some f => exprRefs f | none => [])
+  | .raise _ m => (match m with | some m => exprRefs m | none => [])
   | _ => []
+termination_by sizeOf x
+decreasing_by syntax_wf
 
-def selectRefs.go (k : Nat)  (x : Select) : List (Option Name × Name) :=
-  match k with
-  | 0 => []
-  | k + 1 =>
+def selectRefs (x : Select) : List (Option Name × Name) :=
   match x with
   | .mk ctes _ first rest ob lim off =>
-    ctes.flatMap (fun (.mk _ _ _ q) => (selectRefs.go k) q) ++ (coreRefs.go k) first ++ rest.flatMap (fun (_, c) => (coreRefs.go k) c) ++
-    ob.flatMap (fun (.mk e _ _) => (exprRefs.go k) e) ++ (lim.map (exprRefs.go k)).getD [] ++ (off.map (exprRefs.go k)).getD []
+    ctes.attach.flatMap (fun ⟨.mk _ _ _ q, _⟩ => selectRefs q) ++ coreRefs first ++
+    rest.attach.flatMap (fun ⟨(_, c), _⟩ => coreRefs c) ++
+    ob.attach.flatMap (fun ⟨.mk e _ _, _⟩ => exprRefs e) ++ (match lim with | some l => exprRefs l | none => []) ++
+    (match off with | some o => exprRefs o | none => [])
+termination_by sizeOf x
+decreasing_by syntax_wf
 
-def coreRefs.go (k : Nat)  (x : SelectCore) : List (Option Name × Name) :=
-  match k with
-  | 0 => []
-  | k + 1 =>
+def coreRefs (x : SelectCore) : List (Option Name × Name) :=
   match x with
-  | .values rows => rows.flatten.flatMap (exprRefs.go k)
+  | .values rows => rows.flatten.attach.flatMap fun ⟨e, _⟩ => exprRefs e
   | .select _ cols f w g h _ =>
-    cols.flatMap (fun | .expr e _ _ => (exprRefs.go k) e | _ => []) ++ (f.map (fromRefs.go k)).getD [] ++
-    (w.map (exprRefs.go k)).getD [] ++ g.flatMap (exprRefs.go k) ++ (h.map (exprRefs.go k)).getD []
+    cols.attach.flatMap (fun ⟨c, _⟩ => match c with | .expr e _ _ => exprRefs e | _ => []) ++
+    (match f with | some f => fromRefs f | none => []) ++
+    (match w with | some w => exprRefs w | none => []) ++ g.attach.flatMap (fun ⟨e, _⟩ => exprRefs e) ++
+    (match h with | some h => exprRefs h | none => [])
+termination_by sizeOf x
+decreasing_by syntax_wf
 
-def fromRefs.go (k : Nat)  (x : FromItem) : List (Option Name × Name) :=
-  match k with
-  | 0 => []
-  | k + 1 =>
+def fromRefs (x : FromItem) : List (Option Name × Name) :=
   match x with
-  | .tableFn _ _ args _ => args.flatMap (exprRefs.go k)
-  | .subquery q _ => (selectRefs.go k) q
-  | .join l _ _ r on _ => (fromRefs.go k) l ++ (fromRefs.go k) r ++ (on.map (exprRefs.go k)).getD []
+  | .tableFn _ _ args _ => args.attach.flatMap fun ⟨a, _⟩ => exprRefs a
+  | .subquery q _ => selectRefs q
+  | .join l _ _ r on _ => fromRefs l ++ fromRefs r ++ (match on with | some o => exprRefs o | none => [])
   | _ => []
+termination_by sizeOf x
+decreasing_by syntax_wf
 end
-
-def fromRefs (x : FromItem) : List (Option Name × Name) := fromRefs.go syntaxFuel x
-
-def coreRefs (x : SelectCore) : List (Option Name × Name) := coreRefs.go syntaxFuel x
-
-def selectRefs (x : Select) : List (Option Name × Name) := selectRefs.go syntaxFuel x
-
-def exprRefs (x : Expr) : List (Option Name × Name) := exprRefs.go syntaxFuel x
 
 /-! ### sum(), total(), avg(): SQLite's SumCtx (integer sum until a REAL or an
 overflow, then Kahan-Babuska-Neumaier compensated summation; sqlite3.c sumStep) -/
@@ -271,32 +265,46 @@ def checkArity (n : Name) (k : Nat) : M Unit := do
   let ok := if low == "ifnull" then k == 2 else k ≥ 2
   if !ok then err s!"wrong number of arguments to function {n}()"
 
+/-- `replaceWindows` on one expression. -/
+def replaceWindowsGo (e : Expr) : StateM (Array Expr) Expr := do
+  match e with
+  | .call n d args st ob f (some w) =>
+    let i := (← get).size
+    modify (·.push (.call n d args st ob f (some w)))
+    return .param "__window" (windowParamBase + i)
+  | .call n d args st ob f none => return .call n d (← args.attach.mapM fun ⟨a, _⟩ => replaceWindowsGo a) st ob f none
+  | .unop o a => return .unop o (← replaceWindowsGo a)
+  | .binop o a b => return .binop o (← replaceWindowsGo a) (← replaceWindowsGo b)
+  | .collate a c => return .collate (← replaceWindowsGo a) c
+  | .cast a t => return .cast (← replaceWindowsGo a) t
+  | .isNull ng a => return .isNull ng (← replaceWindowsGo a)
+  | .between ng a b c => return .between ng (← replaceWindowsGo a) (← replaceWindowsGo b) (← replaceWindowsGo c)
+  | .inList ng a l => return .inList ng (← replaceWindowsGo a) (← l.attach.mapM fun ⟨x, _⟩ => replaceWindowsGo x)
+  | .like o ng a b c =>
+    let a' ← replaceWindowsGo a
+    let b' ← replaceWindowsGo b
+    let c' ← match c with
+      | some c => some <$> replaceWindowsGo c
+      | none => pure none
+    return .like o ng a' b' c'
+  | .case_ b ws el =>
+    let b' ← match b with
+      | some b => some <$> replaceWindowsGo b
+      | none => pure none
+    let ws' ← ws.attach.mapM fun ⟨(x, y), _⟩ => do pure (← replaceWindowsGo x, ← replaceWindowsGo y)
+    let el' ← match el with
+      | some el => some <$> replaceWindowsGo el
+      | none => pure none
+    return .case_ b' ws' el'
+  | .row l => return .row (← l.attach.mapM fun ⟨x, _⟩ => replaceWindowsGo x)
+  | x => return x
+termination_by e
+decreasing_by syntax_wf
+
 /-- Replace each window-function call (outside subqueries) by a numbered
     parameter; returns the rewritten expressions and the calls in order. -/
 def replaceWindows (es : List Expr) : List Expr × List Expr :=
-  -- bounded by syntaxFuel (see its comment); exhaustion leaves the expression as is
-  let rec go (k : Nat) (e : Expr) : StateM (Array Expr) Expr := do
-    match k with
-    | 0 => return e
-    | k + 1 =>
-    match e with
-    | .call n d args st ob f (some w) =>
-      let i := (← get).size
-      modify (·.push (.call n d args st ob f (some w)))
-      return .param "__window" (windowParamBase + i)
-    | .call n d args st ob f none => return .call n d (← args.mapM (go k)) st ob f none
-    | .unop o a => return .unop o (← go k a)
-    | .binop o a b => return .binop o (← go k a) (← go k b)
-    | .collate a c => return .collate (← go k a) c
-    | .cast a t => return .cast (← go k a) t
-    | .isNull ng a => return .isNull ng (← go k a)
-    | .between ng a b c => return .between ng (← go k a) (← go k b) (← go k c)
-    | .inList ng a l => return .inList ng (← go k a) (← l.mapM (go k))
-    | .like o ng a b c => return .like o ng (← go k a) (← go k b) (← c.mapM (go k))
-    | .case_ b ws el => return .case_ (← b.mapM (go k)) (← ws.mapM fun (x, y) => do pure (← go k x, ← go k y)) (← el.mapM (go k))
-    | .row l => return .row (← l.mapM (go k))
-    | x => return x
-  let (es', calls) := (es.mapM (go syntaxFuel)).run #[]
+  let (es', calls) := (es.mapM replaceWindowsGo).run #[]
   (es', calls.toList)
 
 /-- The index of the argument iif(c1, v1, c2, v2, …, else) returns. -/
@@ -362,29 +370,23 @@ def resultName (q : QEnv) (srcs : Array Src) : ResultCol → Name
 
 mutual
 /-- Does a select core refer to table name `n` in its FROM (directly)? -/
-def coreRefersF (k : Nat) (n : Name) (c : SelectCore) : Bool :=
-  match k with
-  | 0 => false
-  | k + 1 =>
+def coreRefers (n : Name) (c : SelectCore) : Bool :=
   match c with
-  | .select _ _ (some f) _ _ _ _ => fromRefersF k n f
+  | .select _ _ (some f) _ _ _ _ => fromRefers n f
   | _ => false
+termination_by sizeOf c
+decreasing_by syntax_wf
 
-
-def fromRefersF (k : Nat) (n : Name) (f : FromItem) : Bool :=
-  match k with
-  | 0 => false
-  | k + 1 =>
+/-- Does a FROM clause refer to table name `n` (directly, or in a subquery's FROM)? -/
+def fromRefers (n : Name) (f : FromItem) : Bool :=
   match f with
   | .table none m _ _ => nameEq m n
-  | .join l _ _ r _ _ => fromRefersF k n l || fromRefersF k n r
-  | .subquery (.mk _ _ c rest _ _ _) _ => coreRefersF k n c || rest.any (fun (_, x) => coreRefersF k n x)
+  | .join l _ _ r _ _ => fromRefers n l || fromRefers n r
+  | .subquery (.mk _ _ c rest _ _ _) _ => coreRefers n c || rest.attach.any (fun ⟨(_, x), _⟩ => coreRefers n x)
   | _ => false
-
+termination_by sizeOf f
+decreasing_by syntax_wf
 end
-
-def coreRefers (n : Name) (c : SelectCore) : Bool := coreRefersF syntaxFuel n c
-def fromRefers (n : Name) (f : FromItem) : Bool := fromRefersF syntaxFuel n f
 
 mutual
 /-- The sources of a FROM clause, as far as affinities go: tables, views,
@@ -480,25 +482,6 @@ def truthConstOf (env : Env) : Expr → Option Bool
     then some (nameEq c "true") else none
   | _ => none
 
-/-- An expression without function calls, subqueries, RAISE or parameters
-    of windows: its value depends on the row only, and evaluating it changes
-    no state (so a repeated evaluation can be remembered). -/
-def pureExprK (k : Nat) (e : Expr) : Bool :=
-  match k with
-  | 0 => false
-  | k + 1 =>
-  match e with
-  | .lit _ | .col .. | .dqcol _ => true
-  | .unop _ a | .collate a _ | .cast a _ | .isNull _ a => pureExprK k a
-  | .binop _ a b => pureExprK k a && pureExprK k b
-  | .between _ a b c => pureExprK k a && pureExprK k b && pureExprK k c
-  | .inList _ a l => pureExprK k a && l.all (pureExprK k)
-  | .like _ _ a b c => pureExprK k a && pureExprK k b && c.all (pureExprK k)
-  | .case_ b ws el => b.all (pureExprK k) && ws.all (fun (x, y) => pureExprK k x && pureExprK k y) && el.all (pureExprK k)
-  | .row l => l.all (pureExprK k)
-  | _ => false
-
-def pureExpr (e : Expr) : Bool := pureExprK syntaxFuel e
 
 /-- `replace(s, pat, rep)` on bytes (pat nonempty): each occurrence of `pat`
     from the left replaced by `rep` (`k` bounds the steps: the length of `s`). -/
@@ -592,51 +575,51 @@ def alwaysTF (env : Env) : Expr → Option Bool
     then some (nameEq c "true") else none
   | _ => none
 
-/-- `sqlite3ExprSimplifiedAndOr`, bounded by `k`. -/
-def simplifyAndOrK (env : Env) (k : Nat) (e : Expr) : Expr :=
-  match k with
-  | 0 => e
-  | k + 1 =>
-  let pick (isAnd : Bool) (l r : Expr) : Expr :=
-    let r' := simplifyAndOrK env k r
-    let l' := simplifyAndOrK env k l
-    if alwaysTF env l' == some true || alwaysTF env r' == some false then (if isAnd then r' else l')
-    else if alwaysTF env r' == some true || alwaysTF env l' == some false then (if isAnd then l' else r')
-    else e
+/-- An AND (`isAnd`) or OR `e` with simplified sides `l'`, `r'`: the side
+    that decides it when the other is always true or always false. -/
+def andOrPick (env : Env) (isAnd : Bool) (e l' r' : Expr) : Expr :=
+  if alwaysTF env l' == some true || alwaysTF env r' == some false then (if isAnd then r' else l')
+  else if alwaysTF env r' == some true || alwaysTF env l' == some false then (if isAnd then l' else r')
+  else e
+
+/-- `sqlite3ExprSimplifiedAndOr`: an AND/OR with an always-true or
+    always-false side (after simplifying the sides) is the other side or that
+    side (`andOrPick`). -/
+def simplifyAndOr (env : Env) (e : Expr) : Expr :=
   match e with
-  | .binop .and l r => pick true l r
-  | .binop .or l r => pick false l r
+  | .binop .and l r => andOrPick env true e (simplifyAndOr env l) (simplifyAndOr env r)
+  | .binop .or l r => andOrPick env false e (simplifyAndOr env l) (simplifyAndOr env r)
   | _ => e
 
 /-- The simplified form of an AND/OR when it differs from it (`pAlt!=pExpr`). -/
 def andOrAlt (env : Env) (e : Expr) : Option Expr :=
   match e with
   | .binop .and l r | .binop .or l r =>
-    let r' := simplifyAndOrK env syntaxFuel r
-    let l' := simplifyAndOrK env syntaxFuel l
+    let r' := simplifyAndOr env r
+    let l' := simplifyAndOr env l
     if alwaysTF env l' == some true || alwaysTF env r' == some false
        || alwaysTF env r' == some true || alwaysTF env l' == some false
-    then some (simplifyAndOrK env syntaxFuel e) else none
+    then some (simplifyAndOr env e) else none
   | _ => none
 
 /-- EP_Subquery: the expression contains a subquery. -/
-def hasSubqueryK (k : Nat) (e : Expr) : Bool :=
-  match k with
-  | 0 => false
-  | k + 1 =>
+def hasSubquery (e : Expr) : Bool :=
   match e with
   | .subquery _ | .exists_ _ | .inSelect .. | .inTable .. => true
-  | .unop _ a | .collate a _ | .cast a _ | .isNull _ a => hasSubqueryK k a
-  | .binop _ a b => hasSubqueryK k a || hasSubqueryK k b
-  | .between _ a b c => hasSubqueryK k a || hasSubqueryK k b || hasSubqueryK k c
-  | .inList _ a l => hasSubqueryK k a || l.any (hasSubqueryK k)
-  | .like _ _ a b c => hasSubqueryK k a || hasSubqueryK k b || c.any (hasSubqueryK k)
-  | .case_ b ws el => b.any (hasSubqueryK k) || ws.any (fun (x, y) => hasSubqueryK k x || hasSubqueryK k y) || el.any (hasSubqueryK k)
-  | .row l => l.any (hasSubqueryK k)
-  | .call _ _ args _ _ f _ => args.any (hasSubqueryK k) || f.any (hasSubqueryK k)
+  | .unop _ a | .collate a _ | .cast a _ | .isNull _ a => hasSubquery a
+  | .binop _ a b => hasSubquery a || hasSubquery b
+  | .between _ a b c => hasSubquery a || hasSubquery b || hasSubquery c
+  | .inList _ a l => hasSubquery a || l.attach.any fun ⟨x, _⟩ => hasSubquery x
+  | .like _ _ a b c => hasSubquery a || hasSubquery b || (match c with | some c => hasSubquery c | none => false)
+  | .case_ b ws el => (match b with | some b => hasSubquery b | none => false) ||
+      ws.attach.any (fun ⟨(x, y), _⟩ => hasSubquery x || hasSubquery y) ||
+      (match el with | some el => hasSubquery el | none => false)
+  | .row l => l.attach.any fun ⟨x, _⟩ => hasSubquery x
+  | .call _ _ args _ _ f _ => args.attach.any (fun ⟨x, _⟩ => hasSubquery x) ||
+      (match f with | some f => hasSubquery f | none => false)
   | _ => false
-
-def hasSubquery (e : Expr) : Bool := hasSubqueryK syntaxFuel e
+termination_by e
+decreasing_by syntax_wf
 
 /-- AND/OR of two truth values (OP_And, OP_Or). -/
 def andOrValue (isAnd : Bool) (x y : Value) : Value :=

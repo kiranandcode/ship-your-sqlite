@@ -710,14 +710,9 @@ def viewColumns (db : Db) (vc : ViewCols) (v : View) : Except Err (Array (Name �
       (nm, ty)
 where
   /-- `sqlite3ExprDataType`: 1 numeric, 2 text, 4 blob. -/
-  dataType (tabs : List (Name × Table)) (e : Expr) : Nat := dataTypeK syntaxFuel tabs e
-  /-- `dataType` with a depth bound (`syntaxFuel`, never exhausted by parsed SQL). -/
-  dataTypeK (k : Nat) (tabs : List (Name × Table)) (e0 : Expr) : Nat :=
-    match k with
-    | 0 => 0
-    | k + 1 =>
+  dataType (tabs : List (Name × Table)) (e0 : Expr) : Nat :=
     match e0 with
-    | .collate e _ | .unop .pos e => dataTypeK k tabs e
+    | .collate e _ | .unop .pos e => dataType tabs e
     | .lit .null => 0
     | .lit (.text _) => 2
     | .lit (.blob _) => 4
@@ -733,8 +728,10 @@ where
       | some .blob | none => 7
       | _ => 5
     | .case_ _ whens els =>
-      whens.foldl (fun m (_, r) => m ||| dataTypeK k tabs r) (match els with | some e => dataTypeK k tabs e | none => 0)
+      whens.attach.foldl (fun m ⟨(_, r), _⟩ => m ||| dataType tabs r) (match els with | some e => dataType tabs e | none => 0)
     | _ => 1
+  termination_by e0
+  decreasing_by syntax_wf
   tablesOfFrom : FromItem → List (Name × Table)
     | .table sch n alias _ =>
       let t := match sch with

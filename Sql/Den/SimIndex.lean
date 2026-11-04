@@ -347,15 +347,12 @@ theorem alwaysTF (x : Expr) : Sql.alwaysTF env1 x = Sql.alwaysTF env2 x := by
   unfold Sql.alwaysTF
   split <;> simp only [h.res]
 
-theorem simplifyAndOrK : ∀ k x, Sql.simplifyAndOrK env1 k x = Sql.simplifyAndOrK env2 k x := by
-  intro k
-  induction k with
-  | zero => intro x; rfl
-  | succ k ih => intro x; simp only [Sql.simplifyAndOrK, ih, h.alwaysTF]
+theorem simplifyAndOr (x : Expr) : Sql.simplifyAndOr env1 x = Sql.simplifyAndOr env2 x := by
+  fun_induction Sql.simplifyAndOr env1 x <;> simp_all [Sql.simplifyAndOr, andOrPick, h.alwaysTF]
 
 theorem andOrAlt (x : Expr) : Sql.andOrAlt env1 x = Sql.andOrAlt env2 x := by
   unfold Sql.andOrAlt
-  simp only [h.simplifyAndOrK, h.alwaysTF]
+  simp only [h.simplifyAndOr, h.alwaysTF]
 
 theorem compileTerm (x : Expr) : Sql.compileTerm env1 x = Sql.compileTerm env2 x := by
   unfold Sql.compileTerm

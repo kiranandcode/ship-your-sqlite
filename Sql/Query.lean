@@ -41,42 +41,37 @@ def isAggCall (name : Name) (nargs : Nat) (star : Bool) (over : Bool) : Bool :=
   else if n == "count" then star || nargs ≤ 1
   else aggNames.contains n
 
-mutual
 /-- Does an expression contain an aggregate call (not inside a subquery)? -/
-def hasAgg.go (k : Nat)  (x : Expr) : Bool :=
-  match k with
-  | 0 => false
-  | k + 1 =>
+def hasAgg (x : Expr) : Bool :=
   match x with
-  | .call n _ args star _ _ over => isAggCall n args.length star over.isSome || args.any (hasAgg.go k)
-  | .unop _ e | .collate e _ | .cast e _ | .isNull _ e => (hasAgg.go k) e
-  | .binop _ a b => (hasAgg.go k) a || (hasAgg.go k) b
-  | .between _ a b c => (hasAgg.go k) a || (hasAgg.go k) b || (hasAgg.go k) c
-  | .inList _ e l => (hasAgg.go k) e || l.any (hasAgg.go k)
-  | .inSelect _ e _ | .inTable _ e _ _ _ => (hasAgg.go k) e
-  | .like _ _ a b c => (hasAgg.go k) a || (hasAgg.go k) b || (c.map (hasAgg.go k)).getD false
-  | .case_ b ws e => (b.map (hasAgg.go k)).getD false || ws.any (fun (x, y) => (hasAgg.go k) x || (hasAgg.go k) y) || (e.map (hasAgg.go k)).getD false
-  | .row l => l.any (hasAgg.go k)
+  | .call n _ args star _ _ over => isAggCall n args.length star over.isSome || args.attach.any fun ⟨a, _⟩ => hasAgg a
+  | .unop _ e | .collate e _ | .cast e _ | .isNull _ e => hasAgg e
+  | .binop _ a b => hasAgg a || hasAgg b
+  | .between _ a b c => hasAgg a || hasAgg b || hasAgg c
+  | .inList _ e l => hasAgg e || l.attach.any fun ⟨a, _⟩ => hasAgg a
+  | .inSelect _ e _ | .inTable _ e _ _ _ => hasAgg e
+  | .like _ _ a b c => hasAgg a || hasAgg b || (match c with | some c => hasAgg c | none => false)
+  | .case_ b ws e => (match b with | some b => hasAgg b | none => false) ||
+      ws.attach.any (fun ⟨(x, y), _⟩ => hasAgg x || hasAgg y) || (match e with | some e => hasAgg e | none => false)
+  | .row l => l.attach.any fun ⟨a, _⟩ => hasAgg a
   | _ => false
+termination_by x
+decreasing_by syntax_wf
 
-def hasWindow.go (k : Nat)  (x : Expr) : Bool :=
-  match k with
-  | 0 => false
-  | k + 1 =>
+/-- Does an expression contain a window function call (not inside a subquery)? -/
+def hasWindow (x : Expr) : Bool :=
   match x with
-  | .call _ _ args _ _ _ over => over.isSome || args.any (hasWindow.go k)
-  | .unop _ e | .collate e _ | .cast e _ | .isNull _ e => (hasWindow.go k) e
-  | .binop _ a b => (hasWindow.go k) a || (hasWindow.go k) b
-  | .between _ a b c => (hasWindow.go k) a || (hasWindow.go k) b || (hasWindow.go k) c
-  | .inList _ e l => (hasWindow.go k) e || l.any (hasWindow.go k)
-  | .case_ b ws e => (b.map (hasWindow.go k)).getD false || ws.any (fun (x, y) => (hasWindow.go k) x || (hasWindow.go k) y) || (e.map (hasWindow.go k)).getD false
-  | .like _ _ a b c => (hasWindow.go k) a || (hasWindow.go k) b || (c.map (hasWindow.go k)).getD false
+  | .call _ _ args _ _ _ over => over.isSome || args.attach.any fun ⟨a, _⟩ => hasWindow a
+  | .unop _ e | .collate e _ | .cast e _ | .isNull _ e => hasWindow e
+  | .binop _ a b => hasWindow a || hasWindow b
+  | .between _ a b c => hasWindow a || hasWindow b || hasWindow c
+  | .inList _ e l => hasWindow e || l.attach.any fun ⟨a, _⟩ => hasWindow a
+  | .case_ b ws e => (match b with | some b => hasWindow b | none => false) ||
+      ws.attach.any (fun ⟨(x, y), _⟩ => hasWindow x || hasWindow y) || (match e with | some e => hasWindow e | none => false)
+  | .like _ _ a b c => hasWindow a || hasWindow b || (match c with | some c => hasWindow c | none => false)
   | _ => false
-end
-
-def hasWindow (x : Expr) : Bool := hasWindow.go syntaxFuel x
-
-def hasAgg (x : Expr) : Bool := hasAgg.go syntaxFuel x
+termination_by x
+decreasing_by syntax_wf
 
 /-! ## Name resolution -/
 

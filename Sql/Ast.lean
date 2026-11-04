@@ -241,3 +241,14 @@ instance : Inhabited Stmt := ⟨.commit⟩
 instance : Inhabited TriggerEvent := ⟨.delete⟩
 
 end Sql
+
+/-- The termination proofs of walks over syntax: recursion on `sizeOf`, into
+    list elements through `List.attach` (of a list, or of a flattened list of
+    lists). -/
+macro "syntax_wf" : tactic =>
+  `(tactic| all_goals (simp_wf <;> first
+      | omega
+      | (have := List.sizeOf_lt_of_mem ‹_ ∈ _›;
+         (try simp only [Prod.mk.sizeOf_spec, Sql.OrderTerm.mk.sizeOf_spec, Sql.Cte.mk.sizeOf_spec, Sql.ResultCol.expr.sizeOf_spec] at *); omega)
+      | (obtain ⟨_, h1, h2⟩ := List.mem_flatten.mp ‹_ ∈ _›;
+         have := List.sizeOf_lt_of_mem h1; have := List.sizeOf_lt_of_mem h2; omega)))
