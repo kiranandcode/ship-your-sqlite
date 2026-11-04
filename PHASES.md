@@ -130,6 +130,84 @@ index scan, the random rowid after 2^63−1) and are triaged by hand.
   steps/s per `sqlite_run` process, so a sqllogictest file runs in parallel
   processes, not in one.
 
+## Phase 2.6: the denotational semantics (Kiran, 2026-11-04)
+
+The specification is a denotational semantics, `Sql/Den/`: meaning functions
+from syntax to sets of outcomes, with least fixed points for every recursion,
+and no fuel, choice oracle or evaluation strategy. The interpreter (`Sql/`,
+`sql_run`) stays as the executable tested against `sqlite3`, and is proved
+sound for the denotation: if it finishes, its output is in the denotation.
+
+### Design
+
+- **Domain.** `Nd α := Set α`, the monad of sets of outcomes (`pure a = {a}`,
+  `s >>= f = ⋃ a ∈ s, f a`), ordered by inclusion. The meaning monad is the
+  interpreter's with `Id` replaced by `Nd`: `D α := ExceptT Err (StateT DCtx Nd) α`,
+  so a computation is `DCtx → Set (Except Err α × DCtx)` (the state is kept
+  with an error, as SQLite keeps an ON CONFLICT FAIL statement's rows).
+  *Why sets, ordered by ⊆ (the Hoare, "may" powerdomain of a discrete set):*
+  the refinement theorem says every terminating behaviour of SQLite is a
+  denoted outcome, so the denotation is the set of possible terminating
+  outcomes; divergence contributes nothing (∅ is ⊥), and the least fixed
+  point is the smallest such set, i.e. the strongest theorem (a larger fixed
+  point would admit junk outcomes for a non-terminating recursive CTE).
+  `Part` is the deterministic special case (at most one outcome) and cannot
+  express row order, ties or `random()`.
+- **Fixed points.** `Nd` is a complete lattice, hence a CCPO; core Lean lifts
+  the CCPO and monotone-bind instances through `ExceptT` and `StateT`, so
+  every recursive meaning function (expressions with subqueries, queries,
+  CTEs including recursive ones, statements, triggers including recursive
+  triggers) is defined with `partial_fixpoint`, i.e. as `Lean.Order.fix`, the
+  least fixed point; monotonicity is proved by the `monotonicity` tactic.
+  `Sql/Den/Domain.lean` proves that this fixed point is Mathlib's
+  `OrderHom.lfp` of the same functional on the complete lattice (Knaster–Tarski),
+  so the order theory is Mathlib's.
+- **Nondeterminism as sets.** Where SQL leaves the choice to the plan, the
+  denotation takes all of them: `perm xs = {ys | ys ~ xs}` (`List.Perm`) for
+  scan order, the nesting order of a join, the order of the rows a SELECT
+  hands out (ORDER BY then only constrains it: any order sorted by the keys,
+  so ties are free), group representatives and aggregate input order;
+  `random()`, `randomblob()`, the random rowid after 2^63−1 and the clock
+  are any value of their type.
+- **No strategy.** FROM is the product of its sources visited in some nested
+  order, WHERE a filter; a SELECT hands out rows one by one over that
+  sequence (so an error leaves the rows printed before it, and LIMIT ends the
+  sequence), which is observable behaviour, not strategy. No automatic
+  index, greedy nesting, memoisation or fuel.
+- **Shared, deterministic.** Value-level functions stay total functions and
+  are used by both: values and conversions, comparison, affinity, collation,
+  casts, arithmetic, printf, date/time, JSON, the parser, name resolution,
+  schema-text rewriting, PRAGMA computations. Where one still uses fuel or a
+  syntax bound (`syntaxFuel`, `evalFuel` in `staticStmt`), the denotation uses
+  a structural or `partial_fixpoint` version instead.
+- **Scripts.** `⟦src⟧ : Set ByteArray`: the driver's loop over the statements
+  the parser finds, each statement's meaning applied to the state.
+
+### Soundness and precision
+
+- `Sql.Den.sound_Statement`: for all choices, fuel and scripts, if
+  `runScriptWith ch fuel src` does not run out of fuel, its output is in
+  `⟦src⟧`. By induction on fuel for each of the interpreter's mutual blocks,
+  unfolding the denotation with `fix_eq`, plus one lemma per strategy of the
+  interpreter (the automatic index visits exactly the matching rows; greedy
+  nesting and the choice oracle pick an element of `perm`; memoised local
+  conjuncts are evaluated as in the nested loop).
+- `Sql.Derives` becomes membership in `⟦src⟧`; the theorem of
+  `Spec/Refines.lean` refers to the denotation.
+- Precision (later): the converse, every denoted outcome is the interpreter's
+  for some choices and fuel, so that the denotation has no outcome beyond the
+  plan's choices.
+
+| step | exit criterion | status |
+|---|---|---|
+| 2.6a Mathlib | pinned to v4.32.1 (the toolchain's tag), oleans from the cache, builds on /data | done (`lakefile.toml`, rev 520045a) |
+| 2.6b domain | `Nd`, `D`, their order, CCPO and MonoBind instances, `perm`, `fix = lfp` | |
+| 2.6c expressions | `⟦e⟧` for every expression form, scalar and aggregate functions through the shared library | |
+| 2.6d queries | FROM, WHERE, GROUP BY, HAVING, windows, DISTINCT, ORDER BY, LIMIT, compounds, CTEs (recursive as least fixed points), streaming and partial output | |
+| 2.6e statements | DML with conflict resolution, triggers (recursive as least fixed points), foreign keys, DDL, transactions, PRAGMA, ATTACH | |
+| 2.6f scripts | `⟦src⟧`, `Derives` redefined, `Spec/Refines.lean` updated | |
+| 2.6g soundness | `sound_Statement` proved | |
+
 ## Phase 3: refinement
 
 Decomposition (to be tested by a pilot before it is adopted): SQLite compiles
