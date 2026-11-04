@@ -204,9 +204,9 @@ sound for the denotation: if it finishes, its output is in the denotation.
 | 2.6b domain | `Nd`, `D`, their order, CCPO and MonoBind instances, `perm`, `fix = lfp` | done (`Sql/Den/Domain.lean`): plus monotonicity lemmas for `try … catch` and loops over ranges, which core lacks; `Sql/Den/Join.lean`: SQLite's nested loops as `joinLoops`, monotone in the actions of its depths |
 | 2.6c expressions | `⟦e⟧` for every expression form, scalar and aggregate functions through the shared library | first version with 2.6d (`Sql/Den/Select.lean`) |
 | 2.6d queries | FROM, WHERE, GROUP BY, HAVING, windows, DISTINCT, ORDER BY, LIMIT, compounds, CTEs (recursive as least fixed points), streaming and partial output | first version (`Sql/Den/Select.lean`, 1,689 lines, axioms propext/choice/Quot.sound): derived from the interpreter by `scripts/dev/denize.py` (no fuel, `M` → `D`, every recursive meaning function a `partial_fixpoint`) and `scripts/dev/den_select_edits.py` (choices as sets: scan, nesting and output orders `perm`, `random()`/`randomblob()` any value, the clock a per-statement state; the join as a plan and `joinLoops`, no index, greedy nesting or memo, a depth's conjuncts in any order; a recursive CTE's queue as `cteLoop`, a least fixed point). Debts: `viewCols` (view column metadata for PRAGMA) calls the interpreter; pure syntax walks (`exprRefs`, `hasAgg`, `exprAff`, …) still carry `syntaxFuel` |
-| 2.6e statements | DML with conflict resolution, triggers (recursive as least fixed points), foreign keys, DDL, transactions, PRAGMA, ATTACH | |
-| 2.6f scripts | `⟦src⟧`, `Derives` redefined, `Spec/Refines.lean` updated | |
-| 2.6g soundness | `sound_Statement` proved | |
+| 2.6e statements | DML with conflict resolution, triggers (recursive as least fixed points), foreign keys, DDL, transactions, PRAGMA, ATTACH | first version (`Sql/Den/Resolve.lean`, `Sql/Den/Exec.lean`): UPDATE/DELETE order and UPDATE FROM's row `perm`, the random rowid any 100 candidates in [1, 2^62] (SQLITE_FULL if all taken; the interpreter now does exactly this), the clock any value per statement |
+| 2.6f scripts | `⟦src⟧`, `Derives` redefined, `Spec/Refines.lean` updated | done: `Den.runScript : ByteArray → Nd ByteArray` (the driver's loop), `Den.Derives src out := out ∈ runScript src`; `Spec/Refines.lean`'s `sound` field refers to it (CCLib and Mathlib build together) |
+| 2.6g soundness | `sound_Statement` proved | stated (`Sql/Den/Sound.lean`), with `derives_of_sound` (the old choice-oracle relation is contained in the denotation) and `runScript_den` proved from it |
 
 ## Phase 3: refinement
 
@@ -231,7 +231,8 @@ SQL to VDBE bytecode and runs it over a B-tree. Three layers, one theorem:
 
 | name | file | statement | status |
 |---|---|---|---|
-| `SqliteRefines_Statement` | `Spec/Refines.lean` | `Refines Sqlprog.prog` (BRIEF.md) | stated; open; false on BUGS.md #3 until decision 1 |
+| `SqliteRefines_Statement` | `Spec/Refines.lean` | `Refines Sqlprog.prog` (BRIEF.md), `sound` into `Den.Derives` | stated; open; false on BUGS.md #3 until decision 1 |
+| `Den.sound_Statement` | `Sql/Den/Sound.lean` | the interpreter's output, when its fuel does not run out, is denoted | stated; open (2.6g) |
 
 ## Gaps (reductions to close)
 

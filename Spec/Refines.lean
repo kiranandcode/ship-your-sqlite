@@ -2,13 +2,14 @@
   The refinement theorem (Phase 3.1), stated: SQLite's Clight program, run on
   a script under the extended Clight semantics (`Run.StepX`: clean's step plus
   the three extensions of TRUST.md), terminates, and what it prints is an
-  output the SQL semantics derives (`Sql.Derives`).
+  output of the script in the denotational semantics (`Sql.Den.Derives`:
+  membership in `Sql.Den.runScript`, Phase 2.6).
 
   Not proved: `SqliteRefines_Statement` is a `Prop` (CLAUDE.md law 2), listed
   under Obligations in PHASES.md.
 -/
 import Run.StepX
-import Sql.Derives
+import Sql.Den.Exec
 
 namespace Spec
 
@@ -62,7 +63,7 @@ structure Admissible (script : ByteArray) : Prop where
     statement does not import the 47 MB export. -/
 structure Refines (p : CC.Program) : Prop where
   terminates : ∀ script, Admissible script → ∃ out, Run.ClightRuns p script out
-  sound : ∀ script, Admissible script → ∀ out, Run.ClightRuns p script out → Derives script out
+  sound : ∀ script, Admissible script → ∀ out, Run.ClightRuns p script out → Den.Derives script out
 
 /-- Phase 3's theorem, about the export. Known false as stated on the scripts
     of BUGS.md #3 (a NaN converted to an integer: the Clight run is stuck, so
